@@ -282,6 +282,10 @@ impl Ctx {
                 self.enabled = hyperkey.enabled;
                 self.update(true);
             }
+            KeyboardCommand::SetPaused(paused) => {
+                self.paused = paused;
+                self.update(false);
+            }
             KeyboardCommand::Shutdown => {
                 release_all();
                 self.uninstall_hook();

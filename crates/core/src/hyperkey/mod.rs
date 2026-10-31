@@ -20,6 +20,8 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 pub enum KeyboardCommand {
     /// New config (sent on startup and on every reload).
     Apply { hyperkey: Hyperkey },
+    /// Tray "Pause" (runtime only).
+    SetPaused(bool),
     /// Release everything, unhook and end the thread.
     Shutdown,
 }
@@ -42,6 +44,10 @@ impl KeyboardController {
         self.send(KeyboardCommand::Apply {
             hyperkey: hyperkey.clone(),
         });
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        self.send(KeyboardCommand::SetPaused(paused));
     }
 
     /// Releases any held modifiers, removes the hook and joins the thread.

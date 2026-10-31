@@ -18,16 +18,16 @@ use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use ::windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NIN_SELECT,
-    NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
+    NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use ::windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
     DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, IDI_APPLICATION,
-    LoadIconW, MF_SEPARATOR, MF_STRING, MSG, MSGFLT_ALLOW, PostMessageW, RegisterClassExW,
-    RegisterWindowMessageW, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU,
-    WM_ENDSESSION, WM_NULL, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_OVERLAPPED,
+    LoadIconW, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MSGFLT_ALLOW, PostMessageW,
+    RegisterClassExW, RegisterWindowMessageW, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CLOSE,
+    WM_CONTEXTMENU, WM_ENDSESSION, WM_NULL, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_OVERLAPPED,
 };
 use ::windows::core::{BOOL, PCWSTR, w};
 
@@ -41,6 +41,7 @@ const TRAY_ICON_ID: u32 = 1;
 const NIN_KEYSELECT: u32 = NIN_SELECT | 1;
 const MENU_SETTINGS: usize = 1;
 const MENU_QUIT: usize = 2;
+const MENU_PAUSE: usize = 3;
 
 /// The hidden window, for the console Ctrl+C handler (runs on another thread).
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -53,6 +54,36 @@ thread_local! {
     static HANDLER: RefCell<Option<Handler>> = const { RefCell::new(None) };
     static EXIT: Cell<bool> = const { Cell::new(false) };
     static TOOLTIP: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
+    static PAUSED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Updates the Pause check mark and the tooltip (`<tooltip> (paused)`). Call on the tray thread.
+pub fn set_tray_paused(paused: bool) {
+    PAUSED.set(paused);
+    let hwnd = MAIN_HWND.load(Ordering::Relaxed);
+    if hwnd == 0 {
+        return;
+    }
+    let mut nid = icon_data(HWND(hwnd as *mut _));
+    nid.uFlags = NIF_TIP | NIF_SHOWTIP;
+    fill_tooltip(&mut nid);
+    // SAFETY: `nid` identifies our icon and is alive for the call.
+    let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) };
+}
+
+/// Copies the tooltip (with the paused suffix if needed) into `nid.szTip`.
+fn fill_tooltip(nid: &mut NOTIFYICONDATAW) {
+    let suffix = if PAUSED.get() { " (paused)" } else { "" };
+    TOOLTIP.with_borrow(|t| {
+        let max = nid.szTip.len() - 1;
+        let text = t.iter().copied().chain(suffix.encode_utf16()).take(max);
+        let mut n = 0;
+        for (slot, c) in nid.szTip.iter_mut().zip(text) {
+            *slot = c;
+            n += 1;
+        }
+        nid.szTip[n] = 0;
+    });
 }
 
 /// Owner window of the tray icon. Lives on the thread that created it.
@@ -203,10 +234,7 @@ fn add_icon(hwnd: HWND) -> io::Result<()> {
     nid.uCallbackMessage = WM_APP_TRAY;
     // SAFETY: loads a shared stock icon; it must not be destroyed.
     nid.hIcon = unsafe { LoadIconW(None, IDI_APPLICATION) }.map_err(io::Error::other)?;
-    TOOLTIP.with_borrow(|t| {
-        let n = t.len().min(nid.szTip.len() - 1);
-        nid.szTip[..n].copy_from_slice(&t[..n]);
-    });
+    fill_tooltip(&mut nid);
     nid.Anonymous.uVersion = NOTIFYICON_VERSION_4;
     // SAFETY: `nid` is fully initialized and alive for the calls.
     unsafe {
@@ -230,6 +258,12 @@ fn show_menu(hwnd: HWND, x: i32, y: i32) -> Option<Event> {
     unsafe {
         let menu = CreatePopupMenu().ok()?;
         let _ = AppendMenuW(menu, MF_STRING, MENU_SETTINGS, w!("Settings"));
+        let check = if PAUSED.get() {
+            MF_CHECKED
+        } else {
+            MF_UNCHECKED
+        };
+        let _ = AppendMenuW(menu, MF_STRING | check, MENU_PAUSE, w!("Pause"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit"));
         // Needed so the menu closes when the user clicks elsewhere.
@@ -247,6 +281,7 @@ fn show_menu(hwnd: HWND, x: i32, y: i32) -> Option<Event> {
         let _ = DestroyMenu(menu);
         match cmd.0 as usize {
             MENU_SETTINGS => Some(Event::OpenSettings),
+            MENU_PAUSE => Some(Event::TogglePause),
             MENU_QUIT => Some(Event::Quit),
             _ => None,
         }

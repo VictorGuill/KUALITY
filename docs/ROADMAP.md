@@ -30,7 +30,7 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 - [x] Injected events tagged, no feedback loops, no key-repeat spam
 - [x] Mask key before releasing so Start menu / menu bar don't open
 - [ ] Office key disabled while enabled, restored when disabled
-- [ ] Toggle via `hyperkey.enabled` (hot-reload) and tray "Pause"
+- [x] Toggle via `hyperkey.enabled` (hot-reload) and tray "Pause"
 - [x] Safe recovery: modifiers never left stuck (on quit, crash, lock screen)
 
 **Done when:** holding CapsLock + T in any app is received as Ctrl+Shift+Alt+Win+T, tapping it alone does nothing visible.

@@ -18,7 +18,7 @@ pub use instance::Instance;
 pub use keyboard::Keyboard;
 pub use shell::open_with_default_app;
 pub use time::local_time_now;
-pub use tray::Tray;
+pub use tray::{Tray, set_tray_paused};
 pub use watcher::Watcher;
 
 use ::windows::Win32::System::Com::{

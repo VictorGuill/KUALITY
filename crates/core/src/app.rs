@@ -19,6 +19,8 @@ pub struct App<W: DirWatcher> {
     reloads: Receiver<Box<Config>>,
     watcher: Option<W>,
     keyboard: Option<KeyboardController>,
+    /// Tray "Pause" (runtime only, keyboard features only).
+    paused: bool,
 }
 
 impl<W: DirWatcher> App<W> {
@@ -36,6 +38,7 @@ impl<W: DirWatcher> App<W> {
             reloads,
             watcher,
             keyboard,
+            paused: false,
         };
         if let Some(k) = &app.keyboard {
             k.apply(&app.config.hyperkey);
@@ -58,6 +61,18 @@ impl<W: DirWatcher> App<W> {
                 if let Err(e) = platform::open_with_default_app(&self.config_path) {
                     log::error!("could not open {}: {e}", self.config_path.display());
                 }
+                ControlFlow::Continue(())
+            }
+            Event::TogglePause => {
+                self.paused = !self.paused;
+                log::info!(
+                    "keyboard features {}",
+                    if self.paused { "paused" } else { "resumed" }
+                );
+                if let Some(k) = &self.keyboard {
+                    k.set_paused(self.paused);
+                }
+                platform::set_tray_paused(self.paused);
                 ControlFlow::Continue(())
             }
             Event::Quit => {
