@@ -1,5 +1,6 @@
 //! Windows implementation of the platform layer.
 
+mod actions;
 mod crash;
 mod dpi;
 mod folders;
@@ -13,6 +14,7 @@ mod time;
 mod tray;
 mod watcher;
 
+pub use actions::{action_thread_init, action_thread_run, action_thread_stop, action_thread_wake};
 pub use crash::install_crash_guard;
 pub use dpi::dpi_awareness;
 pub use folders::roaming_app_data_dir;
@@ -30,11 +32,6 @@ use ::windows::Win32::System::Com::{
 
 /// Per-thread setup for the main (UI) thread: COM in STA mode, needed by `ShellExecuteW`.
 pub fn init_main_thread() {
-    init_sta();
-}
-
-/// Per-thread setup for the action worker: COM in STA mode, needed by `ShellExecuteExW`.
-pub fn init_action_thread() {
     init_sta();
 }
 

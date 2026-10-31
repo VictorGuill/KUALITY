@@ -381,6 +381,21 @@ pub(crate) fn request_quit() {
     }
 }
 
+/// Id of the thread that owns the main window (0 if it does not exist). Any thread.
+pub(crate) fn main_thread_id() -> u32 {
+    let hwnd = MAIN_HWND.load(Ordering::Relaxed);
+    if hwnd == 0 {
+        return 0;
+    }
+    // SAFETY: plain window query; a stale HWND only returns 0.
+    unsafe {
+        ::windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+            HWND(hwnd as *mut _),
+            None,
+        )
+    }
+}
+
 /// Debug console events → clean shutdown through `WM_CLOSE`.
 ///
 /// Ctrl+C / Ctrl+Break: the handler returns and the main loop quits. Console closed (e.g.

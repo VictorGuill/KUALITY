@@ -12,7 +12,7 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
 };
 use ::windows::core::{PCWSTR, w};
 
-use super::wide;
+use super::{input, wide};
 
 /// Opens `path` with its default program; falls back to Notepad if there is no association.
 pub fn open_with_default_app(path: &Path) -> io::Result<()> {
@@ -126,8 +126,14 @@ fn shell_execute(file: &str, params: &str, dir: Option<&str>) -> io::Result<()> 
         nShow: SW_SHOWNORMAL.0,
         ..Default::default()
     };
-    // SAFETY: lets whatever we start take the foreground; no pointers.
-    let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+    // Lets whatever we start (or the running app a URL is handed to) take the foreground.
+    // `AllowSetForegroundWindow` only works if this process may set the foreground itself, which
+    // the empty input event grants (see `input::claim_last_input`).
+    let claimed = input::claim_last_input();
+    // SAFETY: no pointers.
+    if let Err(e) = unsafe { AllowSetForegroundWindow(ASFW_ANY) } {
+        log::debug!("AllowSetForegroundWindow failed (input claimed: {claimed}): {e}");
+    }
     // SAFETY: `info` is initialized and its strings are NUL-terminated buffers that outlive the
     // call.
     unsafe { ShellExecuteExW(&mut info) }.map_err(io::Error::other)
