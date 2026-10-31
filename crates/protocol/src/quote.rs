@@ -1,4 +1,5 @@
-//! Windows command-line quoting (portable string logic).
+//! Windows command-line quoting (portable string logic). Used by the core to build `launch`
+//! parameters and by the settings app to show an argument list as one line.
 //!
 //! Follows the rules `CommandLineToArgvW` and the MSVC runtime use to split a command line, so
 //! each list element reaches the launched program as exactly one argument.

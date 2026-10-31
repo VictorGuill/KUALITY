@@ -6,13 +6,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use kuality_protocol::{
-    Action, BindingEntry, Chord, Key, LaunchArgs, Shortcuts, parse_chord, parse_key,
+    Action, BindingEntry, Chord, Key, LaunchAction, LaunchArgs, OpenUrlAction, SendHotkeyAction,
+    Shortcuts, parse_chord, parse_key, valid_url,
 };
 
-use crate::actions::quote;
-
-/// Longest accepted `open_url` value.
-const MAX_URL_LEN: usize = 2048;
+use kuality_protocol::quote;
 
 /// Source of [`CompiledBindings::generation`].
 static GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -168,7 +166,9 @@ fn compile_one(key: &str, action: &Action) -> Result<(Key, CompiledAction), Skip
         return Err(SkipReason::ModifierTrigger);
     }
     let action = match action {
-        Action::Launch { path, args, cwd } => {
+        Action::Launch(LaunchAction {
+            path, args, cwd, ..
+        }) => {
             if path.trim().is_empty() {
                 return Err(SkipReason::EmptyPath);
             }
@@ -186,10 +186,10 @@ fn compile_one(key: &str, action: &Action) -> Result<(Key, CompiledAction), Skip
                     .map(String::from),
             }
         }
-        Action::SendHotkey { keys } => {
+        Action::SendHotkey(SendHotkeyAction { keys, .. }) => {
             CompiledAction::SendHotkey(parse_chord(keys).map_err(SkipReason::BadChord)?)
         }
-        Action::OpenUrl { url } => {
+        Action::OpenUrl(OpenUrlAction { url, .. }) => {
             let url = url.trim();
             if !valid_url(url) {
                 return Err(SkipReason::BadUrl);
@@ -198,19 +198,6 @@ fn compile_one(key: &str, action: &Action) -> Result<(Key, CompiledAction), Skip
         }
     };
     Ok((key, action))
-}
-
-/// `^[A-Za-z][A-Za-z0-9+.-]*:` and at most [`MAX_URL_LEN`] characters.
-fn valid_url(url: &str) -> bool {
-    if url.chars().count() > MAX_URL_LEN {
-        return false;
-    }
-    let Some((scheme, _)) = url.split_once(':') else {
-        return false;
-    };
-    let mut chars = scheme.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
 }
 
 #[cfg(test)]

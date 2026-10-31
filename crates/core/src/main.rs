@@ -13,7 +13,6 @@ mod config_store;
 mod hyperkey;
 mod logging;
 mod overlay;
-mod paths;
 mod platform;
 mod shortcuts;
 
@@ -26,8 +25,8 @@ use actions::ActionWorker;
 use app::App;
 use config_store::{LoadStatus, ReloadOutcome, Reloader};
 use hyperkey::KeyboardController;
+use kuality_protocol::paths::{DataDir, DataDirSource};
 use overlay::OverlayController;
-use paths::{DataDir, DataDirSource};
 use platform::{DirWatcher, SingleInstance, TrayIcon, Waker};
 
 /// Named mutex for single instance (per user session, shared by installed and portable copies).

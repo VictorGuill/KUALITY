@@ -209,7 +209,7 @@ pub fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paths::test_util::TempDir;
+    use kuality_protocol::test_util::TempDir;
 
     const T: LocalTime = LocalTime {
         year: 2026,

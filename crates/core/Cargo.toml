@@ -16,6 +16,9 @@ kuality-protocol.workspace = true
 log.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+kuality-protocol = { workspace = true, features = ["test-util"] }
+
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [

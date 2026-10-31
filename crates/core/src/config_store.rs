@@ -1,10 +1,11 @@
 //! Loading, creating, saving and reloading `config.json`. OS-independent.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use kuality_protocol::Config;
+use kuality_protocol::store;
 
 /// Result of the startup load.
 #[derive(Debug)]
@@ -72,27 +73,8 @@ pub fn load_or_create(path: &Path) -> Loaded {
 /// Writes `config` to `path` atomically (temp file + rename). Returns the bytes written.
 pub fn save(path: &Path, config: &Config) -> io::Result<Vec<u8>> {
     let bytes = config.to_json_pretty().map_err(io::Error::other)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = tmp_path(path);
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
-    }
-    // On Windows `fs::rename` uses MoveFileExW with MOVEFILE_REPLACE_EXISTING.
-    if let Err(e) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(e);
-    }
+    store::write_atomic(path, &bytes)?;
     Ok(bytes)
-}
-
-fn tmp_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
-    path.with_file_name(name)
 }
 
 /// Outcome of a reload check.
@@ -169,7 +151,7 @@ pub fn changed_sections(old: &Config, new: &Config) -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paths::test_util::TempDir;
+    use kuality_protocol::test_util::TempDir;
 
     #[test]
     fn creates_file_with_defaults_when_missing() {
@@ -181,7 +163,7 @@ mod tests {
         let on_disk = fs::read(&path).unwrap();
         assert_eq!(Some(on_disk.clone()), loaded.bytes);
         assert_eq!(Config::from_json(&on_disk).unwrap(), Config::default());
-        assert!(!tmp_path(&path).exists());
+        assert!(!store::tmp_path(&path).exists());
     }
 
     #[test]

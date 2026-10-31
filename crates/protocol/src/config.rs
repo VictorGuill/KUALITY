@@ -127,22 +127,72 @@ fn default_true() -> bool {
     true
 }
 
-/// What a binding does, tagged by `type`.
+/// What a binding does, tagged by `type`. Each variant keeps its own unknown fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
     /// Open a program, document, folder or `shell:` path.
-    Launch {
-        path: String,
-        #[serde(default)]
-        args: LaunchArgs,
-        #[serde(default)]
-        cwd: Option<String>,
-    },
+    Launch(LaunchAction),
     /// Send one key chord, e.g. `"ctrl+shift+esc"`.
-    SendHotkey { keys: String },
+    SendHotkey(SendHotkeyAction),
     /// Open a URI with its default handler (`https:`, `mailto:`, `ms-settings:`…).
-    OpenUrl { url: String },
+    OpenUrl(OpenUrlAction),
+}
+
+impl Action {
+    /// The `type` value.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::Launch(_) => "launch",
+            Self::SendHotkey(_) => "send_hotkey",
+            Self::OpenUrl(_) => "open_url",
+        }
+    }
+}
+
+/// `type: "launch"`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LaunchAction {
+    pub path: String,
+    #[serde(default)]
+    pub args: LaunchArgs,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// `type: "send_hotkey"`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SendHotkeyAction {
+    pub keys: String,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// `type: "open_url"`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpenUrlAction {
+    pub url: String,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// Longest accepted `open_url` value, in characters.
+pub const MAX_URL_LEN: usize = 2048;
+
+/// `open_url` rule: `^[A-Za-z][A-Za-z0-9+.-]*:` and at most [`MAX_URL_LEN`] characters. The
+/// caller trims surrounding whitespace first.
+pub fn valid_url(url: &str) -> bool {
+    if url.chars().count() > MAX_URL_LEN {
+        return false;
+    }
+    let Some((scheme, _)) = url.split_once(':') else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
 }
 
 /// `launch.args`: a list (quoted and joined with Windows rules) or one raw string (verbatim).
@@ -639,26 +689,29 @@ mod tests {
         assert_eq!(b[0].name, "Notepad");
         assert_eq!(
             b[0].action,
-            Action::Launch {
+            Action::Launch(LaunchAction {
                 path: r"C:\Windows\notepad.exe".into(),
                 args: LaunchArgs::List(vec![]),
-                cwd: None
-            }
+                cwd: None,
+                extra: Extra::new()
+            })
         );
         // Optional fields default.
         assert_eq!(b[1].name, "");
         assert!(b[1].enabled);
         assert_eq!(
             b[1].action,
-            Action::SendHotkey {
-                keys: "ctrl+shift+esc".into()
-            }
+            Action::SendHotkey(SendHotkeyAction {
+                keys: "ctrl+shift+esc".into(),
+                extra: Extra::new()
+            })
         );
         assert_eq!(
             b[2].action,
-            Action::OpenUrl {
-                url: "https://github.com".into()
-            }
+            Action::OpenUrl(OpenUrlAction {
+                url: "https://github.com".into(),
+                extra: Extra::new()
+            })
         );
     }
 
@@ -673,27 +726,27 @@ mod tests {
         };
         assert_eq!(
             parse(json!({ "type": "launch", "path": "x", "args": ["a b", "c"] })),
-            Action::Launch {
+            Action::Launch(LaunchAction {
                 path: "x".into(),
                 args: LaunchArgs::List(vec!["a b".into(), "c".into()]),
-                cwd: None
-            }
+                ..LaunchAction::default()
+            })
         );
         assert_eq!(
             parse(json!({ "type": "launch", "path": "x", "args": "--raw \"q\"", "cwd": "C:\\" })),
-            Action::Launch {
+            Action::Launch(LaunchAction {
                 path: "x".into(),
                 args: LaunchArgs::Raw("--raw \"q\"".into()),
-                cwd: Some("C:\\".into())
-            }
+                cwd: Some("C:\\".into()),
+                extra: Extra::new()
+            })
         );
         assert_eq!(
             parse(json!({ "type": "launch", "path": "x" })),
-            Action::Launch {
+            Action::Launch(LaunchAction {
                 path: "x".into(),
-                args: LaunchArgs::default(),
-                cwd: None
-            }
+                ..LaunchAction::default()
+            })
         );
     }
 
@@ -726,6 +779,48 @@ mod tests {
             json!({ "key": "5", "name": "", "enabled": true, "note": "kept",
                     "action": { "type": "open_url", "url": "https://a.b" } })
         );
+    }
+
+    #[test]
+    fn unknown_action_fields_survive_round_trip() {
+        let input = json!({ "key": "a", "name": "", "enabled": true, "action":
+            { "type": "launch", "path": "x", "args": [], "cwd": null, "elevated": true } });
+        let e: BindingEntry = serde_json::from_value(input.clone()).unwrap();
+        let BindingEntry::Valid(b) = &e else {
+            panic!("expected a valid entry");
+        };
+        let Action::Launch(l) = &b.action else {
+            panic!("expected launch");
+        };
+        assert_eq!(l.extra["elevated"], json!(true));
+        assert_eq!(b.action.type_name(), "launch");
+        assert_eq!(serde_json::to_value(&e).unwrap(), input);
+        for action in [
+            json!({ "type": "send_hotkey", "keys": "win+d", "note": 1 }),
+            json!({ "type": "open_url", "url": "https://a.b", "note": [2] }),
+        ] {
+            let v = json!({ "key": "b", "name": "", "enabled": true, "action": action });
+            let e: BindingEntry = serde_json::from_value(v.clone()).unwrap();
+            assert!(matches!(e, BindingEntry::Valid(_)));
+            assert_eq!(serde_json::to_value(&e).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn url_rule() {
+        for ok in [
+            "https://a.b",
+            "mailto:x@y",
+            "ms-settings:display",
+            "a+b.c-d:x",
+        ] {
+            assert!(valid_url(ok), "{ok}");
+        }
+        for bad in ["", "github.com", "1http://x", "ht tp://x", ":x", "-a:b"] {
+            assert!(!valid_url(bad), "{bad}");
+        }
+        assert!(valid_url(&format!("a:{}", "x".repeat(MAX_URL_LEN - 2))));
+        assert!(!valid_url(&format!("a:{}", "x".repeat(MAX_URL_LEN - 1))));
     }
 
     #[test]

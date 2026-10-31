@@ -67,7 +67,7 @@ pub enum Action {
 #[serde(untagged)] pub enum LaunchArgs { List(Vec<String>), Raw(String) }   // Default = List(vec![])
 ```
 
-An unknown action `type` makes the entry `Invalid` (kept on save, skipped at runtime, logged once per load). Unknown fields at binding level survive via `extra`; unknown fields *inside* `action` are dropped on save (serde internally tagged enums cannot flatten extras; acceptable, the core never writes config in this phase anyway).
+An unknown action `type` makes the entry `Invalid` (kept on save, skipped at runtime, logged once per load). Unknown fields at binding level survive via `extra`. Since Phase 5 the `Action` variants are newtype variants over `LaunchAction` / `SendHotkeyAction` / `OpenUrlAction`, each with its own `extra` map, so unknown fields *inside* `action` survive a save too (see [settings.md](settings.md)).
 
 ### Key names (`protocol/src/keys.rs`)
 

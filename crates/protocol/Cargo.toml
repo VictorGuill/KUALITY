@@ -12,3 +12,7 @@ serde_json.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# Exposes `test_util` (temp dirs) to other crates' tests.
+test-util = []

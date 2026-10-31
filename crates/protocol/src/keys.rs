@@ -51,6 +51,11 @@ impl Key {
         matches!(self, Key::SHIFT | Key::CTRL | Key::ALT) || self.sided_modifier_index().is_some()
     }
 
+    /// Can be a shortcut trigger: not a modifier and not CapsLock.
+    pub fn is_trigger(self) -> bool {
+        self != Key::CAPSLOCK && !self.is_modifier()
+    }
+
     /// Canonical name, accepted by [`parse_key`]. Codes without a name are written as
     /// `vk:0xNN`.
     pub fn name(self) -> String {
@@ -296,6 +301,16 @@ pub fn parse_chord(s: &str) -> Result<Chord, KeyParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trigger_keys_exclude_modifiers_and_capslock() {
+        for k in ["a", "1", "f5", "space", "esc", "vk:0xE2"] {
+            assert!(parse_key(k).unwrap().is_trigger(), "{k}");
+        }
+        for k in ["capslock", "ctrl", "rshift", "alt", "win", "rwin"] {
+            assert!(!parse_key(k).unwrap().is_trigger(), "{k}");
+        }
+    }
 
     #[test]
     fn values_match_windows_vk_codes() {

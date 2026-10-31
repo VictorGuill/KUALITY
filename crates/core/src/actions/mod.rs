@@ -5,8 +5,6 @@
 //! shell may leave windows on it); jobs travel through a channel and a wake-up message. `send_hotkey` does not come here: it runs on the keyboard thread,
 //! which owns the injected Hyper modifiers.
 
-pub mod quote;
-
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Mutex, PoisonError};
 use std::thread::JoinHandle;
