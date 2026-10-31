@@ -329,6 +329,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if matches!(event, NIN_SELECT | NIN_KEYSELECT) {
                 if !repeated_activation() {
                     push(Event::OpenSettings);
+                    // Explorer *sends* this callback, so it runs inside GetMessageW and no
+                    // DispatchMessageW follows: post a no-op so the loop delivers the event now.
+                    // SAFETY: posting to our own window.
+                    let _ = unsafe { PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0)) };
                 }
             } else if event == WM_CONTEXTMENU {
                 let (mut x, mut y) = point_from_wparam(wparam);
