@@ -10,6 +10,21 @@ use kuality_protocol::{Chord, Key};
 
 use crate::shortcuts::CompiledBindings;
 
+/// Letters Windows' Office key (Ctrl+Shift+Alt+Win) combines with: Explorer registers them as
+/// hotkeys and opens Office / Teams / LinkedIn web pages. While Hyper is held they are dropped
+/// unless bound to a shortcut. Apps never receive these combos anyway (Explorer takes them).
+pub const OFFICE_LETTERS: [Key; 9] = [
+    Key(b'W' as u16),
+    Key(b'X' as u16),
+    Key(b'P' as u16),
+    Key(b'O' as u16),
+    Key(b'T' as u16),
+    Key(b'D' as u16),
+    Key(b'N' as u16),
+    Key(b'L' as u16),
+    Key(b'Y' as u16),
+];
+
 /// A key event that did **not** come from Kuality itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyEvent {
@@ -283,6 +298,12 @@ impl Engine {
             v.action = Some(index);
             return v;
         }
+        // Office letters: Explorer owns Hyper+letter for these and opens Office web pages; an
+        // unbound one is dropped (until its up) so Explorer never sees it.
+        if ev.down && self.held && OFFICE_LETTERS.contains(&ev.key) {
+            self.consumed.set(ev.key, true);
+            return Verdict::swallow();
+        }
 
         // Rule 7: everything else passes.
         Verdict::pass()
@@ -529,7 +550,7 @@ mod tests {
     #[test]
     fn other_keys_pass_through() {
         let mut e = Engine::new();
-        let t = Key(0x54);
+        let t = Key(0x4B);
         assert_eq!(e.on_event(down(t), false), Verdict::default());
         assert_eq!(e.on_event(up(t), false), Verdict::default());
         e.on_event(down(Key::CAPSLOCK), false);
@@ -594,6 +615,48 @@ mod tests {
         assert_eq!(e.on_event(down(K2), false).action, Some(1));
         e.on_event(up(K2), false);
         assert_eq!(e.bindings_generation(), 5);
+    }
+
+    #[test]
+    fn unbound_office_letters_are_dropped_while_held() {
+        for k in OFFICE_LETTERS {
+            let mut e = engine_with(&[K1]);
+            // Not held: a normal key.
+            assert_eq!(e.on_event(down(k), false), Verdict::default());
+            assert_eq!(e.on_event(up(k), false), Verdict::default());
+            e.on_event(down(Key::CAPSLOCK), false);
+            let v = e.on_event(down(k), false);
+            assert!(v.swallow && v.synth.is_empty() && v.action.is_none());
+            // Auto-repeat and up: swallowed too.
+            assert!(e.on_event(down(k), false).swallow);
+            assert!(e.on_event(up(k), false).swallow);
+            // Pressed during Hyper, released after it: the up is still swallowed.
+            e.on_event(down(k), false);
+            e.on_event(up(Key::CAPSLOCK), false);
+            assert!(e.on_event(up(k), false).swallow);
+            assert_eq!(e.on_event(down(k), false), Verdict::default());
+            assert_eq!(e.on_event(up(k), false), Verdict::default());
+        }
+    }
+
+    #[test]
+    fn bound_office_letter_fires_its_shortcut() {
+        let t = Key(b'T' as u16);
+        let mut e = engine_with(&[K1, t]);
+        e.on_event(down(Key::CAPSLOCK), false);
+        let v = e.on_event(down(t), false);
+        assert!(v.swallow && v.synth.is_empty());
+        assert_eq!(v.action, Some(1));
+        assert!(e.on_event(up(t), false).swallow);
+    }
+
+    #[test]
+    fn office_letter_pressed_before_hyper_passes() {
+        let t = Key(b'T' as u16);
+        let mut e = Engine::new();
+        assert_eq!(e.on_event(down(t), false), Verdict::default());
+        e.on_event(down(Key::CAPSLOCK), false);
+        assert_eq!(e.on_event(up(t), false), Verdict::default());
     }
 
     #[test]
