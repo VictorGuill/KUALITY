@@ -673,6 +673,7 @@ impl SettingsWindow {
                 IconName::ChevronRight
             })
             .disabled(ro)
+            .accessibility_label(format!("Edit widget {index}"))
             .on_click(cx.listener(move |this, _, window, cx| {
                 if this
                     .widget_editor
@@ -788,6 +789,7 @@ impl SettingsWindow {
                     .child(
                         Checkbox::new(ids.0)
                             .label("Auto")
+                            .accessibility_label(format!("{label} auto"))
                             .checked(auto)
                             .disabled(ro)
                             .on_click(cx.listener(move |this, on: &bool, window, cx| {
@@ -997,6 +999,7 @@ impl SettingsWindow {
                     .child(
                         Checkbox::new("theme-color")
                             .label("Theme color")
+                            .accessibility_label("Theme color")
                             .checked(theme_color)
                             .disabled(ro)
                             .on_click(cx.listener(|this, on: &bool, window, cx| {

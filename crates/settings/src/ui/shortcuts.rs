@@ -869,17 +869,24 @@ impl SettingsWindow {
         } else {
             key_label(&key_text)
         };
+        // Fixed-width wrappers: the select otherwise grows and pushes Record to the far right.
         let key_row = h_flex()
             .gap_2()
             .child(
-                Select::new(&key_select)
-                    .small()
-                    .w(px(180.))
-                    .placeholder(placeholder)
-                    .search_placeholder("Search keys")
-                    .disabled(ro),
+                div().w(px(180.)).flex_none().child(
+                    Select::new(&key_select)
+                        .small()
+                        .placeholder(placeholder)
+                        .search_placeholder("Search keys")
+                        .accessibility_label("Shortcut key")
+                        .disabled(ro),
+                ),
             )
-            .child(record_button("record-key", RecordTarget::Trigger, cx));
+            .child(
+                div()
+                    .flex_none()
+                    .child(record_button("record-key", RecordTarget::Trigger, cx)),
+            );
 
         let action_fields =
             match action_type {
