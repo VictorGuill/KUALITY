@@ -69,6 +69,21 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **Built-in features** — media, hyperkey… use the same internal interfaces as extensions.
 - **First external extension** — fan speeds (likely C# + LibreHardwareMonitor).
 
+## Skeleton (2026-10-31, Phase 0)
+
+- **Packages** — `kuality` (core), `kuality-settings`, `kuality-protocol`; edition 2024, current stable toolchain, no pinned MSRV.
+- **Config types** — every struct `#[serde(default)]`; unknown fields kept in flattened `extra` maps; `shortcuts.bindings` / `widgets.items` stay raw JSON until Phases 2/3.
+- **Config writes** — the core only writes `config.json` to create it (atomic: `.tmp` + rename); it never rewrites an existing file. Invalid file → in-memory defaults, file untouched. `version` newer than supported → warning, best-effort load.
+- **Hot-reload** — `FindFirstChangeNotificationW` on the data dir (not recursive) + stop event, 250 ms debounce, skip if bytes unchanged; no `notify` crate.
+- **Logging** — `log` facade + small built-in file backend (no logging framework): `logs\kuality.log`, previous run kept as `kuality.old.log`, rotated at 5 MB, local time, stderr too in debug builds, panics logged.
+- **Log level** — `general.log_level` (`error|warn|info|debug|trace`, default `info`), hot-reloadable.
+- **Single instance** — named mutex `Local\Kuality.Core` (per session, shared by installed and portable copies); acquired before logging so a second instance never rotates the log; second instance exits with code 0.
+- **Tray** — hidden top-level window (not message-only, so it gets `TaskbarCreated`); stock `IDI_APPLICATION` icon until Phase 6; left or right click opens the menu (no double-click action); "Settings" opens `config.json` in the default editor (Notepad fallback) until Phase 5.
+- **Shutdown** — tray Quit, `WM_CLOSE` (e.g. `taskkill` without `/F`), `WM_ENDSESSION` and Ctrl+C on the debug console all run the same clean shutdown.
+- **Main loop** — window procedure only queues events; the loop delivers them after dispatch (no re-entrancy). Worker threads use `mpsc` + `PostMessageW` to wake it.
+- **DPI manifest** — embedded with MSVC linker args (`/MANIFEST:EMBED /MANIFESTINPUT`) from `build.rs`, no resource crate; PerMonitorV2; effective awareness logged at startup.
+- **Settings placeholder** — `kuality-settings` has no dependencies until Phase 5.
+
 ## Out of scope for now
 
 - Notifications widget (needs package identity / MSIX).

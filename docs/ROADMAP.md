@@ -7,7 +7,7 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 
 ---
 
-## Phase 0 — Skeleton
+## Phase 0 — Skeleton ✅
 
 - [x] Cargo workspace with `crates/core`, `crates/settings`, `crates/protocol`
 - [x] Config types in `protocol` (serde, defaults = everything disabled)
@@ -18,7 +18,7 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 - [x] Single instance (named mutex)
 - [x] Tray icon with menu: Settings (placeholder) / Quit
 - [x] Per-monitor DPI awareness v2 manifest
-- [ ] `cargo build`, `clippy`, `test` pass; commands documented in `AGENTS.md`
+- [x] `cargo build`, `clippy`, `test` pass; commands documented in `AGENTS.md`
 
 **Done when:** `kuality.exe` starts, shows a tray icon, creates/reads `config.json`, reacts to edits, and quits cleanly.
 

@@ -47,12 +47,16 @@ Details: [docs/VISION.md](docs/VISION.md).
 
 ## Commands
 
-> Filled in during Phase 0.
-
 ```powershell
-cargo build              # debug build
-cargo build --release    # release build
-cargo clippy --all-targets -- -D warnings
-cargo test
-cargo run -p kuality     # run the core
+cargo build                                 # debug build (core keeps a console with log output)
+cargo build --release                       # release build (no console)
+cargo fmt --all                             # format
+cargo clippy --all-targets -- -D warnings   # lint, must be clean
+cargo test                                  # unit tests (all crates)
+cargo run -p kuality                        # run the core (tray icon; Ctrl+C in the console quits cleanly)
+cargo run -p kuality-settings               # settings app (placeholder until Phase 5)
 ```
+
+Runtime files: `%APPDATA%\Kuality\config.json` and `%APPDATA%\Kuality\logs\kuality.log`.
+For a throwaway setup, create an empty file `target\debug\portable`: config and logs then live in `target\debug\`.
+To quit a running core from a script, close it gracefully (`taskkill /IM kuality.exe`, without `/F`).

@@ -25,12 +25,26 @@ extensions/*  (later, separate processes in any language)
 
 ```
 crates/
-├── core/       → binary `kuality`
-├── settings/   → binary `kuality-settings`
-└── protocol/   → library: config types, IPC messages, extension protocol types (serde)
+├── core/       → package/binary `kuality`
+├── settings/   → package/binary `kuality-settings`
+└── protocol/   → package `kuality-protocol`, library: config types, IPC messages, extension protocol types (serde)
 ```
 
 Inside `core`, OS-specific code lives in a `platform` module (e.g. `platform::windows::keyboard`, `platform::windows::taskbar`) behind traits, so logic stays portable.
+
+Current `core` modules (Phase 0):
+
+| Module | Role |
+|---|---|
+| `main.rs` | Startup sequence: data dir → single instance → logging → config → tray → watcher → main loop |
+| `app.rs` | Main-thread state; handles `Event::{Wake, OpenSettings, Quit}` and applies reloaded configs |
+| `paths.rs` | Data dir resolution (portable marker vs `%APPDATA%\Kuality`) |
+| `config_store.rs` | Load/create/atomic save of `config.json`, `Reloader` (change detection), section diff |
+| `logging.rs` | `log` backend: `logs\kuality.log`, rotation, panic hook |
+| `platform/mod.rs` | Traits `SingleInstance`, `DirWatcher`, `TrayIcon`, `Waker` + free functions |
+| `platform/windows/` | Win32 implementations (`instance`, `tray`, `watcher`, `shell`, `folders`, `time`, `dpi`) |
+
+Main loop: a hidden top-level window (class `Kuality.Core`) owns the tray icon. Its window procedure only queues events; the message loop delivers them to the app handler after `DispatchMessageW`, so the handler is never re-entered. Other threads send data through `mpsc` channels and wake the loop with `PostMessageW` (`Waker`).
 
 ## Config
 
