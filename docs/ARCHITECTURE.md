@@ -6,8 +6,9 @@
 
 ```
 kuality.exe  (core, always running, few MB)
-├── Keyboard hook thread   → Hyperkey + shortcut detection (must return instantly)
-├── Action worker thread   → executes actions (launch, send hotkey, open URL…)
+├── Keyboard hook thread   → Hyperkey + shortcut detection (hook must return instantly);
+│                            also injects `send_hotkey` chords (it owns the Hyper modifiers)
+├── Action worker thread   → runs `launch` / `open_url` (ShellExecuteExW), spawned on first use
 ├── Overlay thread         → widget windows attached to each taskbar, Direct2D rendering
 ├── Data providers         → media session, (later) extensions' data
 ├── Tray icon              → Settings / Pause / Quit
@@ -32,21 +33,26 @@ crates/
 
 Inside `core`, OS-specific code lives in a `platform` module (e.g. `platform::windows::keyboard`, `platform::windows::taskbar`) behind traits, so logic stays portable.
 
-Current `core` modules (Phases 0–1):
+Current `core` modules (Phases 0–2):
 
 | Module | Role |
 |---|---|
 | `main.rs` | Startup sequence: data dir → single instance → logging → config → tray → watcher → main loop |
-| `app.rs` | Main-thread state; handles `Event::{Wake, OpenSettings, TogglePause, Quit}`, applies reloaded configs, reconciles the Office key |
-| `hyperkey/engine.rs` | Portable Hyperkey state machine (no OS types, no allocation), unit-tested |
+| `app.rs` | Main-thread state; handles `Event::{Wake, OpenSettings, TogglePause, Quit}`, applies reloaded configs (Hyperkey + compiled shortcuts), reconciles the Office key |
+| `hyperkey/engine.rs` | Portable Hyperkey state machine + shortcut lookup, consumed keys and the `send_hotkey` sequence (no OS types, no allocation), unit-tested |
 | `hyperkey/mod.rs` | `KeyboardController` (start / apply / set_paused / shutdown) and `KeyboardCommand` |
+| `shortcuts/mod.rs` | `compile(&Shortcuts) -> CompiledBindings`: validation, duplicates, warnings, generation |
+| `actions/mod.rs` | `ActionWorker`: lazy `kuality-actions` thread running `launch` / `open_url` jobs in order |
+| `actions/quote.rs` | Windows command-line quoting for `launch.args` lists |
 | `paths.rs` | Data dir resolution (portable marker vs `%APPDATA%\Kuality`) |
 | `config_store.rs` | Load/create/atomic save of `config.json`, `Reloader` (change detection), section diff |
 | `logging.rs` | `log` backend: `logs\kuality.log`, rotation, panic hook |
 | `platform/mod.rs` | Traits `SingleInstance`, `DirWatcher`, `TrayIcon`, `Waker`, `KeyboardBackend` + free functions |
-| `platform/windows/` | Win32 implementations (`instance`, `tray`, `watcher`, `shell`, `folders`, `time`, `dpi`, `keyboard`, `input`, `office_key`, `crash`) |
+| `platform/windows/` | Win32 implementations (`instance`, `tray`, `watcher`, `shell` (incl. `launch` / `open_url`), `folders`, `time`, `dpi`, `keyboard`, `input`, `office_key`, `crash`) |
 
-Keyboard thread (`platform/windows/keyboard.rs`): owns a hidden top-level window (class `KualityKeyboard`) for session/power broadcasts and a `EVENT_SYSTEM_DESKTOPSWITCH` WinEvent hook. The `WH_KEYBOARD_LL` hook is installed only while Hyperkey is active; its callback runs the engine and at most one tagged `SendInput` (no allocation, locks or logging). Commands arrive through `mpsc` + `PostMessageW(WM_APP_COMMAND)`. `crash.rs` installs a panic hook and an unhandled-exception filter that release injected modifiers.
+Keyboard thread (`platform/windows/keyboard.rs`): owns a hidden top-level window (class `KualityKeyboard`) for session/power broadcasts and a `EVENT_SYSTEM_DESKTOPSWITCH` WinEvent hook. The `WH_KEYBOARD_LL` hook is installed only while Hyperkey is active; its callback runs the engine and at most one tagged `SendInput` (no allocation, locks or logging). Commands arrive through `mpsc` + `PostMessageW(WM_APP_COMMAND)`; `Apply` carries the Hyperkey config and an `Arc<CompiledBindings>` compiled on the main thread. `crash.rs` installs a panic hook and an unhandled-exception filter that release injected modifiers.
+
+Shortcuts: when a bound key goes down while Hyper is held, the engine marks it consumed (its repeats and up are swallowed) and the callback only posts `WM_APP_ACTION(index, generation)` to its own window. The window procedure drops the message if the table generation changed, injects `send_hotkey` chords itself (releasing and re-pressing the injected Hyper modifiers in the same `SendInput`), and hands `launch` / `open_url` to the `ActionWorker` (`kuality-actions`, STA, `ShellExecuteExW`). The worker never touches keyboard state. Quit stops the keyboard thread first, then the worker (1 s timeout each).
 
 Main loop: a hidden top-level window (class `Kuality.Core`) owns the tray icon. Its window procedure only queues events; the message loop delivers them to the app handler after `DispatchMessageW`, so the handler is never re-entered. Other threads send data through `mpsc` channels and wake the loop with `PostMessageW` (`Waker`).
 
@@ -67,7 +73,8 @@ Draft shape (will be refined per phase):
   "shortcuts": {
     "enabled": false,
     "bindings": [
-      { "key": "1", "action": { "type": "launch", "path": "C:\\Windows\\notepad.exe", "args": [] } },
+      { "key": "1", "name": "Notepad", "enabled": true,
+        "action": { "type": "launch", "path": "C:\\Windows\\notepad.exe", "args": [], "cwd": null } },
       { "key": "2", "action": { "type": "send_hotkey", "keys": "ctrl+shift+esc" } },
       { "key": "G", "action": { "type": "open_url", "url": "https://github.com" } }
     ]

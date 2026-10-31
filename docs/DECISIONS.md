@@ -95,6 +95,16 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **Hard kill** — `taskkill /F` cannot release injected modifiers or restore the Office key; the next start restores the Office key if Hyperkey is disabled (documented limitation).
 - **keyviewer** — dev-only example `cargo run -p kuality --example keyviewer` for manual tests.
 
+## Shortcuts implementation (2026-10-31, Phase 2)
+
+- **Requires Hyperkey** — shortcuts only fire while Hyperkey is active; tray Pause stops both. A warning is logged when `shortcuts.enabled` is on but `hyperkey.enabled` is off.
+- **Bindings** — typed `BindingEntry` (valid binding, or raw JSON kept verbatim); compiled on the main thread on every load into an `Arc<CompiledBindings>` with a generation; actions triggered against an older generation are dropped. Linear lookup in the hook (no allocation).
+- **Log identity** — compiled entries keep their index in `shortcuts.bindings`; logs say `shortcut #<index>` plus the action type or skip reason, never key names (key/chord parse errors never echo the input).
+- **Consumed keys vs. hook reinstall** — every `Apply` still reinstalls the hook with a forced release (Phase 1), but the consumed-key set is restored afterwards, so the up of a bound key held across a config reload is still swallowed. `reset`, Pause/disable and lock/suspend clear it.
+- **Threads** — `send_hotkey` runs on the keyboard thread (it owns the injected Hyper modifiers); `launch` / `open_url` run in order on `kuality-actions`, spawned on the first action, joined (1 s) after the keyboard thread at quit.
+- **Shell call** — `ShellExecuteExW` with verb `open`, `SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC`, `%VAR%` expanded at execution time, `cwd` defaults to the parent of an absolute path, else `%USERPROFILE%`; `AllowSetForegroundWindow(ASFW_ANY)` before each call.
+- **Argument quoting** — `launch.args` lists use `CommandLineToArgvW` rules; besides space, tab and `"`, newline and vertical tab also trigger quoting (as in Microsoft's reference implementation).
+
 ## Out of scope for now
 
 - Notifications widget (needs package identity / MSIX).
