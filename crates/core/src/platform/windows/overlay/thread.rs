@@ -20,7 +20,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use ::windows::Win32::Graphics::Gdi::HMONITOR;
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::System::RemoteDesktop::{
@@ -29,13 +29,16 @@ use ::windows::Win32::System::RemoteDesktop::{
 use ::windows::Win32::System::Threading::GetCurrentThreadId;
 use ::windows::Win32::UI::Accessibility::HWINEVENTHOOK;
 use ::windows::Win32::UI::WindowsAndMessaging::{
-    CHILDID_SELF, ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER, EVENT_SYSTEM_FOREGROUND,
-    GW_CHILD, GW_HWNDNEXT, GetForegroundWindow, GetMessageW, GetWindow, KillTimer, MSG,
-    MSGFLT_ALLOW, OBJID_WINDOW, PBT_APMRESUMEAUTOMATIC, PostMessageW, PostQuitMessage,
-    PostThreadMessageW, RegisterClassExW, RegisterWindowMessageW, SetTimer, TranslateMessage,
-    WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DISPLAYCHANGE, WM_POWERBROADCAST, WM_SETTINGCHANGE,
-    WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP, WTS_SESSION_UNLOCK,
+    AppendMenuW, CHILDID_SELF, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW,
+    DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, EVENT_OBJECT_LOCATIONCHANGE,
+    EVENT_OBJECT_REORDER, EVENT_SYSTEM_FOREGROUND, GW_CHILD, GW_HWNDNEXT, GetCursorPos,
+    GetForegroundWindow, GetMessageW, GetWindow, KillTimer, MF_STRING, MSG, MSGFLT_ALLOW,
+    OBJID_WINDOW, PBT_APMRESUMEAUTOMATIC, PostMessageW, PostQuitMessage, PostThreadMessageW,
+    RegisterClassExW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, TPM_BOTTOMALIGN,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, TranslateMessage,
+    WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DISPLAYCHANGE, WM_NULL, WM_POWERBROADCAST,
+    WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
+    WTS_SESSION_UNLOCK,
 };
 use ::windows::core::{PCWSTR, w};
 
@@ -54,6 +57,11 @@ const CLASS_NAME: PCWSTR = w!("KualityOverlayHost");
 const WM_APP_COMMAND: u32 = WM_APP + 1;
 /// Something changed: schedule a (debounced) full refresh.
 pub(crate) const WM_APP_REFRESH: u32 = WM_APP + 2;
+/// A widget window was right-clicked: `wparam` = its HWND, `lparam` = screen position.
+pub(crate) const WM_APP_MENU: u32 = WM_APP + 3;
+
+const MENU_SETTINGS: usize = 1;
+const MENU_HIDE: usize = 2;
 
 const TIMER_REFRESH: usize = 1;
 const TIMER_LATE_2S: usize = 2;
@@ -602,6 +610,26 @@ impl State {
         }
     }
 
+    /// Item key of one of our widget windows.
+    fn key_of(&self, widget: HWND) -> Option<String> {
+        self.taskbars
+            .iter()
+            .flat_map(|t| &t.windows)
+            .find(|(_, w)| w.hwnd == widget)
+            .map(|(k, _)| k.clone())
+    }
+
+    /// Context menu "Hide": removes the item from every taskbar until the next `Apply` (the
+    /// `widgets` section changed) or restart. The config file is not modified.
+    fn hide_for_session(&mut self, key: &str) {
+        self.session_hidden.insert(key.to_owned());
+        for tb in &mut self.taskbars {
+            // Dropping the windows destroys them.
+            tb.windows.retain(|(k, _)| k != key);
+        }
+        log::info!("widget '{key}' hidden until the widgets config changes or Kuality restarts");
+    }
+
     /// Installs or removes the fullscreen hooks to match the config, then re-evaluates.
     fn sync_fullscreen(&mut self) {
         if !self.config.hide_on_fullscreen {
@@ -725,6 +753,53 @@ unsafe extern "system" fn shell_event(
     with_state(|s| s.on_shell_event(event, hwnd, id_object, id_child));
 }
 
+/// Shows the widget context menu (Settings / Hide) for widget window `widget`. Runs outside any
+/// state borrow: `TrackPopupMenuEx` pumps messages until the menu closes.
+fn on_widget_menu(host: HWND, widget: HWND, pos: LPARAM) {
+    let Some(Some(key)) = with_state(|s| s.key_of(widget)) else {
+        return;
+    };
+    let (mut x, mut y) = (
+        i32::from((pos.0 & 0xFFFF) as u16 as i16),
+        i32::from(((pos.0 >> 16) & 0xFFFF) as u16 as i16),
+    );
+    if x == -1 && y == -1 {
+        let mut p = POINT::default();
+        // SAFETY: writes into a local POINT.
+        if unsafe { GetCursorPos(&mut p) }.is_ok() {
+            (x, y) = (p.x, p.y);
+        }
+    }
+    // SAFETY: creates, shows and destroys a popup menu owned by this function; `host` is ours.
+    let cmd = unsafe {
+        let Ok(menu) = CreatePopupMenu() else {
+            return;
+        };
+        let _ = AppendMenuW(menu, MF_STRING, MENU_SETTINGS, w!("Settings"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_HIDE, w!("Hide"));
+        // Needed so the menu closes when the user clicks elsewhere.
+        let _ = SetForegroundWindow(host);
+        let cmd = TrackPopupMenuEx(
+            menu,
+            (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_BOTTOMALIGN).0,
+            x,
+            y,
+            host,
+            None,
+        );
+        let _ = PostMessageW(Some(host), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(menu);
+        cmd.0 as usize
+    };
+    match cmd {
+        MENU_SETTINGS => super::super::tray::request_open_settings(),
+        MENU_HIDE => {
+            with_state(|s| s.hide_for_session(&key));
+        }
+        _ => {}
+    }
+}
+
 /// WinEvent callback for the fullscreen hooks.
 unsafe extern "system" fn fullscreen_event(
     _hook: HWINEVENTHOOK,
@@ -775,6 +850,10 @@ unsafe extern "system" fn host_wndproc(
         }
         WM_APP_REFRESH => {
             with_state(|s| s.schedule_refresh());
+            LRESULT(0)
+        }
+        WM_APP_MENU => {
+            on_widget_menu(hwnd, HWND(wparam.0 as *mut _), lparam);
             LRESULT(0)
         }
         WM_TIMER => {

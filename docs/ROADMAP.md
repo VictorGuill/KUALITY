@@ -54,7 +54,7 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 - [x] Hide on fullscreen apps
 - [x] Follow Windows light/dark theme
 - [x] First widget: static `text`
-- [ ] Right-click on widget → small menu (Settings / Hide)
+- [x] Right-click on widget → small menu (Settings / Hide)
 
 **Done when:** a text widget appears exactly where config says, stays above the taskbar while clicking it, and survives an Explorer restart.
 

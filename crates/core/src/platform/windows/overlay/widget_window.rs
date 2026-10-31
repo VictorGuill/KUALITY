@@ -1,7 +1,7 @@
 //! One layered child window per (taskbar, widget).
 //!
 //! The window procedure never touches the overlay state: it only posts messages to the host
-//! window (external destruction, DPI change), handled later by the thread.
+//! window (context menu, external destruction, DPI change), handled later by the thread.
 
 use std::cell::Cell;
 use std::io;
@@ -11,14 +11,14 @@ use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetParent, HWND_TOP, IDC_ARROW, IsWindow,
     LoadCursorW, MA_NOACTIVATE, PostMessageW, RegisterClassExW, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, WM_DESTROY,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, WM_CONTEXTMENU, WM_DESTROY,
     WM_DPICHANGED_AFTERPARENT, WM_MOUSEACTIVATE, WNDCLASSEXW, WS_CHILD, WS_CLIPSIBLINGS,
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOPARENTNOTIFY,
 };
 use ::windows::core::{PCWSTR, w};
 
 use super::render::Surface;
-use super::thread::{WM_APP_REFRESH, host_hwnd};
+use super::thread::{WM_APP_MENU, WM_APP_REFRESH, host_hwnd};
 use crate::overlay::layout::RectPx;
 
 const CLASS_NAME: PCWSTR = w!("KualityWidget");
@@ -155,6 +155,12 @@ fn post_host(msg: u32, wparam: WPARAM, lparam: LPARAM) {
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
+        WM_CONTEXTMENU => {
+            // Handled here (never forwarded to the taskbar). lparam = screen position, or
+            // (-1, -1) from the keyboard.
+            post_host(WM_APP_MENU, WPARAM(hwnd.0 as usize), lparam);
+            LRESULT(0)
+        }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_DESTROY => {
             if !DESTROYING.get() {

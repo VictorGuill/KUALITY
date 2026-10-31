@@ -39,6 +39,8 @@ use crate::platform::{Event, TrayIcon, Waker};
 const CLASS_NAME: PCWSTR = w!("Kuality.Core");
 const WM_APP_TRAY: u32 = WM_APP + 1;
 const WM_APP_WAKE: u32 = WM_APP + 2;
+/// Another thread asks for the Settings action (widget context menu).
+const WM_APP_OPEN_SETTINGS: u32 = WM_APP + 3;
 const TRAY_ICON_ID: u32 = 1;
 /// `NIN_SELECT | NINF_KEY`: icon activated with the keyboard (missing from the `windows` crate).
 const NIN_KEYSELECT: u32 = NIN_SELECT | 1;
@@ -317,6 +319,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
+        WM_APP_OPEN_SETTINGS => {
+            push(Event::OpenSettings);
+            LRESULT(0)
+        }
         WM_APP_WAKE => {
             push(Event::Wake);
             LRESULT(0)
@@ -347,6 +353,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         // SAFETY: default handling with the arguments we received.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// Asks the main loop to run the Settings action (same as the tray item). Any thread.
+pub(crate) fn request_open_settings() {
+    let hwnd = MAIN_HWND.load(Ordering::Relaxed);
+    if hwnd != 0 {
+        // SAFETY: PostMessageW is thread-safe.
+        let _ = unsafe {
+            PostMessageW(
+                Some(HWND(hwnd as *mut _)),
+                WM_APP_OPEN_SETTINGS,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        };
     }
 }
 
