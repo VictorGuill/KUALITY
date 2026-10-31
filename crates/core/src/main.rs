@@ -1,23 +1,27 @@
 //! Kuality core (`kuality.exe`): always-running process with the tray icon.
 //!
 //! Phase 0: config load/create/hot-reload, logging, single instance, tray menu
-//! (`docs/specs/skeleton.md`). Phase 1: Hyperkey (`docs/specs/hyperkey.md`).
+//! (`docs/specs/skeleton.md`). Phase 1: Hyperkey (`docs/specs/hyperkey.md`). Phase 2: Shortcuts
+//! (`docs/specs/shortcuts.md`).
 
 // No console window in release builds; debug builds keep it for log output.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod actions;
 mod app;
 mod config_store;
 mod hyperkey;
 mod logging;
 mod paths;
 mod platform;
+mod shortcuts;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
+use actions::ActionWorker;
 use app::App;
 use config_store::{LoadStatus, ReloadOutcome, Reloader};
 use hyperkey::KeyboardController;
@@ -147,15 +151,19 @@ fn main() -> ExitCode {
         }
     };
 
-    let keyboard = match KeyboardController::start() {
+    // Spawns its thread on the first shortcut action.
+    let actions = Arc::new(ActionWorker::new());
+    let keyboard = match KeyboardController::start(Arc::clone(&actions)) {
         Ok(k) => Some(k),
         Err(e) => {
-            log::error!("cannot start the keyboard thread: {e}; Hyperkey unavailable");
+            log::error!(
+                "cannot start the keyboard thread: {e}; Hyperkey and shortcuts unavailable"
+            );
             None
         }
     };
 
-    let mut app = App::new(loaded.config, config_path, rx, watcher, keyboard);
+    let mut app = App::new(loaded.config, config_path, rx, watcher, keyboard, actions);
     log::info!("ready");
     tray.run(move |event| app.handle(event));
 

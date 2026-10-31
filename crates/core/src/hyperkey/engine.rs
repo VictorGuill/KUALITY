@@ -1,9 +1,14 @@
-//! Portable Hyperkey state machine (no OS types), see `docs/specs/hyperkey.md`.
+//! Portable Hyperkey state machine (no OS types), see `docs/specs/hyperkey.md` and, for the
+//! binding lookup, `docs/specs/shortcuts.md`.
 //!
 //! The engine is called from the low-level keyboard hook callback, so nothing here allocates,
 //! locks, logs or panics on any input.
 
-use kuality_protocol::Key;
+use std::sync::Arc;
+
+use kuality_protocol::{Chord, Key};
+
+use crate::shortcuts::CompiledBindings;
 
 /// A key event that did **not** come from Kuality itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +90,7 @@ pub struct Verdict {
     pub swallow: bool,
     /// Events to inject (in one `SendInput` call).
     pub synth: SynthBuf,
-    /// Binding index to run (Phase 2).
+    /// Index into the bindings table of the shortcut to run.
     pub action: Option<u16>,
     pub transition: Option<Transition>,
 }
@@ -135,8 +140,32 @@ pub const HYPER_PRESS_ORDER: [Key; 4] = [Key::LCTRL, Key::LSHIFT, Key::LALT, Key
 /// Same modifiers, in release order.
 pub const HYPER_RELEASE_ORDER: [Key; 4] = [Key::LWIN, Key::LALT, Key::LSHIFT, Key::LCTRL];
 
+/// Set of key codes `0..256` (no allocation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KeySet([u64; 4]);
+
+impl KeySet {
+    pub const EMPTY: KeySet = KeySet([0; 4]);
+
+    pub fn contains(&self, key: Key) -> bool {
+        let c = usize::from(key.0);
+        c < 256 && self.0[c / 64] & (1 << (c % 64)) != 0
+    }
+
+    pub fn set(&mut self, key: Key, on: bool) {
+        let c = usize::from(key.0);
+        if c < 256 {
+            if on {
+                self.0[c / 64] |= 1 << (c % 64);
+            } else {
+                self.0[c / 64] &= !(1 << (c % 64));
+            }
+        }
+    }
+}
+
 /// The Hyperkey state machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Engine {
     /// Hyper is active (CapsLock physically down).
     held: bool,
@@ -144,6 +173,10 @@ pub struct Engine {
     injected: ModSet,
     /// Physical state of the eight sided modifiers.
     physical: ModSet,
+    /// Bound keys whose press triggered a shortcut: their repeats and up are swallowed.
+    consumed: KeySet,
+    /// Shortcut table (`None` until the first config is applied).
+    bindings: Option<Arc<CompiledBindings>>,
 }
 
 impl Default for Engine {
@@ -158,7 +191,34 @@ impl Engine {
             held: false,
             injected: ModSet(0),
             physical: ModSet(0),
+            consumed: KeySet::EMPTY,
+            bindings: None,
         }
+    }
+
+    /// Replaces the shortcut table and returns the previous one (so the caller decides where it
+    /// is dropped). Keys already consumed stay consumed, so their up is still swallowed.
+    pub fn set_bindings(
+        &mut self,
+        bindings: Arc<CompiledBindings>,
+    ) -> Option<Arc<CompiledBindings>> {
+        self.bindings.replace(bindings)
+    }
+
+    /// Bound keys currently consumed (pressed, up not seen yet).
+    pub fn consumed(&self) -> KeySet {
+        self.consumed
+    }
+
+    /// Restores consumed keys after a hook reinstall (whose forced release cleared them), so
+    /// a config reload while a bound key is held still swallows its up.
+    pub fn restore_consumed(&mut self, keys: KeySet) {
+        self.consumed = keys;
+    }
+
+    /// Generation of the current shortcut table (0 if none).
+    pub fn bindings_generation(&self) -> u64 {
+        self.bindings.as_ref().map_or(0, |b| b.generation)
     }
 
     /// Processes one event. `caps_toggled_on` is the current CapsLock toggle state (only read
@@ -206,12 +266,61 @@ impl Engine {
             return Verdict::swallow();
         }
 
-        // Rule 7: everything else passes (Phase 2 adds the binding check here).
+        // Shortcuts (shortcuts.md): a consumed key stays swallowed until its up.
+        if self.consumed.contains(ev.key) {
+            if !ev.down {
+                self.consumed.set(ev.key, false);
+            }
+            return Verdict::swallow();
+        }
+        if ev.down
+            && self.held
+            && !is_modifier
+            && let Some(index) = self.bindings.as_ref().and_then(|b| b.find(ev.key))
+        {
+            self.consumed.set(ev.key, true);
+            let mut v = Verdict::swallow();
+            v.action = Some(index);
+            return v;
+        }
+
+        // Rule 7: everything else passes.
         Verdict::pass()
     }
 
+    /// Events for a `send_hotkey` chord, in one batch: if Hyper is held, its injected modifiers
+    /// are released first (mask key, physically held ones kept) and pressed again after the
+    /// chord, so the target sees exactly the chord.
+    pub fn hotkey(&mut self, chord: &Chord) -> SynthBuf {
+        let held = self.held;
+        let mut out = if held {
+            self.release_injected()
+        } else {
+            SynthBuf::new()
+        };
+        for &m in chord.mods() {
+            out.push(Synth::Down(m));
+        }
+        if let Some(k) = chord.key {
+            out.push(Synth::Down(k));
+            out.push(Synth::Up(k));
+        }
+        for &m in chord.mods().iter().rev() {
+            out.push(Synth::Up(m));
+        }
+        if held {
+            for k in HYPER_PRESS_ORDER {
+                out.push(Synth::Down(k));
+                self.injected.set(k, true);
+            }
+        }
+        out
+    }
+
     /// Releases Hyper if it is held (or modifiers are still injected); empty otherwise.
+    /// Also forgets consumed keys (their up then passes through).
     pub fn force_release(&mut self) -> SynthBuf {
+        self.consumed = KeySet::EMPTY;
         if self.held || !self.injected.is_empty() {
             self.release()
         } else {
@@ -219,9 +328,12 @@ impl Engine {
         }
     }
 
-    /// Forgets all state without injecting anything (after unlock/resume).
+    /// Forgets all state without injecting anything (after unlock/resume). Keeps the shortcut
+    /// table.
     pub fn reset(&mut self) {
+        let bindings = self.bindings.take();
         *self = Self::new();
+        self.bindings = bindings;
     }
 
     /// Whether Kuality currently holds injected modifiers down.
@@ -233,8 +345,16 @@ impl Engine {
         self.held
     }
 
-    /// Mask key, then `Up` for each injected modifier not physically held.
+    /// Ends Hyper and releases the injected modifiers. Consumed keys stay consumed: a bound
+    /// key released after CapsLock is still swallowed.
     fn release(&mut self) -> SynthBuf {
+        let out = self.release_injected();
+        self.held = false;
+        out
+    }
+
+    /// Mask key, then `Up` for each injected modifier not physically held.
+    fn release_injected(&mut self) -> SynthBuf {
         let mut out = SynthBuf::new();
         out.push(Synth::Down(Key::MASK));
         out.push(Synth::Up(Key::MASK));
@@ -244,7 +364,6 @@ impl Engine {
             }
         }
         self.injected = ModSet::EMPTY;
-        self.held = false;
         out
     }
 }
@@ -427,6 +546,214 @@ mod tests {
             assert!(!e.on_event(down(k), false).swallow);
             assert!(!e.on_event(up(k), false).swallow);
         }
+    }
+
+    use crate::shortcuts::{CompiledAction, CompiledBinding};
+
+    const K1: Key = Key(0x31);
+    const K2: Key = Key(0x32);
+    const KK: Key = Key(0x4B);
+
+    fn table(generation: u64, keys: &[Key]) -> Arc<CompiledBindings> {
+        Arc::new(CompiledBindings {
+            generation,
+            entries: keys
+                .iter()
+                .enumerate()
+                .map(|(i, &key)| CompiledBinding {
+                    key,
+                    source: i,
+                    action: CompiledAction::OpenUrl("https://example.com".into()),
+                })
+                .collect(),
+        })
+    }
+
+    fn engine_with(keys: &[Key]) -> Engine {
+        let mut e = Engine::new();
+        assert!(e.set_bindings(table(5, keys)).is_none());
+        e
+    }
+
+    #[test]
+    fn bound_key_fires_once_and_is_consumed() {
+        let mut e = engine_with(&[K1, K2]);
+        e.on_event(down(Key::CAPSLOCK), false);
+        let v = e.on_event(down(K2), false);
+        assert!(v.swallow && v.synth.is_empty());
+        assert_eq!(v.action, Some(1));
+        // Auto-repeat: swallowed, no action.
+        for _ in 0..3 {
+            let v = e.on_event(down(K2), false);
+            assert!(v.swallow);
+            assert_eq!(v.action, None);
+        }
+        let v = e.on_event(up(K2), false);
+        assert!(v.swallow && v.action.is_none());
+        // A new press fires again.
+        assert_eq!(e.on_event(down(K2), false).action, Some(1));
+        e.on_event(up(K2), false);
+        assert_eq!(e.bindings_generation(), 5);
+    }
+
+    #[test]
+    fn up_after_caps_released_is_still_swallowed() {
+        let mut e = engine_with(&[K1]);
+        e.on_event(down(Key::CAPSLOCK), false);
+        assert_eq!(e.on_event(down(K1), false).action, Some(0));
+        assert_eq!(
+            e.on_event(up(Key::CAPSLOCK), false).synth.as_slice(),
+            HYPER_UP
+        );
+        // Repeat and up after Hyper ended: swallowed, no action.
+        let v = e.on_event(down(K1), false);
+        assert!(v.swallow && v.action.is_none());
+        assert!(e.on_event(up(K1), false).swallow);
+        // Afterwards, the key is a normal key again.
+        assert_eq!(e.on_event(down(K1), false), Verdict::default());
+        assert_eq!(e.on_event(up(K1), false), Verdict::default());
+    }
+
+    #[test]
+    fn unbound_and_unheld_keys_pass() {
+        let mut e = engine_with(&[K1]);
+        // Not held: a bound key passes.
+        assert_eq!(e.on_event(down(K1), false), Verdict::default());
+        assert_eq!(e.on_event(up(K1), false), Verdict::default());
+        e.on_event(down(Key::CAPSLOCK), false);
+        // Held, unbound: passes (the system sees the Hyper combo).
+        assert_eq!(e.on_event(down(KK), false), Verdict::default());
+        assert_eq!(e.on_event(up(KK), false), Verdict::default());
+        // Key pressed before CapsLock, released while held: passes.
+        let mut e = engine_with(&[K1]);
+        e.on_event(down(K1), false);
+        e.on_event(down(Key::CAPSLOCK), false);
+        assert_eq!(e.on_event(up(K1), false), Verdict::default());
+    }
+
+    #[test]
+    fn no_bindings_means_phase_1_behavior() {
+        let mut e = Engine::new();
+        e.on_event(down(Key::CAPSLOCK), false);
+        assert_eq!(e.on_event(down(K1), false), Verdict::default());
+        let mut e = engine_with(&[]);
+        e.on_event(down(Key::CAPSLOCK), false);
+        assert_eq!(e.on_event(down(K1), false), Verdict::default());
+    }
+
+    #[test]
+    fn physical_modifiers_do_not_change_the_binding() {
+        let mut e = engine_with(&[K1]);
+        e.on_event(down(Key::CAPSLOCK), false);
+        assert!(e.on_event(down(Key::RSHIFT), false).swallow);
+        assert_eq!(e.on_event(down(K1), false).action, Some(0));
+    }
+
+    #[test]
+    fn reset_and_force_release_clear_consumed_but_keep_bindings() {
+        let mut e = engine_with(&[K1]);
+        e.on_event(down(Key::CAPSLOCK), false);
+        e.on_event(down(K1), false);
+        e.reset();
+        assert_eq!(e, engine_with(&[K1]));
+        assert_eq!(e.on_event(up(K1), false), Verdict::default());
+
+        let mut e = engine_with(&[K1]);
+        e.on_event(down(Key::CAPSLOCK), false);
+        e.on_event(down(K1), false);
+        assert_eq!(e.force_release().as_slice(), HYPER_UP);
+        assert_eq!(e.on_event(up(K1), false), Verdict::default());
+        assert_eq!(e.bindings_generation(), 5);
+    }
+
+    #[test]
+    fn apply_keeps_consumed_keys() {
+        let mut e = engine_with(&[K1]);
+        e.on_event(down(Key::CAPSLOCK), false);
+        e.on_event(down(K1), false);
+        let old = e.set_bindings(table(6, &[K2]));
+        assert_eq!(old.map(|b| b.generation), Some(5));
+        assert_eq!(e.bindings_generation(), 6);
+        // K1 is no longer bound, but its press was consumed: the up is still swallowed.
+        assert!(e.on_event(up(K1), false).swallow);
+        assert_eq!(e.on_event(down(K2), false).action, Some(0));
+    }
+
+    #[test]
+    fn hotkey_while_held_releases_and_presses_hyper_again() {
+        let mut e = Engine::new();
+        e.on_event(down(Key::CAPSLOCK), false);
+        let chord = kuality_protocol::parse_chord("ctrl+shift+esc").unwrap();
+        let esc = Key(0x1B);
+        let mut expected = HYPER_UP.to_vec();
+        expected.extend([
+            Down(Key::LCTRL),
+            Down(Key::LSHIFT),
+            Down(esc),
+            Up(esc),
+            Up(Key::LSHIFT),
+            Up(Key::LCTRL),
+        ]);
+        expected.extend(HYPER_DOWN);
+        assert_eq!(e.hotkey(&chord).as_slice(), expected);
+        assert!(e.is_held() && e.modifiers_down());
+        // Hyper release afterwards is the normal sequence.
+        assert_eq!(
+            e.on_event(up(Key::CAPSLOCK), false).synth.as_slice(),
+            HYPER_UP
+        );
+    }
+
+    #[test]
+    fn hotkey_keeps_physically_held_modifiers_down() {
+        let mut e = Engine::new();
+        e.on_event(down(Key::CAPSLOCK), false);
+        e.on_event(down(Key::LSHIFT), false);
+        let chord = kuality_protocol::parse_chord("win").unwrap();
+        assert_eq!(
+            e.hotkey(&chord).as_slice(),
+            [
+                Down(Key::MASK),
+                Up(Key::MASK),
+                Up(Key::LWIN),
+                Up(Key::LALT),
+                Up(Key::LCTRL),
+                Down(Key::LWIN),
+                Up(Key::LWIN),
+                Down(Key::LCTRL),
+                Down(Key::LSHIFT),
+                Down(Key::LALT),
+                Down(Key::LWIN),
+            ]
+        );
+    }
+
+    #[test]
+    fn hotkey_when_not_held_is_just_the_chord() {
+        let mut e = Engine::new();
+        let chord = kuality_protocol::parse_chord("volume_mute").unwrap();
+        assert_eq!(
+            e.hotkey(&chord).as_slice(),
+            [Down(Key(0xAD)), Up(Key(0xAD))]
+        );
+        assert!(!e.modifiers_down());
+        // Longest chord fits in the buffer.
+        e.on_event(down(Key::CAPSLOCK), false);
+        let chord = kuality_protocol::parse_chord("lctrl+rctrl+shift+alt+k").unwrap();
+        assert_eq!(e.hotkey(&chord).len(), 6 + 4 + 2 + 4 + 4);
+    }
+
+    #[test]
+    fn key_set() {
+        let mut s = KeySet::EMPTY;
+        for c in [0u16, 63, 64, 200, 255] {
+            s.set(Key(c), true);
+            assert!(s.contains(Key(c)));
+        }
+        s.set(Key(300), true);
+        assert!(!s.contains(Key(300)));
+        s.set(Key(64), false);
+        assert!(!s.contains(Key(64)) && s.contains(Key(63)));
     }
 
     #[test]

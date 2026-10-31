@@ -1,4 +1,5 @@
-//! Keyboard thread: low-level keyboard hook + Hyperkey engine, see `docs/specs/hyperkey.md`.
+//! Keyboard thread: low-level keyboard hook + Hyperkey engine, see `docs/specs/hyperkey.md`,
+//! and shortcut dispatch, see `docs/specs/shortcuts.md`.
 //!
 //! One thread (`kuality-keyboard`) lives for the whole process. It owns a hidden top-level
 //! window (so it receives session, power and other broadcasts), the [`Engine`] and the hook.
@@ -6,11 +7,14 @@
 //!
 //! The hook callback follows strict rules: no heap allocation, no locks, no logging, nothing
 //! that can block. It only runs the engine, calls `GetKeyState`, one `SendInput` and posts
-//! trace messages to its own window.
+//! trace and action messages to its own window. The window procedure runs the shortcut:
+//! `send_hotkey` right here (it must coordinate with the injected Hyper modifiers), `launch`
+//! and `open_url` on the action worker.
 
 use std::cell::RefCell;
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
@@ -40,9 +44,11 @@ use ::windows::core::{PCWSTR, w};
 use kuality_protocol::Key;
 
 use super::input::{self, KUALITY_TAG};
+use crate::actions::{ActionWorker, Job};
 use crate::hyperkey::KeyboardCommand;
 use crate::hyperkey::engine::{Engine, HYPER_RELEASE_ORDER, KeyEvent, Synth, SynthBuf, Transition};
 use crate::platform::KeyboardBackend;
+use crate::shortcuts::{CompiledAction, CompiledBindings};
 
 const CLASS_NAME: PCWSTR = w!("KualityKeyboard");
 /// Commands are waiting in the channel.
@@ -52,6 +58,9 @@ const WM_APP_TRACE: u32 = WM_APP + 2;
 const TRACE_HYPER_DOWN: usize = 1;
 const TRACE_HYPER_UP: usize = 2;
 const TRACE_PANIC: usize = 3;
+/// Posted by the hook callback when a shortcut fires: `wparam` is the binding index in the
+/// table, `lparam` the table generation.
+const WM_APP_ACTION: u32 = WM_APP + 3;
 
 /// The keyboard thread's window, for the hook callback (read with one atomic load).
 static KEYBOARD_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -74,7 +83,7 @@ pub struct Keyboard {
 }
 
 impl KeyboardBackend for Keyboard {
-    fn start() -> io::Result<Self> {
+    fn start(actions: Arc<ActionWorker>) -> io::Result<Self> {
         let (tx, rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::sync_channel::<io::Result<(isize, u32)>>(1);
         let (done_tx, done_rx) = mpsc::sync_channel(1);
@@ -83,7 +92,7 @@ impl KeyboardBackend for Keyboard {
             .spawn(move || {
                 // Signals `join` even if the thread unwinds.
                 let _done = DoneGuard(done_tx);
-                thread_main(rx, ready_tx);
+                thread_main(rx, ready_tx, actions);
             })?;
         let (hwnd, thread_id) = ready_rx
             .recv()
@@ -146,9 +155,16 @@ struct Ctx {
     session_registered: bool,
     /// A release could not be injected (e.g. secure desktop); clean up on the next switch.
     cleanup_pending: bool,
+    /// Same table as the engine's (the engine is borrowed by the hook callback).
+    bindings: Arc<CompiledBindings>,
+    actions: Arc<ActionWorker>,
 }
 
-fn thread_main(rx: Receiver<KeyboardCommand>, ready: mpsc::SyncSender<io::Result<(isize, u32)>>) {
+fn thread_main(
+    rx: Receiver<KeyboardCommand>,
+    ready: mpsc::SyncSender<io::Result<(isize, u32)>>,
+    actions: Arc<ActionWorker>,
+) {
     // SAFETY: changes the priority of the current thread only.
     if let Err(e) = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) } {
         log::warn!("cannot raise keyboard thread priority: {e}");
@@ -200,6 +216,8 @@ fn thread_main(rx: Receiver<KeyboardCommand>, ready: mpsc::SyncSender<io::Result
         win_event,
         session_registered,
         cleanup_pending: false,
+        bindings: Arc::default(),
+        actions,
     }));
     // SAFETY: no arguments.
     let thread_id = unsafe { GetCurrentThreadId() };
@@ -278,9 +296,20 @@ impl Ctx {
 
     fn handle(&mut self, cmd: KeyboardCommand) -> bool {
         match cmd {
-            KeyboardCommand::Apply { hyperkey } => {
+            KeyboardCommand::Apply {
+                hyperkey,
+                shortcuts,
+            } => {
+                // The previous table is dropped here, outside the hook callback.
+                let _previous = ENGINE.with_borrow_mut(|e| e.set_bindings(Arc::clone(&shortcuts)));
+                self.bindings = shortcuts;
                 self.enabled = hyperkey.enabled;
+                let consumed = ENGINE.with_borrow(Engine::consumed);
                 self.update(true);
+                if self.hook.is_some() {
+                    // Apply does not forget consumed keys (shortcuts.md).
+                    ENGINE.with_borrow_mut(|e| e.restore_consumed(consumed));
+                }
             }
             KeyboardCommand::SetPaused(paused) => {
                 self.paused = paused;
@@ -351,6 +380,39 @@ impl Ctx {
             if let Err(e) = unsafe { UnhookWindowsHookEx(h) } {
                 log::warn!("UnhookWindowsHookEx failed: {e}");
             }
+        }
+    }
+
+    /// Runs the shortcut the hook callback reported (binding `index` of table `generation`).
+    fn run_shortcut(&mut self, index: usize, generation: u64) {
+        if generation != self.bindings.generation {
+            log::debug!("shortcut dropped: the config changed before it ran");
+            return;
+        }
+        let Some(binding) = self.bindings.entries.get(index) else {
+            return;
+        };
+        log::info!(
+            "shortcut #{} fired ({})",
+            binding.source,
+            binding.action.type_name()
+        );
+        match &binding.action {
+            CompiledAction::SendHotkey(chord) => {
+                let buf = ENGINE.with_borrow_mut(|e| e.hotkey(chord));
+                let mods_down = ENGINE.with_borrow(Engine::modifiers_down);
+                let ok = input::send(&buf);
+                if ok || mods_down {
+                    input::set_modifiers_down(mods_down);
+                }
+                if !ok {
+                    log::warn!("shortcut #{}: send_hotkey was not injected", binding.source);
+                }
+            }
+            action => self.actions.submit(Job {
+                source: binding.source,
+                action: action.clone(),
+            }),
         }
     }
 
@@ -453,6 +515,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // e.g. `taskkill` without /F picked this window: quit the whole app cleanly instead
             // of destroying the keyboard window.
             super::tray::request_quit();
+            LRESULT(0)
+        }
+        WM_APP_ACTION => {
+            with_ctx(|c| c.run_shortcut(wparam.0, lparam.0 as u64));
             LRESULT(0)
         }
         WM_APP_TRACE => {
@@ -558,10 +624,10 @@ unsafe fn on_key(wparam: WPARAM, lparam: LPARAM) -> bool {
         let mut e = e.try_borrow_mut().ok()?;
         let caps_on = ev.key == Key::CAPSLOCK && down && !e.is_held() && caps_toggled_on();
         let verdict = e.on_event(ev, caps_on);
-        Some((verdict, e.modifiers_down()))
+        Some((verdict, e.modifiers_down(), e.bindings_generation()))
     });
     // Borrow dropped before injecting.
-    let Some((verdict, mods_down)) = result else {
+    let Some((verdict, mods_down, generation)) = result else {
         return false;
     };
     if !verdict.synth.is_empty() {
@@ -576,19 +642,28 @@ unsafe fn on_key(wparam: WPARAM, lparam: LPARAM) -> bool {
         Some(Transition::HyperUp) => post_trace(TRACE_HYPER_UP),
         None => {}
     }
+    if let Some(index) = verdict.action {
+        // Run outside the callback, by the window procedure of this thread.
+        post(WM_APP_ACTION, usize::from(index), generation as isize);
+    }
     verdict.swallow
 }
 
 fn post_trace(code: usize) {
+    post(WM_APP_TRACE, code, 0);
+}
+
+/// Posts a message to the keyboard window (allowed inside the hook callback).
+fn post(msg: u32, wparam: usize, lparam: isize) {
     let hwnd = KEYBOARD_HWND.load(Ordering::Relaxed);
     if hwnd != 0 {
         // SAFETY: PostMessageW does not block; a stale HWND only makes it fail.
         let _ = unsafe {
             PostMessageW(
                 Some(HWND(hwnd as *mut _)),
-                WM_APP_TRACE,
-                WPARAM(code),
-                LPARAM(0),
+                msg,
+                WPARAM(wparam),
+                LPARAM(lparam),
             )
         };
     }

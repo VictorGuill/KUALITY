@@ -17,7 +17,7 @@ pub use dpi::dpi_awareness;
 pub use folders::roaming_app_data_dir;
 pub use instance::Instance;
 pub use keyboard::Keyboard;
-pub use shell::open_with_default_app;
+pub use shell::{launch, open_url, open_with_default_app};
 pub use time::local_time_now;
 pub use tray::{Tray, set_tray_paused};
 pub use watcher::Watcher;
@@ -28,8 +28,17 @@ use ::windows::Win32::System::Com::{
 
 /// Per-thread setup for the main (UI) thread: COM in STA mode, needed by `ShellExecuteW`.
 pub fn init_main_thread() {
-    // SAFETY: called once on the main thread before any COM/shell use; never uninitialized
-    // because the thread lives until the process exits.
+    init_sta();
+}
+
+/// Per-thread setup for the action worker: COM in STA mode, needed by `ShellExecuteExW`.
+pub fn init_action_thread() {
+    init_sta();
+}
+
+fn init_sta() {
+    // SAFETY: called once per thread before any COM/shell use; never uninitialized because
+    // these threads live until the process exits.
     let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
     if hr.is_err() {
         log::warn!("CoInitializeEx failed: {hr:?}");

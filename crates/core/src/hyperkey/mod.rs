@@ -6,11 +6,14 @@
 pub mod engine;
 
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use kuality_protocol::Hyperkey;
 
+use crate::actions::ActionWorker;
 use crate::platform::{self, KeyboardBackend};
+use crate::shortcuts::CompiledBindings;
 
 /// How long quit waits for the keyboard thread to finish.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
@@ -18,8 +21,12 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 /// Commands sent to the keyboard thread.
 #[derive(Debug, Clone, PartialEq)]
 pub enum KeyboardCommand {
-    /// New config (sent on startup and on every reload).
-    Apply { hyperkey: Hyperkey },
+    /// New config (sent on startup and on every reload). `shortcuts` is empty when
+    /// `shortcuts.enabled` is false.
+    Apply {
+        hyperkey: Hyperkey,
+        shortcuts: Arc<CompiledBindings>,
+    },
     /// Tray "Pause" (runtime only).
     SetPaused(bool),
     /// Release everything, unhook and end the thread.
@@ -34,15 +41,17 @@ pub struct KeyboardController {
 
 impl KeyboardController {
     /// Spawns the keyboard thread. No hook is installed until a config enables Hyperkey.
-    pub fn start() -> io::Result<Self> {
+    /// `launch`/`open_url` shortcuts are handed to `actions`.
+    pub fn start(actions: Arc<ActionWorker>) -> io::Result<Self> {
         Ok(Self {
-            backend: Some(platform::Keyboard::start()?),
+            backend: Some(platform::Keyboard::start(actions)?),
         })
     }
 
-    pub fn apply(&self, hyperkey: &Hyperkey) {
+    pub fn apply(&self, hyperkey: &Hyperkey, shortcuts: Arc<CompiledBindings>) {
         self.send(KeyboardCommand::Apply {
             hyperkey: hyperkey.clone(),
+            shortcuts,
         });
     }
 

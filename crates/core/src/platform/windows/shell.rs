@@ -1,10 +1,15 @@
-//! Opening files with their associated program.
+//! Opening files with their associated program, and the shell side of shortcut actions.
 
 use std::io;
 use std::path::Path;
 
-use ::windows::Win32::UI::Shell::ShellExecuteW;
-use ::windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use ::windows::Win32::System::Environment::ExpandEnvironmentStringsW;
+use ::windows::Win32::UI::Shell::{
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW, ShellExecuteW,
+};
+use ::windows::Win32::UI::WindowsAndMessaging::{
+    ASFW_ANY, AllowSetForegroundWindow, SW_SHOWNORMAL,
+};
 use ::windows::core::{PCWSTR, w};
 
 use super::wide;
@@ -55,4 +60,75 @@ pub fn open_with_default_app(path: &Path) -> io::Result<()> {
             result.0 as isize
         )))
     }
+}
+
+/// Runs a `launch` action: `%VAR%` expanded in all parts, `cwd` defaults to the parent folder of
+/// an absolute `path`, else `%USERPROFILE%`. Supports programs, `.lnk`, documents, folders and
+/// `shell:AppsFolder\<AUMID>`.
+pub fn launch(path: &str, params: &str, cwd: Option<&str>) -> io::Result<()> {
+    let path = expand_env(path)?;
+    let params = expand_env(params)?;
+    let cwd = match cwd {
+        Some(c) => Some(expand_env(c)?),
+        None => default_cwd(&path),
+    };
+    shell_execute(&path, &params, cwd.as_deref())
+}
+
+/// Runs an `open_url` action: opens the URI with its default handler.
+pub fn open_url(url: &str) -> io::Result<()> {
+    shell_execute(url, "", None)
+}
+
+fn default_cwd(path: &str) -> Option<String> {
+    let p = Path::new(path);
+    if p.is_absolute()
+        && let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty())
+    {
+        return Some(parent.to_string_lossy().into_owned());
+    }
+    std::env::var("USERPROFILE").ok()
+}
+
+/// `ExpandEnvironmentStringsW`; unknown variables are left as they are.
+fn expand_env(s: &str) -> io::Result<String> {
+    if !s.contains('%') {
+        return Ok(s.to_string());
+    }
+    let src = wide(s);
+    let mut buf = vec![0u16; s.len() + 64];
+    loop {
+        // SAFETY: `src` is NUL-terminated; `buf` is a writable slice whose length is passed.
+        let n = unsafe { ExpandEnvironmentStringsW(PCWSTR(src.as_ptr()), Some(&mut buf)) } as usize;
+        if n == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if n <= buf.len() {
+            // `n` includes the terminating NUL.
+            return Ok(String::from_utf16_lossy(&buf[..n - 1]));
+        }
+        buf.resize(n, 0);
+    }
+}
+
+fn shell_execute(file: &str, params: &str, dir: Option<&str>) -> io::Result<()> {
+    let file = wide(file);
+    let params = (!params.is_empty()).then(|| wide(params));
+    let dir = dir.map(wide);
+    let as_ptr = |s: &Option<Vec<u16>>| s.as_ref().map_or(PCWSTR::null(), |v| PCWSTR(v.as_ptr()));
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
+        lpVerb: w!("open"),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: as_ptr(&params),
+        lpDirectory: as_ptr(&dir),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    // SAFETY: lets whatever we start take the foreground; no pointers.
+    let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+    // SAFETY: `info` is initialized and its strings are NUL-terminated buffers that outlive the
+    // call.
+    unsafe { ShellExecuteExW(&mut info) }.map_err(io::Error::other)
 }

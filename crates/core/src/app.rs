@@ -2,14 +2,20 @@
 
 use std::ops::ControlFlow;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 use kuality_protocol::{CONFIG_VERSION, Config};
 
+use crate::actions::ActionWorker;
 use crate::config_store::changed_sections;
 use crate::hyperkey::KeyboardController;
-use crate::logging;
 use crate::platform::{self, DirWatcher, Event};
+use crate::{logging, shortcuts};
+
+/// How long quit waits for a running `launch`/`open_url` action.
+const ACTIONS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// State owned by the main thread.
 #[derive(Debug)]
@@ -19,6 +25,7 @@ pub struct App<W: DirWatcher> {
     reloads: Receiver<Box<Config>>,
     watcher: Option<W>,
     keyboard: Option<KeyboardController>,
+    actions: Arc<ActionWorker>,
     /// Tray "Pause" (runtime only, keyboard features only).
     paused: bool,
 }
@@ -31,6 +38,7 @@ impl<W: DirWatcher> App<W> {
         reloads: Receiver<Box<Config>>,
         watcher: Option<W>,
         keyboard: Option<KeyboardController>,
+        actions: Arc<ActionWorker>,
     ) -> Self {
         let app = Self {
             config,
@@ -38,11 +46,10 @@ impl<W: DirWatcher> App<W> {
             reloads,
             watcher,
             keyboard,
+            actions,
             paused: false,
         };
-        if let Some(k) = &app.keyboard {
-            k.apply(&app.config.hyperkey);
-        }
+        app.apply_keyboard(&app.config);
         // Also cleans up after a crash when Hyperkey is now disabled.
         reconcile_office_key(app.config.hyperkey.enabled);
         app
@@ -82,6 +89,8 @@ impl<W: DirWatcher> App<W> {
                 if let Some(mut k) = self.keyboard.take() {
                     k.shutdown();
                 }
+                // After the keyboard thread: no new actions can arrive.
+                self.actions.shutdown(ACTIONS_SHUTDOWN_TIMEOUT);
                 reconcile_office_key(false);
                 if let Some(w) = self.watcher.take() {
                     w.stop();
@@ -106,14 +115,26 @@ impl<W: DirWatcher> App<W> {
         log::info!("config reloaded, changed: {}", changed.join(", "));
         warn_if_newer(&new);
         logging::set_level(new.general.log_level);
-        if let Some(k) = &self.keyboard {
-            // On every reload: the keyboard thread reinstalls the hook, which is harmless.
-            k.apply(&new.hyperkey);
-        }
+        // On every reload: the keyboard thread reinstalls the hook, which is harmless.
+        self.apply_keyboard(&new);
         if new.hyperkey.enabled != self.config.hyperkey.enabled {
             reconcile_office_key(new.hyperkey.enabled);
         }
         self.config = new;
+    }
+}
+
+impl<W: DirWatcher> App<W> {
+    /// Sends the Hyperkey settings and the compiled shortcuts to the keyboard thread.
+    fn apply_keyboard(&self, config: &Config) {
+        let Some(k) = &self.keyboard else {
+            return;
+        };
+        let compiled = shortcuts::compile(&config.shortcuts);
+        if config.shortcuts.enabled && !config.hyperkey.enabled {
+            log::warn!("shortcuts are enabled but need Hyperkey (hyperkey.enabled) to work");
+        }
+        k.apply(&config.hyperkey, Arc::new(compiled));
     }
 }
 

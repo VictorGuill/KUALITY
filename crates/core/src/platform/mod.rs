@@ -8,14 +8,18 @@ use std::ops::ControlFlow;
 use std::path::Path;
 use std::time::Duration;
 
+use std::sync::Arc;
+
+use crate::actions::ActionWorker;
 use crate::hyperkey::KeyboardCommand;
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub use self::windows::{
-    Instance, Keyboard, Tray, Watcher, dpi_awareness, init_main_thread, install_crash_guard,
-    local_time_now, office_key, open_with_default_app, roaming_app_data_dir, set_tray_paused,
+    Instance, Keyboard, Tray, Watcher, dpi_awareness, init_action_thread, init_main_thread,
+    install_crash_guard, launch, local_time_now, office_key, open_url, open_with_default_app,
+    roaming_app_data_dir, set_tray_paused,
 };
 
 #[cfg(not(windows))]
@@ -71,10 +75,11 @@ pub trait TrayIcon: Sized {
     fn run(self, handler: impl FnMut(Event) -> ControlFlow<()> + 'static);
 }
 
-/// The keyboard hook thread (Hyperkey, later Shortcuts).
+/// The keyboard hook thread (Hyperkey and Shortcuts).
 pub trait KeyboardBackend: Sized {
-    /// Spawns the thread; it runs until [`KeyboardCommand::Shutdown`].
-    fn start() -> io::Result<Self>;
+    /// Spawns the thread; it runs until [`KeyboardCommand::Shutdown`]. `launch`/`open_url`
+    /// shortcuts are handed to `actions`.
+    fn start(actions: Arc<ActionWorker>) -> io::Result<Self>;
     /// Queues a command and wakes the thread.
     fn send(&self, cmd: KeyboardCommand);
     /// Waits up to `timeout` for the thread to end. Returns `false` on timeout.
