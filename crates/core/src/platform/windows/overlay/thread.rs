@@ -20,7 +20,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use ::windows::Win32::Graphics::Gdi::HMONITOR;
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::System::RemoteDesktop::{
@@ -40,6 +40,7 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
     WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
     WTS_SESSION_UNLOCK,
 };
+use ::windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, TPM_VERTICAL, TPMPARAMS};
 use ::windows::core::{PCWSTR, w};
 
 use super::fullscreen;
@@ -610,13 +611,14 @@ impl State {
         }
     }
 
-    /// Item key of one of our widget windows.
-    fn key_of(&self, widget: HWND) -> Option<String> {
-        self.taskbars
-            .iter()
-            .flat_map(|t| &t.windows)
-            .find(|(_, w)| w.hwnd == widget)
-            .map(|(k, _)| k.clone())
+    /// Item key of one of our widget windows, and the taskbar it is in.
+    fn key_of(&self, widget: HWND) -> Option<(String, HWND)> {
+        self.taskbars.iter().find_map(|t| {
+            t.windows
+                .iter()
+                .find(|(_, w)| w.hwnd == widget)
+                .map(|(k, _)| (k.clone(), t.hwnd))
+        })
     }
 
     /// Context menu "Hide": removes the item from every taskbar until the next `Apply` (the
@@ -756,7 +758,7 @@ unsafe extern "system" fn shell_event(
 /// Shows the widget context menu (Settings / Hide) for widget window `widget`. Runs outside any
 /// state borrow: `TrackPopupMenuEx` pumps messages until the menu closes.
 fn on_widget_menu(host: HWND, widget: HWND, pos: LPARAM) {
-    let Some(Some(key)) = with_state(|s| s.key_of(widget)) else {
+    let Some(Some((key, taskbar))) = with_state(|s| s.key_of(widget)) else {
         return;
     };
     let (mut x, mut y) = (
@@ -770,6 +772,16 @@ fn on_widget_menu(host: HWND, widget: HWND, pos: LPARAM) {
             (x, y) = (p.x, p.y);
         }
     }
+    // The menu must not overlap the taskbar band (it can end up behind it): bottom-align it at
+    // the taskbar's top edge and exclude the taskbar rect (a top taskbar flips it below).
+    let mut params = TPMPARAMS {
+        cbSize: size_of::<TPMPARAMS>() as u32,
+        rcExclude: RECT::default(),
+    };
+    // SAFETY: plain query on Explorer's window into a local RECT (non-blocking).
+    if unsafe { GetWindowRect(taskbar, &mut params.rcExclude) }.is_ok() {
+        y = params.rcExclude.top;
+    }
     // SAFETY: creates, shows and destroys a popup menu owned by this function; `host` is ours.
     let cmd = unsafe {
         let Ok(menu) = CreatePopupMenu() else {
@@ -781,11 +793,11 @@ fn on_widget_menu(host: HWND, widget: HWND, pos: LPARAM) {
         let _ = SetForegroundWindow(host);
         let cmd = TrackPopupMenuEx(
             menu,
-            (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_BOTTOMALIGN).0,
+            (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_BOTTOMALIGN | TPM_VERTICAL).0,
             x,
             y,
             host,
-            None,
+            Some(&params),
         );
         let _ = PostMessageW(Some(host), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(menu);
