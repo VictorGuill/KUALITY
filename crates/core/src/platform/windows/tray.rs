@@ -15,7 +15,10 @@ use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 
 use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
-use ::windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
+use ::windows::Win32::System::Console::{
+    CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+    SetConsoleCtrlHandler,
+};
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
@@ -356,16 +359,31 @@ pub(crate) fn request_quit() {
     }
 }
 
-/// Ctrl+C / Ctrl+Break on the debug console → clean shutdown through `WM_CLOSE`.
+/// Debug console events → clean shutdown through `WM_CLOSE`.
+///
+/// Ctrl+C / Ctrl+Break: the handler returns and the main loop quits. Console closed (e.g.
+/// `taskkill` without `/F` picked the console window, which reports our process as its owner),
+/// logoff or shutdown: Windows terminates the process as soon as the handler returns, so it
+/// blocks until `main` finishes and exits the process (Windows allows about 5 s).
 unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
-    if ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT {
-        let hwnd = MAIN_HWND.load(Ordering::Relaxed);
-        if hwnd != 0 {
-            // SAFETY: PostMessageW is thread-safe.
-            let _ =
-                unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), WM_CLOSE, WPARAM(0), LPARAM(0)) };
-            return true.into();
-        }
+    let hwnd = MAIN_HWND.load(Ordering::Relaxed);
+    if hwnd == 0 {
+        return false.into();
     }
-    false.into()
+    let post_close = || {
+        // SAFETY: PostMessageW is thread-safe.
+        let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+    };
+    match ctrl_type {
+        CTRL_C_EVENT | CTRL_BREAK_EVENT => {
+            post_close();
+            true.into()
+        }
+        CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
+            post_close();
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            true.into()
+        }
+        _ => false.into(),
+    }
 }
