@@ -32,17 +32,21 @@ crates/
 
 Inside `core`, OS-specific code lives in a `platform` module (e.g. `platform::windows::keyboard`, `platform::windows::taskbar`) behind traits, so logic stays portable.
 
-Current `core` modules (Phase 0):
+Current `core` modules (Phases 0–1):
 
 | Module | Role |
 |---|---|
 | `main.rs` | Startup sequence: data dir → single instance → logging → config → tray → watcher → main loop |
-| `app.rs` | Main-thread state; handles `Event::{Wake, OpenSettings, Quit}` and applies reloaded configs |
+| `app.rs` | Main-thread state; handles `Event::{Wake, OpenSettings, TogglePause, Quit}`, applies reloaded configs, reconciles the Office key |
+| `hyperkey/engine.rs` | Portable Hyperkey state machine (no OS types, no allocation), unit-tested |
+| `hyperkey/mod.rs` | `KeyboardController` (start / apply / set_paused / shutdown) and `KeyboardCommand` |
 | `paths.rs` | Data dir resolution (portable marker vs `%APPDATA%\Kuality`) |
 | `config_store.rs` | Load/create/atomic save of `config.json`, `Reloader` (change detection), section diff |
 | `logging.rs` | `log` backend: `logs\kuality.log`, rotation, panic hook |
-| `platform/mod.rs` | Traits `SingleInstance`, `DirWatcher`, `TrayIcon`, `Waker` + free functions |
-| `platform/windows/` | Win32 implementations (`instance`, `tray`, `watcher`, `shell`, `folders`, `time`, `dpi`) |
+| `platform/mod.rs` | Traits `SingleInstance`, `DirWatcher`, `TrayIcon`, `Waker`, `KeyboardBackend` + free functions |
+| `platform/windows/` | Win32 implementations (`instance`, `tray`, `watcher`, `shell`, `folders`, `time`, `dpi`, `keyboard`, `input`, `office_key`, `crash`) |
+
+Keyboard thread (`platform/windows/keyboard.rs`): owns a hidden top-level window (class `KualityKeyboard`) for session/power broadcasts and a `EVENT_SYSTEM_DESKTOPSWITCH` WinEvent hook. The `WH_KEYBOARD_LL` hook is installed only while Hyperkey is active; its callback runs the engine and at most one tagged `SendInput` (no allocation, locks or logging). Commands arrive through `mpsc` + `PostMessageW(WM_APP_COMMAND)`. `crash.rs` installs a panic hook and an unhandled-exception filter that release injected modifiers.
 
 Main loop: a hidden top-level window (class `Kuality.Core`) owns the tray icon. Its window procedure only queues events; the message loop delivers them to the app handler after `DispatchMessageW`, so the handler is never re-entered. Other threads send data through `mpsc` channels and wake the loop with `PostMessageW` (`Waker`).
 

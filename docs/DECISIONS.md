@@ -84,6 +84,17 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **DPI manifest** — embedded with MSVC linker args (`/MANIFEST:EMBED /MANIFESTINPUT`) from `build.rs`, no resource crate; PerMonitorV2; effective awareness logged at startup.
 - **Settings placeholder** — `kuality-settings` has no dependencies until Phase 5.
 
+## Hyperkey implementation (2026-10-31, Phase 1)
+
+- **Key codes** — `protocol::Key(u16)` whose values equal Windows virtual-key codes; a future port maps native codes to them.
+- **Keyboard thread** — `kuality-keyboard` lives for the whole process (hidden top-level window for broadcasts); the `WH_KEYBOARD_LL` hook is installed only while Hyperkey is active and reinstalled on every config apply, unlock and resume.
+- **Pause** — tray item `Pause` (checkable, after Settings) uninstalls the hook; runtime only, keyboard features only (not widgets, not the Office key); tooltip `Kuality (paused)`.
+- **Office key backup** — besides `PrevExisted`/`PrevCommand`, the backup records the outermost key Kuality created (`CreatedKey`) and restore deletes only that subtree; `HKCU\Software\Kuality` is removed if left empty. A previous command of type `REG_EXPAND_SZ` keeps its type; any other type is left alone (apply fails with a warning).
+- **Leftover cleanup** — releases sent after unlock/resume are preceded by the mask key (a lone Win up would open Start); if a forced release failed (secure desktop), the next desktop switch also clears leftover modifiers.
+- **Window close** — `taskkill` without `/F` may target the keyboard window: its `WM_CLOSE` is forwarded to the main window (same clean shutdown). Commands fall back to `PostThreadMessageW` if the window is gone.
+- **Hard kill** — `taskkill /F` cannot release injected modifiers or restore the Office key; the next start restores the Office key if Hyperkey is disabled (documented limitation).
+- **keyviewer** — dev-only example `cargo run -p kuality --example keyviewer` for manual tests.
+
 ## Out of scope for now
 
 - Notifications widget (needs package identity / MSIX).

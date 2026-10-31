@@ -55,6 +55,7 @@ cargo clippy --all-targets -- -D warnings   # lint, must be clean
 cargo test                                  # unit tests (all crates)
 cargo run -p kuality                        # run the core (tray icon; Ctrl+C in the console quits cleanly)
 cargo run -p kuality-settings               # settings app (placeholder until Phase 5)
+cargo run -p kuality --example keyviewer    # dev tool: prints key messages + modifier state (Hyperkey tests)
 ```
 
 Runtime files: `%APPDATA%\Kuality\config.json` and `%APPDATA%\Kuality\logs\kuality.log`.
