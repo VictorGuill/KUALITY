@@ -12,6 +12,7 @@ While CapsLock is held, the system behaves as if Ctrl+Shift+Alt+Win are held. Ca
   - Tapping CapsLock alone: no Start menu, no menu bar, no Office hub, no input-language switch, CapsLock light/toggle does not change.
   - Real CapsLock is unavailable. If CapsLock is toggled ON when Hyperkey becomes active (or found ON later), Kuality turns it OFF.
   - Physical Ctrl/Shift/Alt/Win pressed while CapsLock is held add nothing (they are already part of Hyper) and are ignored.
+  - Office letters: Hyper+W/X/P/O/T/D/N/L/Y open nothing (the letter is dropped unless a shortcut is bound to it; see Office key below).
 - The Phase 0 tray menu gains a checkable **Pause** item right after Settings: `Settings`, `Pause`, separator, `Quit`. Pause suspends **all keyboard features** (Hyperkey and, from Phase 2, Shortcuts) by uninstalling the hook. Pause is runtime-only (not saved; Kuality always starts unpaused). The tray tooltip becomes `Kuality (paused)` while paused. Pause does not affect widgets.
 - Office key: while `hyperkey.enabled` is true and the core is running, Windows' Office-key launcher is disabled; it is restored when Hyperkey is disabled in config or Kuality quits cleanly.
 
@@ -73,7 +74,7 @@ Rules (exhaustive):
 4. `CAPSLOCK` up, `held == true` → synth = release sequence (below); `held = false`; swallow.
 5. `CAPSLOCK` up, `held == false` (we missed the down, e.g. hook installed while CapsLock was down) → swallow, no synth.
 6. Any of the 8 sided modifiers, down or up, while `held` → swallow, no synth (only `physical` is updated).
-7. Anything else → pass (`swallow = false`). Phase 2 inserts its binding check here.
+7. Anything else → pass (`swallow = false`). Phase 2 inserts its binding check here, followed by the Office-letter drop: a down of one of `OFFICE_LETTERS` (W, X, P, O, T, D, N, L, Y) while `held` and not bound → swallow and mark consumed (its repeats and up are swallowed too, as for bound keys).
 
 Release sequence (`force_release` returns the same when `held`; empty otherwise):
 `Down(MASK), Up(MASK)`, then `Up` for each key in `injected` in order LWIN, LALT, LSHIFT, LCTRL, **skipping any whose sided key is physically down** in `physical` (so a Shift the user is still holding stays down). Then `injected = empty`, `held = false`.
@@ -142,7 +143,10 @@ The hidden window registers:
 
 ### Office key (`platform/windows/office_key.rs`)
 
-Explorer launches Office (`Ctrl+Shift+Alt+Win` alone, and with W/X/T/O/P/D/L/N/Y) through the `ms-officeapp` protocol. Override it in HKCU:
+Explorer registers `Ctrl+Shift+Alt+Win` alone and with W/X/T/O/P/D/L/N/Y as Office hotkeys. Two mechanisms block them:
+
+- **Office letters** (engine rule 7): while Hyper is held, unbound Office letters are dropped in the hook, so Explorer never sees them. Observed on Windows 11 IoT Enterprise LTSC, build 26300 (2026-11-01): with only the `ms-officeapp` override, Explorer still opened `https://go.microsoft.com/fwlink/?linkid=…` pages in the default browser (T Teams 2044782, W 2044666, X 2044684, P 2044769, O 2044778, N 2044773, Y 2044904, L LinkedIn 2044786; D opened nothing). `https` cannot be overridden, and apps never receive these combos anyway (Explorer takes the key down). Hyper+L opened LinkedIn and did not lock the PC.
+- **Office key alone**: launched through the `ms-officeapp` protocol. Override it in HKCU:
 
 - **Apply** (idempotent): if `HKCU\Software\Kuality\OfficeKey` value `Applied` (DWORD) is 1 → do nothing. Otherwise record backup under `HKCU\Software\Kuality\OfficeKey`: `PrevExisted` (DWORD 0/1: whether `HKCU\Software\Classes\ms-officeapp` existed) and `PrevCommand` (REG_SZ, the previous default value of `...\ms-officeapp\Shell\Open\Command`, only if it existed). Then create `HKCU\Software\Classes\ms-officeapp\Shell\Open\Command` with default value (REG_SZ) `rundll32`, set `Applied = 1`, call `SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, null, null)`.
 - **Restore**: if `Applied != 1` → nothing. If `PrevExisted == 0` → `RegDeleteTreeW(HKCU\Software\Classes\ms-officeapp)`. Else if `PrevCommand` was recorded → write it back as the default value; else delete only the default value we wrote. Delete `HKCU\Software\Kuality\OfficeKey`, `SHChangeNotify`.
@@ -175,7 +179,9 @@ Explorer launches Office (`Ctrl+Shift+Alt+Win` alone, and with W/X/T/O/P/D/L/N/Y
 | Disable/pause while CapsLock held | `force_release` before unhooking. |
 | Another LL-hook app (AutoHotkey, RDP client, VM) installed after us | It sees keys first; whatever it swallows never reaches us. Documented. |
 | Fullscreen games | Remap stays active; user can Pause from the tray. |
-| Hyper+L | May trigger Windows lock (Win+L is reserved by the OS). Verify; if it locks, document "L not usable". |
+| Hyper+L | Office letter: dropped unless bound (before, it opened LinkedIn; it did not lock the PC in tests with injected input). |
+| Physical Ctrl+Shift+Alt+Win+Office letter (no CapsLock) | Not Hyper: reaches Explorer and opens the Office page. Limitation. |
+| Another tool registered an Office-letter combo as its own hotkey | Dropped too while Hyper is held (no setting); bind the letter in Kuality instead. |
 
 ## Out of scope
 
@@ -204,7 +210,7 @@ Manual (Windows 11), with `hyperkey.enabled = true`. Add a dev-only example `cra
 6. Hold CapsLock, press Win+L / Ctrl+Alt+Del, unlock → no stuck modifiers (type in Notepad: plain letters).
 7. Sleep/resume while idle, and while holding CapsLock → no stuck modifiers, Hyper still works.
 8. Tray Quit while holding CapsLock → no stuck modifiers; Office key registry restored.
-9. Office key: with Hyperkey enabled, Hyper alone and Hyper+W/X/T/O/P/D/L/N/Y open nothing. Record in the PR which combos reach keyviewer (Explorer may still consume some; see Assumptions). Disable → registry restored to original state (check with `reg query`).
+9. Office key: with Hyperkey enabled, Hyper alone and Hyper+W/X/T/O/P/D/L/N/Y open nothing (no new browser tab); a bound Office letter fires its shortcut; Hyper+K still reaches keyviewer. Disable → registry restored to original state (check with `reg query`).
 10. Idle: Task Manager shows 0% CPU for the core with Hyperkey enabled; no measurable lag typing.
 11. Debug build: log shows Hyper transitions but no key codes.
 
@@ -219,7 +225,7 @@ Manual (Windows 11), with `hyperkey.enabled = true`. Add a dev-only example `cra
 7. Physical Ctrl/Shift/Alt/Win are swallowed while Hyper is held.
 8. The hook thread exists for the whole process life; the hook itself is installed only while active.
 9. Office key override is tied to `hyperkey.enabled` (not to Pause), restored on clean quit, reconciled at startup; backup lives in `HKCU\Software\Kuality\OfficeKey`.
-10. The Office key registry override may not stop Explorer from consuming every Hyper+letter combo on all Windows 11 builds; that is recorded as a limitation, not worked around in this phase. Phase 2 bound shortcuts are unaffected because the hook consumes them before Explorer.
+10. *(Revised 2026-11-01.)* The registry override alone does not stop Hyper+letter: Explorer opens the Office web pages directly. The hook therefore drops unbound Office letters while Hyper is held (rule 7); bound ones run their shortcut. Explorer's hotkey registration itself is left alone.
 11. Crash recovery uses a panic hook + unhandled exception filter; hard kills are a documented limitation.
 12. No new crates. Only additional `windows` crate features (below).
 

@@ -2,13 +2,13 @@
 
 ## Goal
 
-Hyper+key runs a configured action. Initial actions: `launch`, `send_hotkey`, `open_url`. Bound shortcuts are consumed; unbound keys reach apps as the normal Hyper combo. Builds directly on [hyperkey.md](hyperkey.md).
+Hyper+key runs a configured action. Initial actions: `launch`, `send_hotkey`, `open_url`. Bound shortcuts are consumed; unbound keys reach apps as the normal Hyper combo, except the Office letters (W/X/P/O/T/D/N/L/Y), which are dropped (hyperkey.md rule 7). Builds directly on [hyperkey.md](hyperkey.md).
 
 ## Behavior (user-visible)
 
 - Shortcuts work only while Hyperkey is **active** (`hyperkey.enabled`, not paused) **and** `shortcuts.enabled` is true. Pause stops them too.
 - Hold CapsLock, press a bound key → the action runs **once**, on key down. Holding the key does not repeat it. The key (down, repeats, up) never reaches any app.
-- Hold CapsLock, press an unbound key → apps receive Ctrl+Shift+Alt+Win+key (Phase 1 behavior).
+- Hold CapsLock, press an unbound key → apps receive Ctrl+Shift+Alt+Win+key (Phase 1 behavior); an unbound Office letter is dropped instead.
 - Physical Ctrl/Shift/Alt/Win held during Hyper are ignored (Phase 1), so Hyper+Shift+1 triggers the Hyper+1 binding.
 - Releasing CapsLock before the bound key is fine: the key's up is still swallowed.
 - Invalid bindings are skipped with a log warning; the rest keep working.
