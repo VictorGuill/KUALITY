@@ -24,14 +24,14 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 
 ## Phase 1 — Hyperkey
 
-- [ ] Spec `docs/specs/hyperkey.md`
-- [ ] Low-level keyboard hook on a dedicated thread
-- [ ] CapsLock held → Ctrl+Shift+Alt+Win down; released → up; CapsLock itself swallowed
-- [ ] Injected events tagged, no feedback loops, no key-repeat spam
-- [ ] Mask key before releasing so Start menu / menu bar don't open
+- [x] Spec `docs/specs/hyperkey.md`
+- [x] Low-level keyboard hook on a dedicated thread
+- [x] CapsLock held → Ctrl+Shift+Alt+Win down; released → up; CapsLock itself swallowed
+- [x] Injected events tagged, no feedback loops, no key-repeat spam
+- [x] Mask key before releasing so Start menu / menu bar don't open
 - [ ] Office key disabled while enabled, restored when disabled
 - [ ] Toggle via `hyperkey.enabled` (hot-reload) and tray "Pause"
-- [ ] Safe recovery: modifiers never left stuck (on quit, crash, lock screen)
+- [x] Safe recovery: modifiers never left stuck (on quit, crash, lock screen)
 
 **Done when:** holding CapsLock + T in any app is received as Ctrl+Shift+Alt+Win+T, tapping it alone does nothing visible.
 

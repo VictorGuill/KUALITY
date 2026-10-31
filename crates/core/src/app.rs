@@ -7,6 +7,7 @@ use std::sync::mpsc::Receiver;
 use kuality_protocol::{CONFIG_VERSION, Config};
 
 use crate::config_store::changed_sections;
+use crate::hyperkey::KeyboardController;
 use crate::logging;
 use crate::platform::{self, DirWatcher, Event};
 
@@ -17,21 +18,29 @@ pub struct App<W: DirWatcher> {
     config_path: PathBuf,
     reloads: Receiver<Box<Config>>,
     watcher: Option<W>,
+    keyboard: Option<KeyboardController>,
 }
 
 impl<W: DirWatcher> App<W> {
+    /// Applies the initial config to the subsystems.
     pub fn new(
         config: Config,
         config_path: PathBuf,
         reloads: Receiver<Box<Config>>,
         watcher: Option<W>,
+        keyboard: Option<KeyboardController>,
     ) -> Self {
-        Self {
+        let app = Self {
             config,
             config_path,
             reloads,
             watcher,
+            keyboard,
+        };
+        if let Some(k) = &app.keyboard {
+            k.apply(&app.config.hyperkey);
         }
+        app
     }
 
     /// Handles one event from the main loop.
@@ -53,6 +62,9 @@ impl<W: DirWatcher> App<W> {
             }
             Event::Quit => {
                 log::info!("quitting");
+                if let Some(mut k) = self.keyboard.take() {
+                    k.shutdown();
+                }
                 if let Some(w) = self.watcher.take() {
                     w.stop();
                 }
@@ -70,6 +82,10 @@ impl<W: DirWatcher> App<W> {
         log::info!("config reloaded, changed: {}", changed.join(", "));
         warn_if_newer(&new);
         logging::set_level(new.general.log_level);
+        if let Some(k) = &self.keyboard {
+            // On every reload: the keyboard thread reinstalls the hook, which is harmless.
+            k.apply(&new.hyperkey);
+        }
         self.config = new;
     }
 }

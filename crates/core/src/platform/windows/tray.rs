@@ -312,6 +312,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
+/// Asks the main loop to quit cleanly (as if `WM_CLOSE` reached the tray window). Any thread.
+pub(crate) fn request_quit() {
+    let hwnd = MAIN_HWND.load(Ordering::Relaxed);
+    if hwnd != 0 {
+        // SAFETY: PostMessageW is thread-safe.
+        let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+    }
+}
+
 /// Ctrl+C / Ctrl+Break on the debug console → clean shutdown through `WM_CLOSE`.
 unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
     if ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT {

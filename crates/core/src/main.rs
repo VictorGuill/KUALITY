@@ -1,13 +1,14 @@
 //! Kuality core (`kuality.exe`): always-running process with the tray icon.
 //!
-//! Phase 0: config load/create/hot-reload, logging, single instance, tray menu.
-//! See `docs/specs/skeleton.md`.
+//! Phase 0: config load/create/hot-reload, logging, single instance, tray menu
+//! (`docs/specs/skeleton.md`). Phase 1: Hyperkey (`docs/specs/hyperkey.md`).
 
 // No console window in release builds; debug builds keep it for log output.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
 mod config_store;
+mod hyperkey;
 mod logging;
 mod paths;
 mod platform;
@@ -19,6 +20,7 @@ use std::time::Duration;
 
 use app::App;
 use config_store::{LoadStatus, ReloadOutcome, Reloader};
+use hyperkey::KeyboardController;
 use paths::{DataDir, DataDirSource};
 use platform::{DirWatcher, SingleInstance, TrayIcon, Waker};
 
@@ -50,6 +52,8 @@ fn main() -> ExitCode {
 
     let log_result = logging::init(&data_dir.logs_dir(), true);
     logging::install_panic_hook();
+    // Runs before the logging hook: releases any modifiers Hyperkey holds down.
+    platform::install_crash_guard();
     log::info!(
         "Kuality {} starting (pid {})",
         env!("CARGO_PKG_VERSION"),
@@ -143,7 +147,15 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut app = App::new(loaded.config, config_path, rx, watcher);
+    let keyboard = match KeyboardController::start() {
+        Ok(k) => Some(k),
+        Err(e) => {
+            log::error!("cannot start the keyboard thread: {e}; Hyperkey unavailable");
+            None
+        }
+    };
+
+    let mut app = App::new(loaded.config, config_path, rx, watcher, keyboard);
     log::info!("ready");
     tray.run(move |event| app.handle(event));
 

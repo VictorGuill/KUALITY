@@ -8,12 +8,14 @@ use std::ops::ControlFlow;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::hyperkey::KeyboardCommand;
+
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub use self::windows::{
-    Instance, Tray, Watcher, dpi_awareness, init_main_thread, local_time_now,
-    open_with_default_app, roaming_app_data_dir,
+    Instance, Keyboard, Tray, Watcher, dpi_awareness, init_main_thread, install_crash_guard,
+    local_time_now, open_with_default_app, roaming_app_data_dir,
 };
 
 #[cfg(not(windows))]
@@ -65,4 +67,14 @@ pub trait TrayIcon: Sized {
     /// Runs the event loop until the handler returns `Break`. Removes the icon on exit.
     /// The handler is never called re-entrantly.
     fn run(self, handler: impl FnMut(Event) -> ControlFlow<()> + 'static);
+}
+
+/// The keyboard hook thread (Hyperkey, later Shortcuts).
+pub trait KeyboardBackend: Sized {
+    /// Spawns the thread; it runs until [`KeyboardCommand::Shutdown`].
+    fn start() -> io::Result<Self>;
+    /// Queues a command and wakes the thread.
+    fn send(&self, cmd: KeyboardCommand);
+    /// Waits up to `timeout` for the thread to end. Returns `false` on timeout.
+    fn join(self, timeout: Duration) -> bool;
 }

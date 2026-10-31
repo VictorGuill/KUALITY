@@ -1,16 +1,21 @@
 //! Windows implementation of the platform layer.
 
+mod crash;
 mod dpi;
 mod folders;
+mod input;
 mod instance;
+mod keyboard;
 mod shell;
 mod time;
 mod tray;
 mod watcher;
 
+pub use crash::install_crash_guard;
 pub use dpi::dpi_awareness;
 pub use folders::roaming_app_data_dir;
 pub use instance::Instance;
+pub use keyboard::Keyboard;
 pub use shell::open_with_default_app;
 pub use time::local_time_now;
 pub use tray::Tray;
