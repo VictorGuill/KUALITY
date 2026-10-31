@@ -22,6 +22,16 @@ Requirements: Windows 11, [Rust](https://rustup.rs) (MSVC toolchain), Visual Stu
 cargo build --release
 ```
 
+## Running (dev mode)
+
+```powershell
+cargo run -p kuality
+```
+
+Starts the core with a console showing the log; a tray icon appears. Press Ctrl+C in the console or use the tray menu → Quit to stop it.
+
+Config lives in `%APPDATA%\Kuality\config.json` (created with everything disabled on first run) and is reloaded live when you save it. For a throwaway setup, create an empty file `target\debug\portable`: config and logs then live in `target\debug\`.
+
 ## Docs
 
 - [Vision](docs/VISION.md)
