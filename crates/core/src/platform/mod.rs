@@ -17,9 +17,10 @@ use crate::hyperkey::KeyboardCommand;
 mod windows;
 #[cfg(windows)]
 pub use self::windows::{
-    Instance, Keyboard, Tray, Watcher, dpi_awareness, init_action_thread, init_main_thread,
-    install_crash_guard, launch, local_time_now, office_key, open_url, open_with_default_app,
-    roaming_app_data_dir, set_tray_paused,
+    Instance, Keyboard, Tray, Watcher, action_thread_init, action_thread_run, action_thread_stop,
+    action_thread_wake, dpi_awareness, init_main_thread, install_crash_guard, launch,
+    local_time_now, office_key, open_url, open_with_default_app, roaming_app_data_dir,
+    set_tray_paused,
 };
 
 #[cfg(not(windows))]

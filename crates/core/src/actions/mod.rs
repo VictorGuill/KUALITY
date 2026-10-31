@@ -1,7 +1,8 @@
 //! Actions run by shortcuts. See `docs/specs/shortcuts.md`.
 //!
 //! `launch` and `open_url` run on the `kuality-actions` worker thread so the keyboard thread
-//! never waits for the shell. `send_hotkey` does not come here: it runs on the keyboard thread,
+//! never waits for the shell. The thread runs a platform message loop (it is a COM STA and the
+//! shell may leave windows on it); jobs travel through a channel and a wake-up message. `send_hotkey` does not come here: it runs on the keyboard thread,
 //! which owns the injected Hyper modifiers.
 
 pub mod quote;
@@ -32,8 +33,15 @@ pub struct ActionWorker {
 #[derive(Debug, Default)]
 struct Inner {
     tx: Option<Sender<Job>>,
-    thread: Option<(JoinHandle<()>, Receiver<()>)>,
+    thread: Option<Thread>,
     closed: bool,
+}
+
+#[derive(Debug)]
+struct Thread {
+    id: u32,
+    handle: JoinHandle<()>,
+    done: Receiver<()>,
 }
 
 impl ActionWorker {
@@ -59,9 +67,12 @@ impl ActionWorker {
                 }
             }
         }
-        if let Some(tx) = &inner.tx
-            && tx.send(job).is_err()
-        {
+        let sent = inner.tx.as_ref().is_some_and(|tx| tx.send(job).is_ok())
+            && inner
+                .thread
+                .as_ref()
+                .is_some_and(|t| platform::action_thread_wake(t.id));
+        if !sent {
             log::error!("action thread is gone; action dropped");
             inner.tx = None;
         }
@@ -71,12 +82,13 @@ impl ActionWorker {
     pub fn shutdown(&self, timeout: Duration) {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         inner.closed = true;
-        // Dropping the sender ends the thread's loop once the queue is empty.
         inner.tx = None;
-        if let Some((thread, done)) = inner.thread.take() {
-            match done.recv_timeout(timeout) {
+        if let Some(thread) = inner.thread.take() {
+            // Queued after any pending wake-ups, so queued jobs still run first.
+            platform::action_thread_stop(thread.id);
+            match thread.done.recv_timeout(timeout) {
                 Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    let _ = thread.join();
+                    let _ = thread.handle.join();
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     log::warn!("action thread did not stop within {timeout:?}");
@@ -86,23 +98,34 @@ impl ActionWorker {
     }
 }
 
-type Spawned = (Sender<Job>, (JoinHandle<()>, Receiver<()>));
-
-fn spawn() -> std::io::Result<Spawned> {
+fn spawn() -> std::io::Result<(Sender<Job>, Thread)> {
     let (tx, rx) = mpsc::channel::<Job>();
     let (done_tx, done_rx) = mpsc::sync_channel(1);
-    let thread = std::thread::Builder::new()
+    let (id_tx, id_rx) = mpsc::sync_channel(1);
+    let handle = std::thread::Builder::new()
         .name("kuality-actions".into())
         .spawn(move || {
             let _done = DoneGuard(done_tx);
-            platform::init_action_thread();
+            let _ = id_tx.send(platform::action_thread_init());
             log::debug!("action thread started");
-            while let Ok(job) = rx.recv() {
-                run(&job);
-            }
+            platform::action_thread_run(|| {
+                while let Ok(job) = rx.try_recv() {
+                    run(&job);
+                }
+            });
             log::debug!("action thread stopped");
         })?;
-    Ok((tx, (thread, done_rx)))
+    let id = id_rx
+        .recv()
+        .map_err(|_| std::io::Error::other("action thread exited during startup"))?;
+    Ok((
+        tx,
+        Thread {
+            id,
+            handle,
+            done: done_rx,
+        },
+    ))
 }
 
 struct DoneGuard(mpsc::SyncSender<()>);

@@ -356,6 +356,21 @@ pub(crate) fn request_quit() {
     }
 }
 
+/// Id of the thread that owns the main window (0 if it does not exist). Any thread.
+pub(crate) fn main_thread_id() -> u32 {
+    let hwnd = MAIN_HWND.load(Ordering::Relaxed);
+    if hwnd == 0 {
+        return 0;
+    }
+    // SAFETY: plain window query; a stale HWND only returns 0.
+    unsafe {
+        ::windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+            HWND(hwnd as *mut _),
+            None,
+        )
+    }
+}
+
 /// Ctrl+C / Ctrl+Break on the debug console → clean shutdown through `WM_CLOSE`.
 unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
     if ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT {
