@@ -115,7 +115,7 @@ Draft shape (will be refined per phase):
 | Fullscreen detection | `SHQueryUserNotificationState` and/or foreground window covers monitor |
 | Rendering | Direct2D + DirectWrite, per-monitor DPI aware v2 |
 | Media | WinRT `GlobalSystemMediaTransportControlsSessionManager` |
-| Theme | Registry `AppsUseLightTheme` / `SystemUsesLightTheme` + `WM_SETTINGCHANGE` |
+| Theme | Widgets: taskbar pixels sampled from the screen (contrast rule), registry `SystemUsesLightTheme` as fallback; re-checked on `WM_SETTINGCHANGE` |
 | Elevated autostart | Task Scheduler task with "run with highest privileges" at logon |
 | Single instance | Named mutex |
 | IPC | Named pipe `\\.\pipe\kuality` |

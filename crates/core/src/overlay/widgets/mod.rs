@@ -34,6 +34,35 @@ impl Theme {
     }
 }
 
+/// Relative luminance (WCAG 2) of an sRGB color, 0 (black) … 1 (white).
+pub fn relative_luminance(r: u8, g: u8, b: u8) -> f64 {
+    fn linear(c: u8) -> f64 {
+        let c = f64::from(c) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+}
+
+impl Theme {
+    /// The theme whose default text color has the higher contrast ratio on a background of
+    /// relative luminance `l` (white text on dark backgrounds, `#1B1B1B` on light ones).
+    pub fn for_background(l: f64) -> Self {
+        let contrast = |c: Color| {
+            let lc = relative_luminance(c.r, c.g, c.b);
+            (l.max(lc) + 0.05) / (l.min(lc) + 0.05)
+        };
+        if contrast(Self::Light.text_color()) > contrast(Self::Dark.text_color()) {
+            Self::Light
+        } else {
+            Self::Dark
+        }
+    }
+}
+
 /// Font and paragraph settings of a piece of text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextStyle {
@@ -73,5 +102,29 @@ impl Content {
         match self {
             Self::Text(t) => t.draw(r, size, theme),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn luminance_bounds() {
+        assert_eq!(relative_luminance(0, 0, 0), 0.0);
+        assert!((relative_luminance(255, 255, 255) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn theme_follows_the_background() {
+        let theme = |r, g, b| Theme::for_background(relative_luminance(r, g, b));
+        // Windows 11 dark and light taskbars.
+        assert_eq!(theme(28, 28, 28), Theme::Dark);
+        assert_eq!(theme(238, 238, 238), Theme::Light);
+        // Accent-colored taskbar (default blue) and other mid tones.
+        assert_eq!(theme(0, 120, 215), Theme::Dark);
+        assert_eq!(theme(255, 185, 0), Theme::Light);
+        assert_eq!(theme(128, 128, 128), Theme::Light);
+        assert_eq!(theme(100, 100, 100), Theme::Dark);
     }
 }

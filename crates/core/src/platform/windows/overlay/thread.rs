@@ -172,6 +172,8 @@ struct TaskbarHost {
     client: SizePx,
     /// A fullscreen window is in the foreground on this taskbar's monitor.
     hidden_by_fullscreen: bool,
+    /// Theme sampled from the taskbar's pixels (last successful sample).
+    sampled_theme: Option<Theme>,
     /// Item key → window, in item order (later items on top).
     windows: Vec<(String, WidgetWindow)>,
 }
@@ -184,7 +186,38 @@ impl TaskbarHost {
             scale: 1.0,
             client: SizePx::default(),
             hidden_by_fullscreen: false,
+            sampled_theme: None,
             windows: Vec::new(),
+        }
+    }
+
+    /// Re-samples the taskbar background (skipping our widgets). Keeps the previous sample when
+    /// it cannot be read (fullscreen window on top, taskbar auto-hidden…).
+    fn sample_theme(&mut self) {
+        if self.hidden_by_fullscreen {
+            return;
+        }
+        let exclude: Vec<RECT> = self
+            .windows
+            .iter()
+            .filter_map(|(_, w)| {
+                let mut r = RECT::default();
+                // SAFETY: our own window; writes into a local.
+                unsafe { GetWindowRect(w.hwnd, &mut r) }.ok().map(|()| r)
+            })
+            .collect();
+        if let Some((theme, luminance)) = theme::sample(self.hwnd, &exclude)
+            && self.sampled_theme != Some(theme)
+        {
+            log::debug!(
+                "taskbar background luminance {luminance:.3}: {} text",
+                if theme == Theme::Light {
+                    "dark"
+                } else {
+                    "light"
+                }
+            );
+            self.sampled_theme = Some(theme);
         }
     }
 
@@ -538,6 +571,9 @@ impl State {
         drop(old);
         // Before layout, so windows are created hidden on a fullscreen monitor.
         self.sync_fullscreen();
+        for tb in &mut self.taskbars {
+            tb.sample_theme();
+        }
         let create_error = self.layout_all();
         self.after_create(create_error);
         log::debug!(
@@ -584,7 +620,7 @@ impl State {
     fn layout_all(&mut self) -> Option<io::Error> {
         let mut create_error = None;
         let d2d = self.d2d.as_mut()?;
-        let theme = self.theme;
+        let fallback = self.theme;
         // Natural sizes in DIPs do not depend on the monitor: measure once.
         let items: Vec<_> = self
             .config
@@ -594,6 +630,7 @@ impl State {
             .map(|i| (i, i.content.measure(d2d)))
             .collect();
         for tb in &mut self.taskbars {
+            let theme = tb.sampled_theme.unwrap_or(fallback);
             let mut old = std::mem::take(&mut tb.windows);
             for &(item, content) in &items {
                 let existing = old
@@ -940,10 +977,17 @@ unsafe extern "system" fn host_wndproc(
         WM_SETTINGCHANGE => {
             // Covers scale changes, "show taskbar on all displays" and light/dark switches (the
             // theme is re-read on every refresh).
-            if is_color_set_change(lparam) {
+            let color_change = is_color_set_change(lparam);
+            if color_change {
                 log::debug!("Windows color mode changed");
             }
-            with_state(|s| s.schedule_refresh());
+            with_state(|s| {
+                s.schedule_refresh();
+                if color_change {
+                    // Explorer repaints the taskbar asynchronously: sample it again later.
+                    s.schedule_late_refreshes();
+                }
+            });
             LRESULT(0)
         }
         WM_POWERBROADCAST => {

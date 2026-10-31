@@ -162,6 +162,7 @@ Portable code sees a `Renderer` trait (`measure_text`, `begin(size, scale)`, `dr
 - Read `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\SystemUsesLightTheme` (DWORD; missing → dark). The taskbar follows the *system* mode, not the apps mode.
 - Default text color: dark → `#FFFFFF`, light → `#1B1B1B`.
 - On `WM_SETTINGCHANGE` with `lParam` string `"ImmersiveColorSet"` → re-read, re-render all.
+- *As implemented (after GUI testing):* the default color follows the taskbar's actual pixels (contrast rule), with the registry value as fallback; see DECISIONS.md, "Default text color".
 
 ### Fullscreen (`fullscreen.rs`)
 
