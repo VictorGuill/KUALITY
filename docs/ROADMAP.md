@@ -37,7 +37,7 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 
 ## Phase 2 — Shortcuts
 
-- [ ] Spec `docs/specs/shortcuts.md`
+- [x] Spec `docs/specs/shortcuts.md`
 - [ ] Bindings Hyper+key from config
 - [ ] Actions: `launch`, `send_hotkey`, `open_url`
 - [ ] Bound shortcuts are consumed (not forwarded); unbound ones pass through as the Hyper combo
