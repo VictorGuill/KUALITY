@@ -29,9 +29,9 @@ cargo build                     # builds the core and the settings app
 cargo run -p kuality
 ```
 
-Starts the core with a console showing the log; a tray icon appears. Press Ctrl+C in the console or use the tray menu → Quit to stop it.
+Starts the core with a console showing the log; a tray icon appears. Press Ctrl+C in the console or use the tray menu (right click) → Quit to stop it.
 
-Tray menu → **Settings** (or right-click a taskbar widget → Settings) opens the settings window. Changes are saved automatically and applied by the running core right away. You can also start the window on its own with `cargo run -p kuality-settings`: it starts Kuality first if it is not running. Kuality and its settings window behave as one app: quitting Kuality (tray → Quit) also closes the window, after saving any pending change.
+Left-click the tray icon (or right-click it → **Settings**, or right-click a taskbar widget → Settings) to open the settings window; right-click the tray icon for the menu (Settings / Pause / Quit). Changes are saved automatically and applied by the running core right away. You can also start the window on its own with `cargo run -p kuality-settings`: it starts Kuality first if it is not running. Kuality and its settings window behave as one app: quitting Kuality (tray → Quit) also closes the window, after saving any pending change.
 
 Config lives in `%APPDATA%\Kuality\config.json` (created with everything disabled on first run) and is reloaded live when it changes (from the settings window or a text editor). For a throwaway setup, create an empty file `target\debug\portable`: config and logs then live in `target\debug\`.
 

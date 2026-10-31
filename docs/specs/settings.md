@@ -8,7 +8,7 @@ Deferred (stay in the roadmap, not in this phase): named-pipe IPC, drag-to-place
 
 ## Behavior (user-visible)
 
-- Tray **Settings** and widget right-click **Settings** open the window. A second launch brings the open window to the front.
+- A left click on the tray icon (or Enter/Space on it), tray menu **Settings** and widget right-click **Settings** open the window. A second launch brings the open window to the front.
 - Centered window, title **Kuality Settings**, ~900×620 (min 720×480), resizable, follows Windows light/dark. Sidebar on the left with tabs **General**, **Widgets**, **Hyperkey**, **Shortcuts** (DECISIONS order, deferred tabs left out); the content area scrolls.
 - **Auto-save, no Save button**: every valid change is written to `config.json` 300 ms after the last edit; the core reloads it. Opening the window never rewrites the file.
 - Invalid input shows a red message under the field and is **not** saved; the file keeps the last valid value of that field. Other fields still save.

@@ -7,7 +7,7 @@ A runnable `kuality.exe` that does nothing visible except a tray icon, but has t
 ## Behavior (user-visible)
 
 - Starting `kuality.exe` adds a tray icon (tooltip "Kuality"). No window, no console in release builds.
-- Right-click (or left-click) on the tray icon opens a menu: **Settings**, separator, **Quit**.
+- Right-click (or left-click) on the tray icon opens a menu: **Settings**, separator, **Quit**. *(Since the tray left-click change: right click opens the menu; left click opens Settings directly — see DECISIONS "Tray".)*
   - **Settings** opens `config.json` in the default editor for `.json` files (placeholder until the settings app exists in Phase 5). (No double-click action: the first click already opens the menu.)
   - **Quit** removes the icon and exits cleanly.
 - On first start, `config.json` is created with defaults (everything disabled).

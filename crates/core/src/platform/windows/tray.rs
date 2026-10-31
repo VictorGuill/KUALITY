@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use ::windows::Win32::System::Console::{
@@ -293,6 +294,25 @@ fn show_menu(hwnd: HWND, x: i32, y: i32) -> Option<Event> {
     }
 }
 
+/// Minimum time between two "open Settings" activations of the icon.
+const ACTIVATION_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// Whether an icon activation follows another one too closely (the shell can report one
+/// keyboard activation as two notifications). Main thread only.
+fn repeated_activation() -> bool {
+    thread_local! {
+        static LAST: Cell<Option<Instant>> = const { Cell::new(None) };
+    }
+    let now = Instant::now();
+    LAST.with(|last| {
+        let repeated = last
+            .get()
+            .is_some_and(|t| now.duration_since(t) < ACTIVATION_DEBOUNCE);
+        last.set(Some(now));
+        repeated
+    })
+}
+
 /// Signed 16-bit coordinates packed in a `WPARAM` (NOTIFYICON_VERSION_4 anchor point).
 fn point_from_wparam(wparam: WPARAM) -> (i32, i32) {
     let x = (wparam.0 & 0xFFFF) as u16 as i16 as i32;
@@ -304,7 +324,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match msg {
         WM_APP_TRAY => {
             let event = (lparam.0 & 0xFFFF) as u32;
-            if matches!(event, WM_CONTEXTMENU | NIN_SELECT | NIN_KEYSELECT) {
+            // Left click (NIN_SELECT) and Enter/Space on the focused icon (NIN_KEYSELECT) open
+            // Settings; right click / Shift+F10 / menu key (WM_CONTEXTMENU) show the menu.
+            if matches!(event, NIN_SELECT | NIN_KEYSELECT) {
+                if !repeated_activation() {
+                    push(Event::OpenSettings);
+                }
+            } else if event == WM_CONTEXTMENU {
                 let (mut x, mut y) = point_from_wparam(wparam);
                 if x == 0 && y == 0 {
                     let mut p = POINT::default();
