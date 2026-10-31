@@ -103,6 +103,7 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **Consumed keys vs. hook reinstall** — every `Apply` still reinstalls the hook with a forced release (Phase 1), but the consumed-key set is restored afterwards, so the up of a bound key held across a config reload is still swallowed. `reset`, Pause/disable and lock/suspend clear it.
 - **Threads** — `send_hotkey` runs on the keyboard thread (it owns the injected Hyper modifiers); `launch` / `open_url` run in order on `kuality-actions`, spawned on the first action, joined (1 s) after the keyboard thread at quit.
 - **Shell call** — `ShellExecuteExW` with verb `open`, `SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC`, `%VAR%` expanded at execution time, `cwd` defaults to the parent of an absolute path, else `%USERPROFILE%`; `AllowSetForegroundWindow(ASFW_ANY)` before each call.
+- **Foreground for launched apps** — before each `ShellExecuteExW` the worker sends one empty, tagged mouse `SendInput` so Windows counts Kuality as the last input source; only then does `AllowSetForegroundWindow(ASFW_ANY)` take effect (the hook swallows the shortcut key, so otherwise the foreground lock keeps launched apps and `open_url` targets behind). Same technique as PowerToys' `BringToForeground`.
 - **Argument quoting** — `launch.args` lists use `CommandLineToArgvW` rules; besides space, tab and `"`, newline and vertical tab also trigger quoting (as in Microsoft's reference implementation).
 
 ## Out of scope for now

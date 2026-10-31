@@ -1,4 +1,5 @@
-//! `SendInput` helpers for the keyboard thread, and crash-time emergency release.
+//! `SendInput` helpers for the keyboard thread, crash-time emergency release, and the empty
+//! input the action worker sends before launching (foreground rights).
 //!
 //! Everything here may run inside the low-level hook callback or a crash handler: no heap
 //! allocation, no locks, no logging.
@@ -6,8 +7,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ::windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, SendInput, VIRTUAL_KEY,
+    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC_EX, MOUSEINPUT, MapVirtualKeyW,
+    SendInput, VIRTUAL_KEY,
 };
 use kuality_protocol::Key;
 
@@ -90,6 +92,25 @@ pub fn send(buf: &SynthBuf) -> bool {
     // SAFETY: `inputs` is a valid slice of initialized INPUT structs.
     let sent = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
     sent as usize == inputs.len()
+}
+
+/// Injects one empty mouse event (no movement, no buttons, tagged). Windows then counts this
+/// process as the source of the last input, which it needs before it may give the foreground
+/// away with `AllowSetForegroundWindow`. Our hook swallows the shortcut key, so without this the
+/// foreground lock keeps launched apps behind the current window. Same technique as PowerToys'
+/// `BringToForeground`. Returns `true` if the event was inserted.
+pub fn claim_last_input() -> bool {
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dwExtraInfo: KUALITY_TAG,
+                ..Default::default()
+            },
+        },
+    };
+    // SAFETY: one initialized INPUT struct.
+    unsafe { SendInput(&[input], size_of::<INPUT>() as i32) == 1 }
 }
 
 /// Crash-time release: if Kuality holds modifiers down, injects mask + Up for all Hyper
