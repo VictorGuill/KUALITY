@@ -35,7 +35,7 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 
 **Done when:** holding CapsLock + T in any app is received as Ctrl+Shift+Alt+Win+T, tapping it alone does nothing visible.
 
-## Phase 2 — Shortcuts
+## Phase 2 — Shortcuts ✅
 
 - [x] Spec `docs/specs/shortcuts.md`
 - [x] Bindings Hyper+key from config
