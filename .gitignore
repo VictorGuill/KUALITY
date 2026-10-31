@@ -1,0 +1,8 @@
+/target
+*.pdb
+/dist
+/portable
+config.json
+logs/
+.vscode/
+.idea/
