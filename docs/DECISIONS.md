@@ -105,6 +105,21 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **Shell call** — `ShellExecuteExW` with verb `open`, `SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC`, `%VAR%` expanded at execution time, `cwd` defaults to the parent of an absolute path, else `%USERPROFILE%`; `AllowSetForegroundWindow(ASFW_ANY)` before each call.
 - **Argument quoting** — `launch.args` lists use `CommandLineToArgvW` rules; besides space, tab and `"`, newline and vertical tab also trigger quoting (as in Microsoft's reference implementation).
 
+## Taskbar overlay implementation (2026-10-31, Phase 3)
+
+- **Feasibility** — verified on Windows 11 build 26300: a `WS_EX_LAYERED` child of `Shell_TrayWnd` placed at `HWND_TOP` draws above the XAML taskbar content (`DesktopWindowContentBridge`); no fallback needed. Layered child windows need the exe manifest's Windows 10/11 `supportedOS` (creation fails without it).
+- **Item types** — `WidgetItem` is an internally tagged enum (`type`) whose variants embed a flattened `CommonItem` plus their own `extra` map (flattening a tagged enum next to `extra` would copy its fields into `extra`).
+- **Invalid values** — `anchor`, `x`, `y`, `origin`, `width`, `height`, `font_size`, `font_weight`, `color` and `align` are `Lenient<T>`: an invalid value is kept verbatim on save and replaced by the default (+ `warn`) at runtime. A wrong JSON type for `type`, `id`, `enabled` or `text` makes the whole item raw JSON (kept, ignored with a `warn`).
+- **Duplicate ids** — checked across all known items, enabled or not; the first one wins.
+- **Resolution** — the `widgets` section is resolved on the main thread (`overlay::resolve`, problems logged once per load) and sent as `Arc<OverlayConfig>`; `Apply` is only sent when the section changed, so a session "Hide" survives unrelated reloads. The overlay thread logs rare events only.
+- **Refresh** — `Apply` refreshes immediately; all other triggers use the 300 ms debounce. `TaskbarCreated` destroys our windows explicitly (harmless if already dead), so a repeated or synthetic message never leaves duplicates.
+- **Z-order** — on `EVENT_OBJECT_REORDER` our windows are re-raised only when they are not already the topmost children in item order (no feedback loop with our own `SetWindowPos`).
+- **Text drawing** — `ID2D1RenderTarget::DrawText` into the box rect with `D2D1_DRAW_TEXT_OPTIONS_CLIP` (avoids a direct `windows-numerics` dependency that `DrawTextLayout` would need); measured with `IDWriteTextLayout`. Font fallback cached per family, logged once.
+- **Hit testing** — every render clears to transparent and fills the box with black at alpha 1/255 through Direct2D, then draws the content.
+- **Fullscreen hooks** — installed only while widgets are enabled and `hide_on_fullscreen` is true; the foreground hook skips our own process (our menu taking focus keeps the previous state).
+- **Widget menu → Settings** — the overlay thread posts `WM_APP_OPEN_SETTINGS` to the `Kuality.Core` window, which queues `Event::OpenSettings` (no channel: there is no data).
+- **Debug console close** — `taskkill` without `/F` also closes the debug console (it reports our process as owner): `CTRL_CLOSE_EVENT`, logoff and shutdown now request the normal quit and block until the process exits.
+
 ## Out of scope for now
 
 - Notifications widget (needs package identity / MSIX).

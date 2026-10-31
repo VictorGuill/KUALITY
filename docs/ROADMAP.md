@@ -44,7 +44,7 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 
 **Done when:** Hyper+1 opens the configured program and Hyper+2 sends the configured hotkey.
 
-## Phase 3 — Taskbar overlay
+## Phase 3 — Taskbar overlay ✅
 
 - [x] Spec `docs/specs/overlay.md`
 - [x] Widget host window as child of every taskbar (primary + secondary)

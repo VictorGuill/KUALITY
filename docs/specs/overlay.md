@@ -70,6 +70,7 @@ Common item fields (all widget types):
 - **origin**: `"top_left"`, `"top"`, `"top_right"`, `"left"`, `"center"`, `"right"`, `"bottom_left"`, `"bottom"`, `"bottom_right"`. Fractions (ox, oy): left/center/right → 0 / 0.5 / 1 horizontally; top/center/bottom → 0 / 0.5 / 1 vertically; a bare side (`left`, `right`) is vertically centered, a bare `top`/`bottom` is horizontally centered.
 - Phase 0's `Widgets` struct keeps its fields; only `items` changes from `Vec<serde_json::Value>` to `Vec<WidgetEntry>`. Types derive `PartialEq`.
 - Items: `#[serde(untagged)] enum WidgetEntry { Known(WidgetItem), Unknown(serde_json::Value) }`; `WidgetItem` = common fields (flattened) + `#[serde(tag = "type", rename_all = "snake_case")] enum WidgetKind { Text(TextWidget) }`. Unknown types are kept as raw JSON on save. Like the Phase 0 structs, `WidgetItem` has one `#[serde(flatten)] extra: serde_json::Map` declared **last** (after the flattened common fields and kind), so unknown fields survive a round trip.
+  - *As implemented:* `WidgetItem` is the tagged enum (`Text(TextWidget)`) and `TextWidget` holds `#[serde(flatten)] common: CommonItem`, its own fields and `extra` (last). Field values that can be invalid are `Lenient<T>` (valid value, or the invalid JSON kept verbatim). See DECISIONS.md, Phase 3.
 
 ### Layout (portable, `core/src/overlay/layout.rs`)
 
@@ -112,7 +113,7 @@ Portable code sees a `Renderer` trait (`measure_text`, `begin(size, scale)`, `dr
 ### Thread
 
 - Thread `kuality-overlay`, spawned at startup, alive until quit; same "channel + `WM_APP_COMMAND` wake" pattern as the keyboard thread.
-- `OverlayCommand::Apply(Arc<Widgets>)`, `OverlayCommand::Shutdown`.
+- `OverlayCommand::Apply(Arc<Widgets>)`, `OverlayCommand::Shutdown`. *As implemented:* `Apply(Arc<OverlayConfig>)`, resolved on the main thread and only sent when the `widgets` section changed.
 - Owns a hidden **top-level** window `KualityOverlayHost` (`WS_POPUP`, never shown, `WS_EX_TOOLWINDOW`) that receives broadcasts: `TaskbarCreated`, `WM_DISPLAYCHANGE`, `WM_SETTINGCHANGE`, `WM_POWERBROADCAST`, and WTS session notifications (`WTSRegisterSessionNotification`). Call `ChangeWindowMessageFilterEx(hwnd, TaskbarCreated, MSGFLT_ALLOW)` so it still arrives when the core runs elevated (Phase 6).
 - **Hard rule:** widget windows are children of Explorer's taskbar, so this thread's input queue is attached to Explorer's. The overlay thread must never block: no file/registry writes (except the one theme registry read), no `SendMessage` to Explorer windows, no waiting on other threads. Only `GetWindowRect`/`GetClientRect`/`FindWindowExW`/`GetWindowThreadProcessId`/`MonitorFromWindow`/`GetDpiForMonitor` on Explorer windows.
 - When `widgets.enabled` becomes false: destroy all widget windows, unhook all WinEvent hooks, stop timers. D2D/DWrite factories are created lazily on first enable and kept.
