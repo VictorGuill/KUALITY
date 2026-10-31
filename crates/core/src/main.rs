@@ -2,7 +2,7 @@
 //!
 //! Phase 0: config load/create/hot-reload, logging, single instance, tray menu
 //! (`docs/specs/skeleton.md`). Phase 1: Hyperkey (`docs/specs/hyperkey.md`). Phase 2: Shortcuts
-//! (`docs/specs/shortcuts.md`).
+//! (`docs/specs/shortcuts.md`). Phase 3: taskbar overlay and text widget (`docs/specs/overlay.md`).
 
 // No console window in release builds; debug builds keep it for log output.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -12,6 +12,7 @@ mod app;
 mod config_store;
 mod hyperkey;
 mod logging;
+mod overlay;
 mod paths;
 mod platform;
 mod shortcuts;
@@ -25,6 +26,7 @@ use actions::ActionWorker;
 use app::App;
 use config_store::{LoadStatus, ReloadOutcome, Reloader};
 use hyperkey::KeyboardController;
+use overlay::OverlayController;
 use paths::{DataDir, DataDirSource};
 use platform::{DirWatcher, SingleInstance, TrayIcon, Waker};
 
@@ -163,7 +165,23 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut app = App::new(loaded.config, config_path, rx, watcher, keyboard, actions);
+    let overlay = match OverlayController::start() {
+        Ok(o) => Some(o),
+        Err(e) => {
+            log::error!("cannot start the overlay thread: {e}; taskbar widgets unavailable");
+            None
+        }
+    };
+
+    let mut app = App::new(
+        loaded.config,
+        config_path,
+        rx,
+        watcher,
+        keyboard,
+        actions,
+        overlay,
+    );
     log::info!("ready");
     tray.run(move |event| app.handle(event));
 

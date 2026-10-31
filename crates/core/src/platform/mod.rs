@@ -12,14 +12,15 @@ use std::sync::Arc;
 
 use crate::actions::ActionWorker;
 use crate::hyperkey::KeyboardCommand;
+use crate::overlay::OverlayCommand;
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub use self::windows::{
-    Instance, Keyboard, Tray, Watcher, dpi_awareness, init_action_thread, init_main_thread,
-    install_crash_guard, launch, local_time_now, office_key, open_url, open_with_default_app,
-    roaming_app_data_dir, set_tray_paused,
+    Instance, Keyboard, Overlay, Tray, Watcher, dpi_awareness, init_action_thread,
+    init_main_thread, install_crash_guard, launch, local_time_now, office_key, open_url,
+    open_with_default_app, roaming_app_data_dir, set_tray_paused,
 };
 
 #[cfg(not(windows))]
@@ -82,6 +83,17 @@ pub trait KeyboardBackend: Sized {
     fn start(actions: Arc<ActionWorker>) -> io::Result<Self>;
     /// Queues a command and wakes the thread.
     fn send(&self, cmd: KeyboardCommand);
+    /// Waits up to `timeout` for the thread to end. Returns `false` on timeout.
+    fn join(self, timeout: Duration) -> bool;
+}
+
+/// The taskbar overlay thread (widget windows).
+pub trait OverlayBackend: Sized {
+    /// Spawns the thread; it runs until [`OverlayCommand::Shutdown`]. Nothing is drawn until an
+    /// `Apply` enables widgets.
+    fn start() -> io::Result<Self>;
+    /// Queues a command and wakes the thread.
+    fn send(&self, cmd: OverlayCommand);
     /// Waits up to `timeout` for the thread to end. Returns `false` on timeout.
     fn join(self, timeout: Duration) -> bool;
 }

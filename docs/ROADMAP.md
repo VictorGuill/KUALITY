@@ -47,13 +47,13 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 ## Phase 3 — Taskbar overlay
 
 - [x] Spec `docs/specs/overlay.md`
-- [ ] Widget host window as child of every taskbar (primary + secondary)
-- [ ] Direct2D/DirectWrite rendering, DPI aware
-- [ ] Positioning: `x`/`y` in px or %, `anchor`, `origin`, `width`
-- [ ] Re-attach on Explorer restart (`TaskbarCreated`), handle monitor/DPI changes
+- [x] Widget host window as child of every taskbar (primary + secondary)
+- [x] Direct2D/DirectWrite rendering, DPI aware
+- [x] Positioning: `x`/`y` in px or %, `anchor`, `origin`, `width`
+- [x] Re-attach on Explorer restart (`TaskbarCreated`), handle monitor/DPI changes
 - [ ] Hide on fullscreen apps
-- [ ] Follow Windows light/dark theme
-- [ ] First widget: static `text`
+- [x] Follow Windows light/dark theme
+- [x] First widget: static `text`
 - [ ] Right-click on widget → small menu (Settings / Hide)
 
 **Done when:** a text widget appears exactly where config says, stays above the taskbar while clicking it, and survives an Explorer restart.

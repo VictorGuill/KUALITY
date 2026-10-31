@@ -11,6 +11,7 @@ use kuality_protocol::{CONFIG_VERSION, Config};
 use crate::actions::ActionWorker;
 use crate::config_store::changed_sections;
 use crate::hyperkey::KeyboardController;
+use crate::overlay::OverlayController;
 use crate::platform::{self, DirWatcher, Event};
 use crate::{logging, shortcuts};
 
@@ -26,6 +27,7 @@ pub struct App<W: DirWatcher> {
     watcher: Option<W>,
     keyboard: Option<KeyboardController>,
     actions: Arc<ActionWorker>,
+    overlay: Option<OverlayController>,
     /// Tray "Pause" (runtime only, keyboard features only).
     paused: bool,
 }
@@ -39,6 +41,7 @@ impl<W: DirWatcher> App<W> {
         watcher: Option<W>,
         keyboard: Option<KeyboardController>,
         actions: Arc<ActionWorker>,
+        overlay: Option<OverlayController>,
     ) -> Self {
         let app = Self {
             config,
@@ -47,9 +50,13 @@ impl<W: DirWatcher> App<W> {
             watcher,
             keyboard,
             actions,
+            overlay,
             paused: false,
         };
         app.apply_keyboard(&app.config);
+        if let Some(o) = &app.overlay {
+            o.apply(&app.config.widgets);
+        }
         // Also cleans up after a crash when Hyperkey is now disabled.
         reconcile_office_key(app.config.hyperkey.enabled);
         app
@@ -86,6 +93,9 @@ impl<W: DirWatcher> App<W> {
             }
             Event::Quit => {
                 log::info!("quitting");
+                if let Some(mut o) = self.overlay.take() {
+                    o.shutdown();
+                }
                 if let Some(mut k) = self.keyboard.take() {
                     k.shutdown();
                 }
@@ -119,6 +129,12 @@ impl<W: DirWatcher> App<W> {
         self.apply_keyboard(&new);
         if new.hyperkey.enabled != self.config.hyperkey.enabled {
             reconcile_office_key(new.hyperkey.enabled);
+        }
+        // Only when the section changed: an Apply also brings back widgets hidden from the menu.
+        if new.widgets != self.config.widgets
+            && let Some(o) = &self.overlay
+        {
+            o.apply(&new.widgets);
         }
         self.config = new;
     }
