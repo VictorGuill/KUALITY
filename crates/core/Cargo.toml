@@ -1,0 +1,37 @@
+[package]
+name = "kuality"
+description = "Kuality core: tray, taskbar widgets, Hyperkey and shortcuts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "kuality"
+path = "src/main.rs"
+
+[dependencies]
+kuality-protocol.workspace = true
+log.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[lints]
+workspace = true

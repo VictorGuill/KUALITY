@@ -11,13 +11,13 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 
 - [x] Cargo workspace with `crates/core`, `crates/settings`, `crates/protocol`
 - [x] Config types in `protocol` (serde, defaults = everything disabled)
-- [ ] Load/save `config.json`, create with defaults if missing
-- [ ] Portable mode (`portable` file next to exe)
-- [ ] Config hot-reload (file watcher)
-- [ ] Logging to file (`%APPDATA%\Kuality\logs` or portable dir)
-- [ ] Single instance (named mutex)
-- [ ] Tray icon with menu: Settings (placeholder) / Quit
-- [ ] Per-monitor DPI awareness v2 manifest
+- [x] Load/save `config.json`, create with defaults if missing
+- [x] Portable mode (`portable` file next to exe)
+- [x] Config hot-reload (file watcher)
+- [x] Logging to file (`%APPDATA%\Kuality\logs` or portable dir)
+- [x] Single instance (named mutex)
+- [x] Tray icon with menu: Settings (placeholder) / Quit
+- [x] Per-monitor DPI awareness v2 manifest
 - [ ] `cargo build`, `clippy`, `test` pass; commands documented in `AGENTS.md`
 
 **Done when:** `kuality.exe` starts, shows a tray icon, creates/reads `config.json`, reacts to edits, and quits cleanly.

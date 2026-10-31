@@ -8,7 +8,7 @@ A runnable `kuality.exe` that does nothing visible except a tray icon, but has t
 
 - Starting `kuality.exe` adds a tray icon (tooltip "Kuality"). No window, no console in release builds.
 - Right-click (or left-click) on the tray icon opens a menu: **Settings**, separator, **Quit**.
-  - **Settings** opens `config.json` in the default editor for `.json` files (placeholder until the settings app exists in Phase 5). Double-click on the icon does the same.
+  - **Settings** opens `config.json` in the default editor for `.json` files (placeholder until the settings app exists in Phase 5). (No double-click action: the first click already opens the menu.)
   - **Quit** removes the icon and exits cleanly.
 - On first start, `config.json` is created with defaults (everything disabled).
 - Editing and saving `config.json` is picked up within ~0.5 s; the log shows "config reloaded" and which sections changed. Invalid JSON is logged and ignored (previous config stays active, file is not touched).
