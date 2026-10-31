@@ -62,12 +62,13 @@ pub fn open_with_default_app(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Starts `exe` (working folder: its own folder) without waiting for it. The new process may
-/// take the foreground (it brings its window to the front).
-pub fn spawn_detached(exe: &Path) -> io::Result<()> {
+/// Starts `exe` with `args` (working folder: its own folder) without waiting for it. The new
+/// process may take the foreground (it brings its window to the front).
+pub fn spawn_detached(exe: &Path, args: &[String]) -> io::Result<()> {
     // SAFETY: plain call without pointers. Failure only means the child may open behind.
     let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
     let mut cmd = std::process::Command::new(exe);
+    cmd.args(args);
     if let Some(dir) = exe.parent() {
         cmd.current_dir(dir);
     }

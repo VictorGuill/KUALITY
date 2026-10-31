@@ -18,6 +18,9 @@ use crate::{logging, shortcuts};
 /// How long quit waits for a running `launch`/`open_url` action.
 const ACTIONS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Argument telling the settings app which core started it (it closes when that process ends).
+const CORE_PID_ARG: &str = "--core-pid";
+
 /// File stem of the settings app, shipped next to the core.
 const SETTINGS_EXE_STEM: &str = "kuality-settings";
 
@@ -75,11 +78,15 @@ impl<W: DirWatcher> App<W> {
         app
     }
 
-    /// Starts `kuality-settings.exe` from the folder of the running exe; falls back to opening
-    /// `config.json` in the default editor if it is missing or cannot be started.
+    /// Starts `kuality-settings.exe` from the folder of the running exe, passing our pid so the
+    /// window closes when the core exits; falls back to opening `config.json` in the default
+    /// editor if it is missing or cannot be started.
     fn open_settings(&self) {
         match settings_exe() {
-            Some(exe) => match platform::spawn_detached(&exe) {
+            Some(exe) => match platform::spawn_detached(
+                &exe,
+                &[CORE_PID_ARG.into(), std::process::id().to_string()],
+            ) {
                 Ok(()) => {
                     log::info!("started {}", exe.display());
                     return;
