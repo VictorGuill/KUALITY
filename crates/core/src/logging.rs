@@ -54,6 +54,12 @@ pub fn level_filter(level: LogLevel) -> LevelFilter {
     }
 }
 
+/// Filter to use while reporting a config reload: the more verbose of the current filter and
+/// the new level, so the report survives a level change in either direction.
+pub fn reload_report_filter(current: LevelFilter, new: LogLevel) -> LevelFilter {
+    current.max(level_filter(new))
+}
+
 /// Applies the config level (also used on hot-reload).
 pub fn set_level(level: LogLevel) {
     log::set_max_level(level_filter(level));
@@ -252,6 +258,24 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dir.0.join(LOG_FILE)).unwrap(),
             "abcdefghij\n"
+        );
+    }
+
+    #[test]
+    fn reload_report_survives_level_changes() {
+        // warn -> info: the reload line (info) must be written.
+        assert_eq!(
+            reload_report_filter(LevelFilter::Warn, LogLevel::Info),
+            LevelFilter::Info
+        );
+        // info -> warn: still reported once, before switching to warn.
+        assert_eq!(
+            reload_report_filter(LevelFilter::Info, LogLevel::Warn),
+            LevelFilter::Info
+        );
+        assert_eq!(
+            reload_report_filter(LevelFilter::Error, LogLevel::Error),
+            LevelFilter::Error
         );
     }
 

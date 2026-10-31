@@ -97,6 +97,12 @@ impl<W: DirWatcher> App<W> {
             log::info!("config reloaded (no changes)");
             return;
         }
+        // Report under the more verbose of the old and new levels, so the line is not lost when
+        // `log_level` itself changes (e.g. warn -> info), then switch to the new level.
+        log::set_max_level(logging::reload_report_filter(
+            log::max_level(),
+            new.general.log_level,
+        ));
         log::info!("config reloaded, changed: {}", changed.join(", "));
         warn_if_newer(&new);
         logging::set_level(new.general.log_level);
