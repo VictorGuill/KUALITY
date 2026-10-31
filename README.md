@@ -25,12 +25,15 @@ cargo build --release
 ## Running (dev mode)
 
 ```powershell
+cargo build                     # builds the core and the settings app
 cargo run -p kuality
 ```
 
 Starts the core with a console showing the log; a tray icon appears. Press Ctrl+C in the console or use the tray menu → Quit to stop it.
 
-Config lives in `%APPDATA%\Kuality\config.json` (created with everything disabled on first run) and is reloaded live when you save it. For a throwaway setup, create an empty file `target\debug\portable`: config and logs then live in `target\debug\`.
+Tray menu → **Settings** (or right-click a taskbar widget → Settings) opens the settings window. Changes are saved automatically and applied by the running core right away. You can also start the window on its own with `cargo run -p kuality-settings`.
+
+Config lives in `%APPDATA%\Kuality\config.json` (created with everything disabled on first run) and is reloaded live when it changes (from the settings window or a text editor). For a throwaway setup, create an empty file `target\debug\portable`: config and logs then live in `target\debug\`.
 
 ## Docs
 

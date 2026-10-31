@@ -19,7 +19,7 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **Workspace** — Cargo workspace with crates `core`, `settings`, `protocol` (shared types).
 - **Config** — single JSON file `config.json`, hot-reloaded by the core when it changes (written by the settings app, hand-editable).
 - **Config location** — `%APPDATA%\Kuality\`; if a file named `portable` exists next to the exe, config lives next to the exe instead.
-- **Core ↔ settings IPC** — config file + Windows named pipe for live changes/commands.
+- **Core ↔ settings IPC** — config file + Windows named pipe for live changes/commands. *(2026-10-31: Phase 5 ships with the file only; the pipe is deferred, see "Settings app implementation".)*
 - **Instances** — single instance of the core.
 
 ## Taskbar widgets (2026-10-31)
@@ -49,7 +49,7 @@ Do not contradict these without asking the user. To change one, edit the line an
 ## Settings app (2026-10-31)
 
 - **UI framework** — GPUI (gpui-component); egui is the fallback if GPUI causes problems.
-- **Layout** — centered window, sidebar tabs on the left (General, Widgets, Hyperkey, Shortcuts, Appearance, Extensions).
+- **Layout** — centered window, sidebar tabs on the left (General, Widgets, Hyperkey, Shortcuts, Appearance, Extensions). *(2026-10-31: Appearance and Extensions are hidden until they have content.)*
 
 ## Startup & distribution (2026-10-31)
 
@@ -78,7 +78,7 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **Logging** — `log` facade + small built-in file backend (no logging framework): `logs\kuality.log`, previous run kept as `kuality.old.log`, rotated at 5 MB, local time, stderr too in debug builds, panics logged.
 - **Log level** — `general.log_level` (`error|warn|info|debug|trace`, default `info`), hot-reloadable.
 - **Single instance** — named mutex `Local\Kuality.Core` (per session, shared by installed and portable copies); acquired before logging so a second instance never rotates the log; second instance exits with code 0.
-- **Tray** — hidden top-level window (not message-only, so it gets `TaskbarCreated`); stock `IDI_APPLICATION` icon until Phase 6; left or right click opens the menu (no double-click action); "Settings" opens `config.json` in the default editor (Notepad fallback) until Phase 5.
+- **Tray** — hidden top-level window (not message-only, so it gets `TaskbarCreated`); stock `IDI_APPLICATION` icon until Phase 6; left or right click opens the menu (no double-click action); "Settings" opens `config.json` in the default editor (Notepad fallback) until Phase 5. *(2026-10-31: since Phase 5 it starts `kuality-settings.exe`; opening the file is the fallback.)*
 - **Shutdown** — tray Quit, `WM_CLOSE` (e.g. `taskkill` without `/F`), `WM_ENDSESSION` and Ctrl+C on the debug console all run the same clean shutdown.
 - **Main loop** — window procedure only queues events; the loop delivers them after dispatch (no re-entrancy). Worker threads use `mpsc` + `PostMessageW` to wake it.
 - **DPI manifest** — embedded with MSVC linker args (`/MANIFEST:EMBED /MANIFESTINPUT`) from `build.rs`, no resource crate; PerMonitorV2; effective awareness logged at startup.
@@ -124,6 +124,25 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **Default text color** — chosen from what each taskbar actually shows, not from the registry: on every refresh the overlay reads two pixel rows of the taskbar from the screen (12 % and 88 % of its height, every ≥ 4 px, our widgets excluded), takes the median WCAG relative luminance and uses `#1B1B1B` or `#FFFFFF`, whichever has the higher contrast (light text below luminance ≈ 0.2). `SystemUsesLightTheme` is only the fallback when no sample was ever possible (taskbar auto-hidden off its monitor, covered by a fullscreen window, capture failed); a failed sample keeps the previous one. Reason: the registry value can disagree with the real taskbar (seen: value 1 with a dark taskbar); this also covers accent-colored and restyled taskbars. A color-mode change refreshes at +0.3, +2 and +5 s because Explorer repaints asynchronously.
 - **Widget menu → Settings** — the overlay thread posts `WM_APP_OPEN_SETTINGS` to the `Kuality.Core` window, which queues `Event::OpenSettings` (no channel: there is no data).
 - **Debug console close** — `taskkill` without `/F` also closes the debug console (it reports our process as owner): `CTRL_CLOSE_EVENT`, logoff and shutdown now request the normal quit and block until the process exits.
+
+## Settings app implementation (2026-10-31, Phase 5)
+
+- **Order and scope** — Phase 5 is done before Phase 4 and only covers settings that exist (Phases 0–3); named pipe, drag-to-place, Appearance/Extensions tabs and autostart/run-elevated UI are deferred (ROADMAP "Later").
+- **Live apply** — the settings app only writes `config.json`; the core's existing hot-reload applies it. No IPC yet.
+- **Framework** — `gpui-kit =0.8.1` (gpui-component's umbrella crate; pins `gpui-pre 0.3.10`), exact pin because GPUI APIs move. Settings crate only; about 100 MB RAM while the window is open, nothing when closed. `futures-channel` (already in GPUI's tree) for the recorder's oneshot.
+- **Shared code** — `DataDir`, the atomic write (`store::write_atomic`) and `quote::join_args` moved from the core to `kuality-protocol`; `valid_url` and `Key::is_trigger` live there too. `test_util::TempDir` is behind the protocol feature `test-util` (dev-dependency only).
+- **Action extras** — `Action` variants are newtype variants over `LaunchAction` / `SendHotkeyAction` / `OpenUrlAction`, each with its own `extra` map, so unknown fields inside `action` survive a save.
+- **Saving** — edits change the parsed `Config` in place; valid changes are written 300 ms after the last edit (atomic, skipped when bytes are unchanged) and flushed on close. Opening the window never writes. Output is normalized pretty JSON (missing known fields written with defaults, unknown keys sorted).
+- **Invalid values** — an invalid field shows a message and is not written (the file keeps the last valid value); `Lenient::Invalid` values from the file are kept verbatim until changed. Number fields reject non-numeric typing themselves.
+- **Outside changes** — a 1 s timer (and window activation) checks size + modified time, then bytes. A valid change reloads the form and drops a pending save (the outside edit wins); an invalid file closes the editors and makes the window read-only until fixed.
+- **Drafts** — "Add shortcut" opens one draft at a time; it is written once its key and required action field are valid, and dropped by Discard or on close. A new widget is written at once (text "Hello", id `text-<n>`).
+- **Launch arguments** — shown as one command line (`join_args` for lists); an edited value is saved as a raw string (empty → `[]`), untouched lists stay lists.
+- **Key recording** — a `WH_KEYBOARD_LL` hook on thread `kuality-settings-recorder`, alive only while recording (plus up to 1 s for pending key-ups); it ignores injected events, swallows keys only while the settings window is in front, never records CapsLock, and Esc alone cancels. Recording also ends on a click, focus loss, tab change or after 10 s. Pure state machine in `recorder.rs` (unit-tested).
+- **Opening** — tray / widget "Settings" spawn `kuality-settings.exe` from the core's folder (`AllowSetForegroundWindow` first); if it is missing or fails, the old behaviour (open `config.json`) is the fallback.
+- **Single instance** — named mutex `Local\Kuality.Settings`; a second instance finds the window titled `Kuality Settings` owned by `kuality-settings.exe`, restores and focuses it, and exits 0.
+- **Core detection** — the status bar says "Kuality is not running" when `Local\Kuality.Core` cannot be opened (checked every second).
+- **Logging** — no log file; debug builds log to stderr (shared with a debug core's console), release builds are a GUI-subsystem exe with no console.
+- **Accessibility** — icon-only buttons, switches and checkboxes carry accessibility labels (they double as stable names for UI automation).
 
 ## Out of scope for now
 

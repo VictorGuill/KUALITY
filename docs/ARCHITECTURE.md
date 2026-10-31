@@ -13,10 +13,12 @@ kuality.exe  (core, always running, few MB)
 ├── Data providers         → media session, (later) extensions' data
 ├── Tray icon              → Settings / Pause / Quit
 ├── Config watcher         → hot-reloads config.json
-└── IPC server             → named pipe for kuality-settings.exe
+└── IPC server             → (later) named pipe for kuality-settings.exe
 
-kuality-settings.exe  (GPUI, only alive while open)
-└── Reads/writes config.json, talks to the core over the named pipe
+kuality-settings.exe  (GPUI via gpui-kit, only alive while open; started by tray/widget "Settings")
+├── UI thread              → window, auto-save (300 ms), 1 s check for outside edits of config.json
+└── Recorder thread        → WH_KEYBOARD_LL hook, only while a Record button is active
+    (Phase 5: talks to the core only through config.json, which the core hot-reloads)
 
 extensions/*  (later, separate processes in any language)
 └── JSON over stdin/stdout with the core
@@ -28,7 +30,8 @@ extensions/*  (later, separate processes in any language)
 crates/
 ├── core/       → package/binary `kuality`
 ├── settings/   → package/binary `kuality-settings`
-└── protocol/   → package `kuality-protocol`, library: config types, IPC messages, extension protocol types (serde)
+└── protocol/   → package `kuality-protocol`, library: config types, key names, data-dir rule (`paths`),
+                  atomic config write (`store`), Windows argument quoting (`quote`); later IPC and extension types
 ```
 
 Inside `core`, OS-specific code lives in a `platform` module (e.g. `platform::windows::keyboard`, `platform::windows::taskbar`) behind traits, so logic stays portable.
@@ -43,16 +46,26 @@ Current `core` modules (Phases 0–3):
 | `hyperkey/mod.rs` | `KeyboardController` (start / apply / set_paused / shutdown) and `KeyboardCommand` |
 | `shortcuts/mod.rs` | `compile(&Shortcuts) -> CompiledBindings`: validation, duplicates, warnings, generation |
 | `actions/mod.rs` | `ActionWorker`: lazy `kuality-actions` thread running `launch` / `open_url` jobs in order |
-| `actions/quote.rs` | Windows command-line quoting for `launch.args` lists |
 | `overlay/mod.rs` | `resolve(&Widgets) -> OverlayConfig` (runtime ids, duplicates, lenient fields, warnings) and `OverlayController` (start / apply / shutdown) |
 | `overlay/layout.rs` | Pure layout math: anchor, x/y, origin, width/height (`px` = DIPs, `%`), unit-tested |
 | `overlay/widgets/` | `Renderer` trait, `Theme`, `Content`; `text.rs` resolves and draws the text widget |
-| `paths.rs` | Data dir resolution (portable marker vs `%APPDATA%\Kuality`) |
-| `config_store.rs` | Load/create/atomic save of `config.json`, `Reloader` (change detection), section diff |
+| `config_store.rs` | Load/create/save of `config.json` (atomic write from `protocol::store`), `Reloader` (change detection), section diff |
 | `logging.rs` | `log` backend: `logs\kuality.log`, rotation, panic hook |
 | `platform/mod.rs` | Traits `SingleInstance`, `DirWatcher`, `TrayIcon`, `Waker`, `KeyboardBackend`, `OverlayBackend` + free functions |
 | `platform/windows/` | Win32 implementations (`instance`, `tray`, `watcher`, `shell` (incl. `launch` / `open_url`), `actions` (action thread message loop, WM_CLOSE watch), `folders`, `time`, `dpi`, `keyboard`, `input`, `office_key`, `crash`, `overlay/`) |
 | `platform/windows/overlay/` | `thread` (host window, commands, refresh, hooks, menu), `taskbars`, `widget_window`, `render` (Direct2D/DirectWrite), `fullscreen`, `theme` |
+
+`kuality-settings` modules (Phase 5, see `docs/specs/settings.md`):
+
+| Module | Role |
+|---|---|
+| `main.rs` | Single instance (or focus the open window), data dir, stderr logger in debug builds |
+| `model.rs` | `Document`: load / save / poll of `config.json`, read-only on invalid file; field validation helpers (unit-tested, no UI) |
+| `recorder.rs` | Portable key-recording state machine (trigger key or chord, swallowed keys) |
+| `platform.rs` | Windows: known folder, `Local\Kuality.Settings` mutex + focus existing window, core-running check, recorder hook thread |
+| `ui/mod.rs` | `SettingsWindow` view: tabs, debounced save, disk poll, recording, banner and status bar |
+| `ui/{general,widgets,hyperkey,shortcuts}.rs` | One tab each; widgets and shortcuts have list rows with an inline editor |
+| `ui/controls.rs` | Layout helpers (sections, rows, fields, segmented buttons) |
 
 Keyboard thread (`platform/windows/keyboard.rs`): owns a hidden top-level window (class `KualityKeyboard`) for session/power broadcasts and a `EVENT_SYSTEM_DESKTOPSWITCH` WinEvent hook. The `WH_KEYBOARD_LL` hook is installed only while Hyperkey is active; its callback runs the engine and at most one tagged `SendInput` (no allocation, locks or logging). Commands arrive through `mpsc` + `PostMessageW(WM_APP_COMMAND)`; `Apply` carries the Hyperkey config and an `Arc<CompiledBindings>` compiled on the main thread. `crash.rs` installs a panic hook and an unhandled-exception filter that release injected modifiers.
 
@@ -118,4 +131,4 @@ Draft shape (will be refined per phase):
 | Theme | Widgets: taskbar pixels sampled from the screen (contrast rule), registry `SystemUsesLightTheme` as fallback; re-checked on `WM_SETTINGCHANGE` |
 | Elevated autostart | Task Scheduler task with "run with highest privileges" at logon |
 | Single instance | Named mutex |
-| IPC | Named pipe `\\.\pipe\kuality` |
+| IPC | Named pipe `\\.\pipe\kuality` (later; Phase 5 uses the config file only) |

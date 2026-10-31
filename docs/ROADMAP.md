@@ -3,7 +3,7 @@
 Work phase by phase. The **current phase** is the first one not marked ✅.
 Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase-N-name`).
 
-**MVP = Phases 0–3.**
+**MVP = Phases 0–3.** Phase 5 was done before Phase 4 (user request: a settings window first, no new features).
 
 ---
 
@@ -67,13 +67,24 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 - [ ] Controls: previous / play-pause / next
 - [ ] Updates on session/track change; hides when nothing is playing (configurable)
 
-## Phase 5 — Settings app
+## Phase 5 — Settings app ✅
 
-- [ ] Spec `docs/specs/settings.md`
-- [ ] GPUI window, centered, sidebar tabs (General, Widgets, Hyperkey, Shortcuts, Appearance, Extensions)
-- [ ] Named pipe IPC with core (live apply, open from tray/widget)
-- [ ] Shortcut editor (record key, choose action)
-- [ ] Widget editor + drag-to-place mode
+Done before Phase 4 and scoped to the settings that already exist (Phases 0–3); see `docs/specs/settings.md`.
+
+- [x] Spec `docs/specs/settings.md`
+- [x] GPUI window (gpui-kit), centered, sidebar tabs: General, Widgets, Hyperkey, Shortcuts
+- [x] Live apply by writing `config.json` (auto-save, the core hot-reloads it); opened from tray and widget menu
+- [x] Shortcut editor (record key / chord, choose action)
+- [x] Widget editor (text widgets: position, size, style)
+
+**Done when:** tray → Settings opens the window, every change is applied by the running core within a second, and invalid input never reaches the file.
+
+### Later (moved out of Phase 5)
+
+- [ ] Named pipe IPC with the core (live commands, state the file cannot carry)
+- [ ] Drag-to-place mode for widgets
+- [ ] Appearance and Extensions tabs (Extensions with Phase 7)
+- [ ] Autostart / Run elevated toggles in the General tab (with Phase 6)
 
 ## Phase 6 — Startup & distribution
 
