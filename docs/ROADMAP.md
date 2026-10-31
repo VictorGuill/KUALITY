@@ -9,8 +9,8 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 
 ## Phase 0 — Skeleton
 
-- [ ] Cargo workspace with `crates/core`, `crates/settings`, `crates/protocol`
-- [ ] Config types in `protocol` (serde, defaults = everything disabled)
+- [x] Cargo workspace with `crates/core`, `crates/settings`, `crates/protocol`
+- [x] Config types in `protocol` (serde, defaults = everything disabled)
 - [ ] Load/save `config.json`, create with defaults if missing
 - [ ] Portable mode (`portable` file next to exe)
 - [ ] Config hot-reload (file watcher)
