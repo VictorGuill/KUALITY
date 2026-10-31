@@ -85,7 +85,7 @@ fn link_core(exe_dir: &std::path::Path) -> Option<ui::CoreLink> {
         // Its mutex exists but its window was not found: do not start a second one.
         log::warn!("Kuality seems to be running but its window was not found");
         return Some(ui::CoreLink::Missing(
-            "Kuality seems to be running but this window could not attach to it.".into(),
+            "Its process was found but this window could not attach to it.".into(),
         ));
     }
     match platform::start_core(exe_dir) {
@@ -95,9 +95,7 @@ fn link_core(exe_dir: &std::path::Path) -> Option<ui::CoreLink> {
         }
         Err(e) => {
             log::error!("cannot start Kuality: {e}");
-            Some(ui::CoreLink::Missing(format!(
-                "Kuality is not running and could not be started: {e}."
-            )))
+            Some(ui::CoreLink::Missing(format!("Could not start it: {e}.")))
         }
     }
 }

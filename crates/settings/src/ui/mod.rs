@@ -418,7 +418,7 @@ impl SettingsWindow {
                 Alert::warning(
                     "core-missing",
                     format!(
-                        "{} Changes are still saved to config.json and apply when Kuality                          starts.",
+                        "{} Changes are still saved to config.json and apply when Kuality starts.",
                         self.core_missing.as_deref().unwrap_or_default()
                     ),
                 )
