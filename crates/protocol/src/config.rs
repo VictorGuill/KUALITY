@@ -159,13 +159,13 @@ impl Default for LaunchArgs {
     }
 }
 
-/// `widgets` section. `items` become typed in Phase 3.
+/// `widgets` section (see `docs/specs/overlay.md`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Widgets {
     pub enabled: bool,
     pub hide_on_fullscreen: bool,
-    pub items: Vec<Value>,
+    pub items: Vec<WidgetEntry>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -178,6 +178,359 @@ impl Default for Widgets {
             items: Vec::new(),
             extra: Extra::new(),
         }
+    }
+}
+
+/// One entry of `widgets.items`. Entries that do not parse as a [`WidgetItem`] (unknown `type`
+/// such as `media` before Phase 4, missing `type`, wrong field types…) are kept as raw JSON so
+/// they survive a save, and ignored at runtime.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+// Unknown entries are rare and lists are short: boxing would only complicate matching.
+#[allow(clippy::large_enum_variant)]
+pub enum WidgetEntry {
+    Known(WidgetItem),
+    Unknown(Value),
+}
+
+/// A widget of a known type, tagged by `type`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WidgetItem {
+    /// Static text.
+    Text(TextWidget),
+}
+
+impl WidgetItem {
+    /// Fields shared by every widget type.
+    pub fn common(&self) -> &CommonItem {
+        match self {
+            Self::Text(t) => &t.common,
+        }
+    }
+
+    /// The `type` value, for logs.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::Text(_) => "text",
+        }
+    }
+}
+
+/// Fields shared by every widget type (flattened into the item object).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CommonItem {
+    /// Stable identifier; empty means "use `#<index>`".
+    pub id: String,
+    pub enabled: bool,
+    pub anchor: Lenient<Anchor>,
+    pub x: Lenient<Length>,
+    pub y: Lenient<Length>,
+    pub origin: Lenient<Origin>,
+    pub width: Lenient<Dimension>,
+    pub height: Lenient<Dimension>,
+}
+
+impl Default for CommonItem {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            enabled: true,
+            anchor: Lenient::Valid(Anchor::Left),
+            x: Lenient::Valid(Length::Px(0.0)),
+            y: Lenient::Valid(Length::Pct(50.0)),
+            origin: Lenient::Valid(Origin::Left),
+            width: Lenient::Valid(Dimension::Auto),
+            height: Lenient::Valid(Dimension::Auto),
+        }
+    }
+}
+
+/// `type: "text"`: a static text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TextWidget {
+    #[serde(flatten)]
+    pub common: CommonItem,
+    /// `\n` makes extra lines; no word wrap.
+    pub text: String,
+    pub font_family: String,
+    /// In DIPs.
+    pub font_size: Lenient<f64>,
+    pub font_weight: Lenient<FontWeight>,
+    /// `None` = theme color.
+    pub color: Lenient<Option<Color>>,
+    pub align: Lenient<TextAlign>,
+    /// Unknown fields; declared last so known fields are taken first.
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// Default `font_family` of a text widget.
+pub const DEFAULT_FONT_FAMILY: &str = "Segoe UI Variable Text";
+/// Default `font_size` of a text widget, in DIPs.
+pub const DEFAULT_FONT_SIZE: f64 = 12.0;
+
+impl Default for TextWidget {
+    fn default() -> Self {
+        Self {
+            common: CommonItem::default(),
+            text: String::new(),
+            font_family: DEFAULT_FONT_FAMILY.into(),
+            font_size: Lenient::Valid(DEFAULT_FONT_SIZE),
+            font_weight: Lenient::Valid(FontWeight::Normal),
+            color: Lenient::Valid(None),
+            align: Lenient::Valid(TextAlign::Left),
+            extra: Extra::new(),
+        }
+    }
+}
+
+/// A field value that may be invalid. Invalid values are kept verbatim (so a save does not lose
+/// them) and the reader falls back to the field default with a warning.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Lenient<T> {
+    Valid(T),
+    Invalid(Value),
+}
+
+impl<T> Lenient<T> {
+    /// The value, or `None` if it was invalid.
+    pub fn valid(&self) -> Option<&T> {
+        match self {
+            Self::Valid(v) => Some(v),
+            Self::Invalid(_) => None,
+        }
+    }
+}
+
+/// Horizontal reference point of the taskbar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Anchor {
+    Left,
+    Center,
+    Right,
+}
+
+impl Anchor {
+    /// Fraction of the taskbar width: 0, 0.5 or 1.
+    pub fn fraction(self) -> f64 {
+        match self {
+            Self::Left => 0.0,
+            Self::Center => 0.5,
+            Self::Right => 1.0,
+        }
+    }
+}
+
+/// Which point of the widget is placed at (x, y).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Origin {
+    TopLeft,
+    Top,
+    TopRight,
+    Left,
+    Center,
+    Right,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+}
+
+impl Origin {
+    /// `(ox, oy)` fractions of the widget size.
+    pub fn fractions(self) -> (f64, f64) {
+        match self {
+            Self::TopLeft => (0.0, 0.0),
+            Self::Top => (0.5, 0.0),
+            Self::TopRight => (1.0, 0.0),
+            Self::Left => (0.0, 0.5),
+            Self::Center => (0.5, 0.5),
+            Self::Right => (1.0, 0.5),
+            Self::BottomLeft => (0.0, 1.0),
+            Self::Bottom => (0.5, 1.0),
+            Self::BottomRight => (1.0, 1.0),
+        }
+    }
+}
+
+/// `"normal" | "semibold" | "bold"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FontWeight {
+    Normal,
+    Semibold,
+    Bold,
+}
+
+/// Horizontal text alignment inside the widget box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextAlign {
+    Left,
+    Center,
+    Right,
+}
+
+/// A length: `"<n>px"` (DIPs), `"<n>%"`, or a JSON number (= px). Written back as `"<n>px"` /
+/// `"<n>%"`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Length {
+    Px(f64),
+    Pct(f64),
+}
+
+impl Length {
+    /// Parses `"<n>px"` or `"<n>%"` (surrounding spaces allowed; the number must be finite).
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        let (num, make): (&str, fn(f64) -> Self) = if let Some(n) = s.strip_suffix("px") {
+            (n, Self::Px)
+        } else {
+            (s.strip_suffix('%')?, Self::Pct)
+        };
+        // `f64::from_str` also accepts "inf" / "NaN": rejected by the finiteness check.
+        let v: f64 = num.trim_end().parse().ok()?;
+        v.is_finite().then(|| make(v))
+    }
+}
+
+impl std::fmt::Display for Length {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Px(v) => write!(f, "{v}px"),
+            Self::Pct(v) => write!(f, "{v}%"),
+        }
+    }
+}
+
+impl Serialize for Length {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Length {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match d.deserialize_any(LengthVisitor { allow_auto: false })? {
+            Some(l) => Ok(l),
+            None => Err(serde::de::Error::custom("\"auto\" is not allowed here")),
+        }
+    }
+}
+
+/// A width or height: `"auto"` (content size) or a [`Length`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Dimension {
+    Auto,
+    Length(Length),
+}
+
+impl Serialize for Dimension {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Auto => s.serialize_str("auto"),
+            Self::Length(l) => l.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Dimension {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(LengthVisitor { allow_auto: true })
+            .map(|v| v.map_or(Self::Auto, Self::Length))
+    }
+}
+
+/// Visits a length; `Ok(None)` is `"auto"` (only when allowed).
+struct LengthVisitor {
+    allow_auto: bool,
+}
+
+impl serde::de::Visitor<'_> for LengthVisitor {
+    type Value = Option<Length>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(r#"a length like "10px", "50%" or a number"#)?;
+        if self.allow_auto {
+            f.write_str(r#", or "auto""#)?;
+        }
+        Ok(())
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        if self.allow_auto && v.trim() == "auto" {
+            return Ok(None);
+        }
+        Length::parse(v)
+            .map(Some)
+            .ok_or_else(|| E::invalid_value(serde::de::Unexpected::Str(v), &self))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+        if v.is_finite() {
+            Ok(Some(Length::Px(v)))
+        } else {
+            Err(E::invalid_value(serde::de::Unexpected::Float(v), &self))
+        }
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+        Ok(Some(Length::Px(v as f64)))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+        Ok(Some(Length::Px(v as f64)))
+    }
+}
+
+/// A color `"#RRGGBB"` or `"#AARRGGBB"` (straight alpha). Written back uppercase, as `#RRGGBB`
+/// when fully opaque.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Color {
+    pub a: u8,
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Color {
+    /// Parses `#RRGGBB` or `#AARRGGBB` (case-insensitive).
+    pub fn parse(s: &str) -> Option<Self> {
+        let hex = s.strip_prefix('#')?;
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) || !matches!(hex.len(), 6 | 8) {
+            return None;
+        }
+        let [a, r, g, b] = u32::from_str_radix(hex, 16).ok()?.to_be_bytes();
+        let a = if hex.len() == 6 { 255 } else { a };
+        Some(Self { a, r, g, b })
+    }
+}
+
+impl Serialize for Color {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let text = if self.a == 255 {
+            format!("#{:02X}{:02X}{:02X}", self.r, self.g, self.b)
+        } else {
+            format!("#{:02X}{:02X}{:02X}{:02X}", self.a, self.r, self.g, self.b)
+        };
+        s.serialize_str(&text)
+    }
+}
+
+impl<'de> Deserialize<'de> for Color {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Self::parse(&s).ok_or_else(|| {
+            serde::de::Error::invalid_value(
+                serde::de::Unexpected::Str(&s),
+                &r##"a color "#RRGGBB" or "#AARRGGBB""##,
+            )
+        })
     }
 }
 
@@ -378,5 +731,242 @@ mod tests {
     #[test]
     fn invalid_json_is_an_error() {
         assert!(Config::from_json(b"{ \"version\": 1,").is_err());
+    }
+
+    fn length(v: Value) -> Option<Length> {
+        serde_json::from_value(v).ok()
+    }
+
+    #[test]
+    fn length_parsing() {
+        assert_eq!(length(json!("10px")), Some(Length::Px(10.0)));
+        assert_eq!(length(json!("-200px")), Some(Length::Px(-200.0)));
+        assert_eq!(length(json!("35%")), Some(Length::Pct(35.0)));
+        assert_eq!(length(json!(" -12.5% ")), Some(Length::Pct(-12.5)));
+        assert_eq!(length(json!(12)), Some(Length::Px(12.0)));
+        assert_eq!(length(json!(-3)), Some(Length::Px(-3.0)));
+        assert_eq!(length(json!(1.5)), Some(Length::Px(1.5)));
+        assert_eq!(length(json!("1.5px")), Some(Length::Px(1.5)));
+        for bad in [
+            json!("auto"),
+            json!("10"),
+            json!("px"),
+            json!("10 em"),
+            json!("infpx"),
+            json!("NaN%"),
+            json!(""),
+            json!(true),
+            json!(null),
+        ] {
+            assert_eq!(length(bad.clone()), None, "{bad}");
+        }
+        // Written back with its unit; whole numbers without a fraction.
+        assert_eq!(
+            serde_json::to_value(Length::Px(-200.0)).unwrap(),
+            json!("-200px")
+        );
+        assert_eq!(
+            serde_json::to_value(Length::Pct(35.5)).unwrap(),
+            json!("35.5%")
+        );
+    }
+
+    #[test]
+    fn dimension_parsing() {
+        let dim = |v: Value| serde_json::from_value::<Dimension>(v).ok();
+        assert_eq!(dim(json!("auto")), Some(Dimension::Auto));
+        assert_eq!(
+            dim(json!("320px")),
+            Some(Dimension::Length(Length::Px(320.0)))
+        );
+        assert_eq!(
+            dim(json!("10%")),
+            Some(Dimension::Length(Length::Pct(10.0)))
+        );
+        assert_eq!(dim(json!(40)), Some(Dimension::Length(Length::Px(40.0))));
+        assert_eq!(dim(json!("big")), None);
+        assert_eq!(
+            serde_json::to_value(Dimension::Auto).unwrap(),
+            json!("auto")
+        );
+    }
+
+    #[test]
+    fn anchor_and_origin_parsing_and_fractions() {
+        let origin = |s: &str| serde_json::from_value::<Origin>(json!(s)).unwrap();
+        assert_eq!(origin("top_left").fractions(), (0.0, 0.0));
+        assert_eq!(origin("top").fractions(), (0.5, 0.0));
+        assert_eq!(origin("top_right").fractions(), (1.0, 0.0));
+        assert_eq!(origin("left").fractions(), (0.0, 0.5));
+        assert_eq!(origin("center").fractions(), (0.5, 0.5));
+        assert_eq!(origin("right").fractions(), (1.0, 0.5));
+        assert_eq!(origin("bottom_left").fractions(), (0.0, 1.0));
+        assert_eq!(origin("bottom").fractions(), (0.5, 1.0));
+        assert_eq!(origin("bottom_right").fractions(), (1.0, 1.0));
+        assert!(serde_json::from_value::<Origin>(json!("middle")).is_err());
+        let anchor = |s: &str| serde_json::from_value::<Anchor>(json!(s)).unwrap();
+        assert_eq!(anchor("left").fraction(), 0.0);
+        assert_eq!(anchor("center").fraction(), 0.5);
+        assert_eq!(anchor("right").fraction(), 1.0);
+    }
+
+    #[test]
+    fn color_parsing() {
+        assert_eq!(
+            Color::parse("#FF8000"),
+            Some(Color {
+                a: 255,
+                r: 255,
+                g: 128,
+                b: 0
+            })
+        );
+        assert_eq!(
+            Color::parse("#80ff8000"),
+            Some(Color {
+                a: 128,
+                r: 255,
+                g: 128,
+                b: 0
+            })
+        );
+        for bad in [
+            "FF8000", "#FF800", "#FF80000", "#GG8000", "#+F8000", "", "#",
+        ] {
+            assert_eq!(Color::parse(bad), None, "{bad}");
+        }
+        let c = Color::parse("#80ff8000").unwrap();
+        assert_eq!(serde_json::to_value(c).unwrap(), json!("#80FF8000"));
+        let c = Color::parse("#ff8000").unwrap();
+        assert_eq!(serde_json::to_value(c).unwrap(), json!("#FF8000"));
+    }
+
+    fn text_item(entry: &WidgetEntry) -> &TextWidget {
+        match entry {
+            WidgetEntry::Known(WidgetItem::Text(t)) => t,
+            other => panic!("expected a text item, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn architecture_example_parses_and_media_round_trips() {
+        let input = json!({ "enabled": false, "hide_on_fullscreen": true, "items": [
+            { "id": "media-1", "type": "media", "enabled": true, "anchor": "left", "x": "35%",
+              "y": "50%", "origin": "center", "width": "320px" },
+            { "id": "text-1", "type": "text", "enabled": true, "text": "Hello", "anchor": "right",
+              "x": "-200px", "y": "50%", "origin": "center" }
+        ] });
+        let w: Widgets = serde_json::from_value(input.clone()).unwrap();
+        assert!(matches!(&w.items[0], WidgetEntry::Unknown(v) if *v == input["items"][0]));
+        let t = text_item(&w.items[1]);
+        assert_eq!(t.common.id, "text-1");
+        assert_eq!(t.common.anchor, Lenient::Valid(Anchor::Right));
+        assert_eq!(t.common.x, Lenient::Valid(Length::Px(-200.0)));
+        assert_eq!(t.common.y, Lenient::Valid(Length::Pct(50.0)));
+        assert_eq!(t.common.origin, Lenient::Valid(Origin::Center));
+        assert_eq!(t.text, "Hello");
+        let back = serde_json::to_value(&w).unwrap();
+        assert_eq!(back["items"][0], input["items"][0]);
+        assert_eq!(back["items"][1]["type"], json!("text"));
+        assert_eq!(back["items"][1]["x"], json!("-200px"));
+    }
+
+    #[test]
+    fn minimal_text_item_gets_defaults() {
+        let e: WidgetEntry =
+            serde_json::from_value(json!({ "type": "text", "text": "x" })).unwrap();
+        let t = text_item(&e);
+        let expected = TextWidget {
+            text: "x".into(),
+            ..TextWidget::default()
+        };
+        assert_eq!(*t, expected);
+        assert_eq!(t.common.id, "");
+        assert!(t.common.enabled);
+        assert_eq!(t.common.anchor, Lenient::Valid(Anchor::Left));
+        assert_eq!(t.common.x, Lenient::Valid(Length::Px(0.0)));
+        assert_eq!(t.common.y, Lenient::Valid(Length::Pct(50.0)));
+        assert_eq!(t.common.origin, Lenient::Valid(Origin::Left));
+        assert_eq!(t.common.width, Lenient::Valid(Dimension::Auto));
+        assert_eq!(t.font_family, "Segoe UI Variable Text");
+        assert_eq!(t.font_size, Lenient::Valid(12.0));
+        assert_eq!(t.color, Lenient::Valid(None));
+        // Written back with every known field once, defaults included.
+        assert_eq!(
+            serde_json::to_value(&e).unwrap(),
+            json!({ "type": "text", "id": "", "enabled": true, "anchor": "left", "x": "0px",
+                    "y": "50%", "origin": "left", "width": "auto", "height": "auto",
+                    "text": "x", "font_family": "Segoe UI Variable Text", "font_size": 12.0,
+                    "font_weight": "normal", "color": null, "align": "left" })
+        );
+    }
+
+    #[test]
+    fn invalid_text_fields_are_kept_and_unknown_fields_survive() {
+        let input = json!({ "type": "text", "id": "t", "text": "hi", "x": "10 em", "y": "auto",
+            "anchor": "middle", "origin": 3, "width": "wide", "height": "20px", "font_size": "big",
+            "font_weight": "black", "color": "#12345", "align": "justify", "note": { "k": 1 } });
+        let e: WidgetEntry = serde_json::from_value(input.clone()).unwrap();
+        let t = text_item(&e);
+        assert_eq!(t.common.x, Lenient::Invalid(json!("10 em")));
+        assert_eq!(t.common.y, Lenient::Invalid(json!("auto")));
+        assert_eq!(t.common.anchor, Lenient::Invalid(json!("middle")));
+        assert_eq!(t.common.origin, Lenient::Invalid(json!(3)));
+        assert_eq!(t.common.width, Lenient::Invalid(json!("wide")));
+        assert_eq!(
+            t.common.height,
+            Lenient::Valid(Dimension::Length(Length::Px(20.0)))
+        );
+        assert_eq!(t.font_size, Lenient::Invalid(json!("big")));
+        assert_eq!(t.font_weight, Lenient::Invalid(json!("black")));
+        assert_eq!(t.color, Lenient::Invalid(json!("#12345")));
+        assert_eq!(t.align, Lenient::Invalid(json!("justify")));
+        assert_eq!(t.extra.len(), 1);
+        assert_eq!(t.extra["note"], json!({ "k": 1 }));
+        let mut back = serde_json::to_value(&e).unwrap();
+        // Known fields missing from the input are added with their defaults; nothing else changes.
+        let obj = back.as_object_mut().unwrap();
+        assert_eq!(obj.remove("enabled"), Some(json!(true)));
+        assert_eq!(
+            obj.remove("font_family"),
+            Some(json!("Segoe UI Variable Text"))
+        );
+        assert_eq!(back, input);
+    }
+
+    #[test]
+    fn items_that_do_not_parse_are_kept_verbatim() {
+        let input = json!([
+            { "type": "text", "text": 5 },
+            { "text": "no type" },
+            { "type": "media" },
+            { "type": "text", "enabled": "yes" },
+            "not an object"
+        ]);
+        let items: Vec<WidgetEntry> = serde_json::from_value(input.clone()).unwrap();
+        for e in &items {
+            assert!(matches!(e, WidgetEntry::Unknown(_)), "{e:?}");
+        }
+        assert_eq!(serde_json::to_value(&items).unwrap(), input);
+    }
+
+    #[test]
+    fn color_null_hex_and_alpha() {
+        let color = |v: Value| {
+            let e: WidgetEntry =
+                serde_json::from_value(json!({ "type": "text", "color": v })).unwrap();
+            text_item(&e).color.clone()
+        };
+        assert_eq!(color(json!(null)), Lenient::Valid(None));
+        assert_eq!(
+            color(json!("#102030")),
+            Lenient::Valid(Some(Color {
+                a: 255,
+                r: 0x10,
+                g: 0x20,
+                b: 0x30
+            }))
+        );
+        assert_eq!(color(json!("red")), Lenient::Invalid(json!("red")));
     }
 }

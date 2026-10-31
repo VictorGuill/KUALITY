@@ -46,7 +46,7 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 
 ## Phase 3 — Taskbar overlay
 
-- [ ] Spec `docs/specs/overlay.md`
+- [x] Spec `docs/specs/overlay.md`
 - [ ] Widget host window as child of every taskbar (primary + secondary)
 - [ ] Direct2D/DirectWrite rendering, DPI aware
 - [ ] Positioning: `x`/`y` in px or %, `anchor`, `origin`, `width`
