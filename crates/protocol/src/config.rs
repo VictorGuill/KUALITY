@@ -89,14 +89,74 @@ pub struct Hyperkey {
     pub extra: Extra,
 }
 
-/// `shortcuts` section. `bindings` become typed in Phase 2.
+/// `shortcuts` section (see `docs/specs/shortcuts.md`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Shortcuts {
     pub enabled: bool,
-    pub bindings: Vec<Value>,
+    pub bindings: Vec<BindingEntry>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// One entry of `shortcuts.bindings`. Entries that do not parse as a [`Binding`] (unknown action
+/// type, missing field…) are kept as raw JSON so they survive a save, and skipped at runtime.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BindingEntry {
+    Valid(Binding),
+    Invalid(Value),
+}
+
+/// Hyper+`key` runs `action`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Binding {
+    /// Trigger key name (see `keys::parse_key`). Validated when bindings are compiled.
+    pub key: String,
+    /// Label for the settings UI; not used by the core.
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub action: Action,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// What a binding does, tagged by `type`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Action {
+    /// Open a program, document, folder or `shell:` path.
+    Launch {
+        path: String,
+        #[serde(default)]
+        args: LaunchArgs,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
+    /// Send one key chord, e.g. `"ctrl+shift+esc"`.
+    SendHotkey { keys: String },
+    /// Open a URI with its default handler (`https:`, `mailto:`, `ms-settings:`…).
+    OpenUrl { url: String },
+}
+
+/// `launch.args`: a list (quoted and joined with Windows rules) or one raw string (verbatim).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LaunchArgs {
+    List(Vec<String>),
+    Raw(String),
+}
+
+impl Default for LaunchArgs {
+    fn default() -> Self {
+        Self::List(Vec::new())
+    }
 }
 
 /// `widgets` section. `items` become typed in Phase 3.
@@ -200,6 +260,119 @@ mod tests {
     #[test]
     fn invalid_log_level_is_an_error() {
         assert!(Config::from_json(br#"{ "general": { "log_level": "loud" } }"#).is_err());
+    }
+
+    #[test]
+    fn shortcut_example_parses() {
+        let c = Config::from_json(
+            br#"{ "shortcuts": { "enabled": true, "bindings": [
+                { "key": "1", "name": "Notepad", "enabled": true,
+                  "action": { "type": "launch", "path": "C:\\Windows\\notepad.exe", "args": [], "cwd": null } },
+                { "key": "2", "action": { "type": "send_hotkey", "keys": "ctrl+shift+esc" } },
+                { "key": "G", "action": { "type": "open_url", "url": "https://github.com" } }
+            ] } }"#,
+        )
+        .unwrap();
+        assert!(c.shortcuts.enabled);
+        let b: Vec<&Binding> = c
+            .shortcuts
+            .bindings
+            .iter()
+            .map(|e| match e {
+                BindingEntry::Valid(b) => b,
+                BindingEntry::Invalid(v) => panic!("invalid entry {v}"),
+            })
+            .collect();
+        assert_eq!(b[0].name, "Notepad");
+        assert_eq!(
+            b[0].action,
+            Action::Launch {
+                path: r"C:\Windows\notepad.exe".into(),
+                args: LaunchArgs::List(vec![]),
+                cwd: None
+            }
+        );
+        // Optional fields default.
+        assert_eq!(b[1].name, "");
+        assert!(b[1].enabled);
+        assert_eq!(
+            b[1].action,
+            Action::SendHotkey {
+                keys: "ctrl+shift+esc".into()
+            }
+        );
+        assert_eq!(
+            b[2].action,
+            Action::OpenUrl {
+                url: "https://github.com".into()
+            }
+        );
+    }
+
+    #[test]
+    fn launch_args_list_raw_and_defaults() {
+        let parse = |action: Value| -> Action {
+            let v = json!({ "key": "a", "action": action });
+            match serde_json::from_value::<BindingEntry>(v).unwrap() {
+                BindingEntry::Valid(b) => b.action,
+                BindingEntry::Invalid(v) => panic!("invalid {v}"),
+            }
+        };
+        assert_eq!(
+            parse(json!({ "type": "launch", "path": "x", "args": ["a b", "c"] })),
+            Action::Launch {
+                path: "x".into(),
+                args: LaunchArgs::List(vec!["a b".into(), "c".into()]),
+                cwd: None
+            }
+        );
+        assert_eq!(
+            parse(json!({ "type": "launch", "path": "x", "args": "--raw \"q\"", "cwd": "C:\\" })),
+            Action::Launch {
+                path: "x".into(),
+                args: LaunchArgs::Raw("--raw \"q\"".into()),
+                cwd: Some("C:\\".into())
+            }
+        );
+        assert_eq!(
+            parse(json!({ "type": "launch", "path": "x" })),
+            Action::Launch {
+                path: "x".into(),
+                args: LaunchArgs::default(),
+                cwd: None
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_bindings_are_kept_verbatim() {
+        let input = json!({ "enabled": true, "bindings": [
+            { "key": "1", "action": { "type": "run_script", "script": "x.ps1" } },
+            { "key": "2" },
+            { "action": { "type": "open_url", "url": "https://a.b" } },
+            { "key": 3, "action": { "type": "open_url", "url": "https://a.b" } },
+            { "key": "4", "action": { "type": "launch" } },
+            "not an object",
+            { "key": "5", "note": "kept", "action": { "type": "open_url", "url": "https://a.b" } }
+        ] });
+        let s: Shortcuts = serde_json::from_value(input.clone()).unwrap();
+        for e in &s.bindings[..6] {
+            assert!(matches!(e, BindingEntry::Invalid(_)), "{e:?}");
+        }
+        let BindingEntry::Valid(b) = &s.bindings[6] else {
+            panic!("expected a valid entry");
+        };
+        assert_eq!(b.extra["note"], json!("kept"));
+        let back = serde_json::to_value(&s).unwrap();
+        for i in 0..6 {
+            assert_eq!(back["bindings"][i], input["bindings"][i]);
+        }
+        // Known optional fields are written with their defaults.
+        assert_eq!(
+            back["bindings"][6],
+            json!({ "key": "5", "name": "", "enabled": true, "note": "kept",
+                    "action": { "type": "open_url", "url": "https://a.b" } })
+        );
     }
 
     #[test]

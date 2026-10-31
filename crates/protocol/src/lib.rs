@@ -5,5 +5,8 @@
 pub mod config;
 pub mod keys;
 
-pub use config::{CONFIG_VERSION, Config, General, Hyperkey, LogLevel, Shortcuts, Widgets};
+pub use config::{
+    Action, Binding, BindingEntry, CONFIG_VERSION, Config, General, Hyperkey, LaunchArgs, LogLevel,
+    Shortcuts, Widgets,
+};
 pub use keys::{Chord, Key, KeyParseError, parse_chord, parse_key};
