@@ -93,7 +93,7 @@ Binding editor:
 
 ## Config file handling
 
-- **Location**: same rule as the core. The pure part of `crates/core/src/paths.rs` (`DataDir::resolve`, file names) moves to `kuality-protocol` (`protocol::paths`); both exes call it with their own exe dir (they ship side by side) and the roaming app data folder (`SHGetKnownFolderPath(FOLDERID_RoamingAppData)`). No command-line argument from the core.
+- **Location**: same rule as the core. The pure part of `crates/core/src/paths.rs` (`DataDir::resolve`, file names) moves to `kuality-protocol` (`protocol::paths`); both exes call it with their own exe dir (they ship side by side) and the roaming app data folder (`SHGetKnownFolderPath(FOLDERID_RoamingAppData)`). The only argument from the core is `--core-pid` (see "Lifecycle"); it does not affect the data dir.
 - **Read**: at startup and on every external change. Missing file → defaults in the window; the first saved change creates it (and its folder).
 - **Write**: atomic temp file + rename, as today. `config_store::save`'s write moves to `protocol::store::write_atomic(path, bytes)`, used by both. Bytes are skipped if identical to what is on disk. Pending changes are flushed when the window closes.
 - **Preserve unknown fields**: the window edits the parsed `Config` in place and serializes it, so every `extra` map, every raw `Invalid` / `Unknown` entry and every `Lenient::Invalid` value survives. Gap closed in this phase: `Action` variants become newtype variants over structs with their own `extra` map (same pattern as `WidgetItem`), so unknown fields inside `action` survive too. Formatting is normalized (2-space pretty JSON, known fields in struct order, missing known fields written with defaults, unknown keys sorted — no `preserve_order`).
@@ -103,9 +103,18 @@ Binding editor:
 
 ## Launching and single instance
 
-- `Event::OpenSettings` in the core: `kuality-settings.exe` next to `current_exe()`. If it exists → `std::process::Command::new(path).current_dir(exe_dir).spawn()` (not awaited, handle dropped); if it is missing or the spawn fails → log and fall back to the old behaviour (open `config.json` in the default editor).
+- `Event::OpenSettings` in the core: `kuality-settings.exe` next to `current_exe()`. If it exists → `std::process::Command::new(path).arg("--core-pid").arg(<core pid>).current_dir(exe_dir).spawn()` (not awaited, handle dropped); if it is missing or the spawn fails → log and fall back to the old behaviour (open `config.json` in the default editor).
 - The settings exe uses `windows_subsystem = "windows"` in release (like the core); in debug it is a console app, so when started from a debug core its `log` output lands in the core's console. No log file.
 - Single instance: named mutex `Local\Kuality.Settings`. A second instance finds the first one's top-level window (title `Kuality Settings`, owning process image `kuality-settings.exe`), restores it if minimized, calls `SetForegroundWindow` (it can: it was just launched by the foreground core or by the user) and exits with code 0.
+
+## Lifecycle (follow-up: Kuality behaves as one app)
+
+The settings window belongs to the core: it never outlives it, and opening it starts the core when needed.
+
+- **Attach**, in order: the process given by `--core-pid` (only if it is a running `kuality.exe`; if it is already gone, the settings app exits without a window); else the running core of the session, found by its `Kuality.Core` window (waits up to 3 s while its mutex exists but the window does not yet); else **start** `kuality.exe` from the settings exe's own folder (same folder, so the same portable/data-dir rule) and attach to it.
+- **Watch**: a background thread `kuality-settings-core-watch` waits on the core process handle (`SYNCHRONIZE`). When the core exits for any reason (tray Quit, `taskkill`, `taskkill /F`, crash) the window cancels a recording, writes a pending auto-save at once and quits.
+- **No core**: if `kuality.exe` is missing or cannot be started, the window still opens, with a warning banner "Kuality is not running" and the reason; edits are saved to `config.json` and apply when Kuality starts. (Also when the core's mutex exists but its window cannot be found: then no second core is started.)
+- Closing the settings window never stops the core.
 
 ## Implementation notes
 
@@ -137,8 +146,8 @@ Build check (2026-10-31, throwaway crate outside the repo, rustc 1.99.1 stable-x
 
 | Case | Handling |
 |---|---|
-| Core not running | Window works; status hint; changes apply when it starts. |
-| Settings started directly (`cargo run -p kuality-settings`) | Same data-dir rule, same file. |
+| Core not running | Settings starts `kuality.exe` from its own folder and attaches to it. If that is impossible: banner + status hint; changes apply when it starts. |
+| Settings started directly (`cargo run -p kuality-settings`) | Same data-dir rule, same file; starts the core if none is running. |
 | File missing | Defaults shown; first change creates it. |
 | File invalid / newer version | See "Config file handling". |
 | External edit while a field has an unsaved invalid value | Reload wins; the invalid text is replaced by the file value. |
@@ -146,7 +155,7 @@ Build check (2026-10-31, throwaway crate outside the repo, rustc 1.99.1 stable-x
 | Hand-made key alias (`"escape"`, `"G"`) | Shown as its canonical name in the Select but written back verbatim unless changed. |
 | Recording while another app has focus | Never: recording stops on deactivation and keys are only swallowed while our window is in front. |
 | Settings window closed while a key is held during recording | Hook thread is joined after the remaining ups are swallowed or 1 s, whichever comes first. |
-| Core quits while the window is open | Nothing happens to the window. |
+| Core quits or is killed while the window is open | The window saves a pending change and closes (see "Lifecycle"). |
 
 ## Out of scope
 

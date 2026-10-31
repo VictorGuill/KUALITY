@@ -17,7 +17,9 @@ kuality.exe  (core, always running, few MB)
 
 kuality-settings.exe  (GPUI via gpui-kit, only alive while open; started by tray/widget "Settings")
 ├── UI thread              → window, auto-save (300 ms), 1 s check for outside edits of config.json
+├── Core watch thread      → waits on the core process; when it exits the window saves and quits
 └── Recorder thread        → WH_KEYBOARD_LL hook, only while a Record button is active
+    Started with --core-pid by the core, or on its own (then it attaches to / starts kuality.exe)
     (Phase 5: talks to the core only through config.json, which the core hot-reloads)
 
 extensions/*  (later, separate processes in any language)
@@ -59,10 +61,10 @@ Current `core` modules (Phases 0–3):
 
 | Module | Role |
 |---|---|
-| `main.rs` | Single instance (or focus the open window), data dir, stderr logger in debug builds |
+| `main.rs` | Single instance (or focus the open window), data dir, link to the core (`--core-pid`, running core, or start it), stderr logger in debug builds |
 | `model.rs` | `Document`: load / save / poll of `config.json`, read-only on invalid file; field validation helpers (unit-tested, no UI) |
 | `recorder.rs` | Portable key-recording state machine (trigger key or chord, swallowed keys) |
-| `platform.rs` | Windows: known folder, `Local\Kuality.Settings` mutex + focus existing window, core-running check, recorder hook thread |
+| `platform.rs` | Windows: known folder, `Local\Kuality.Settings` mutex + focus existing window, core-running check, `CoreProcess` (open / find / start / watch the core), recorder hook thread |
 | `ui/mod.rs` | `SettingsWindow` view: tabs, debounced save, disk poll, recording, banner and status bar |
 | `ui/{general,widgets,hyperkey,shortcuts}.rs` | One tab each; widgets and shortcuts have list rows with an inline editor |
 | `ui/controls.rs` | Layout helpers (sections, rows, fields, segmented buttons) |
