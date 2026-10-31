@@ -1,11 +1,11 @@
-//! Windows-specific parts of the settings app: known folder, single instance, core detection and
-//! the key-recording hook. Everything else is portable.
+//! Windows-specific parts of the settings app: known folder, single instance, the link to the
+//! core process and the key-recording hook. Everything else is portable.
 
 use std::cell::RefCell;
 use std::ffi::OsString;
 use std::io;
 use std::os::windows::ffi::OsStringExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use futures_channel::oneshot;
@@ -16,19 +16,19 @@ use windows::Win32::Foundation::{
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcessId, GetCurrentThreadId, OpenMutexW, OpenProcess,
-    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
-    SYNCHRONIZATION_SYNCHRONIZE,
+    CreateMutexW, GetCurrentProcessId, GetCurrentThreadId, INFINITE, OpenMutexW, OpenProcess,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    QueryFullProcessImageNameW, SYNCHRONIZATION_SYNCHRONIZE, WaitForSingleObject,
 };
 use windows::Win32::UI::Shell::{FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, EnumWindows, GetForegroundWindow, GetMessageW,
+    CallNextHookEx, DispatchMessageW, EnumWindows, FindWindowW, GetForegroundWindow, GetMessageW,
     GetWindowTextW, GetWindowThreadProcessId, HC_ACTION, IsIconic, IsWindowVisible,
     KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, PostQuitMessage, PostThreadMessageW, SW_RESTORE,
     SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow, TranslateMessage,
     UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
 };
-use windows::core::{BOOL, PCWSTR, PWSTR};
+use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
 use crate::recorder::{Mode, Outcome, Recording};
 
@@ -37,6 +37,10 @@ pub const WINDOW_TITLE: &str = "Kuality Settings";
 const INSTANCE_MUTEX: &str = r"Local\Kuality.Settings";
 const CORE_MUTEX: &str = r"Local\Kuality.Core";
 const EXE_NAME: &str = "kuality-settings.exe";
+/// The core's exe, shipped next to this one.
+pub const CORE_EXE_NAME: &str = "kuality.exe";
+/// Class of the core's hidden main window (owns the tray icon).
+const CORE_WINDOW_CLASS: PCWSTR = w!("Kuality.Core");
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -142,21 +146,30 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
 }
 
 fn process_is_settings(pid: u32) -> bool {
-    // SAFETY: the handle is checked and closed; the buffer outlives the call.
+    // SAFETY: the handle is checked and closed once.
     unsafe {
         let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
             return false;
         };
-        let mut buf = [0u16; 1024];
-        let mut len = buf.len() as u32;
-        let ok =
-            QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len)
-                .is_ok();
+        let ok = image_is(h, EXE_NAME);
         let _ = CloseHandle(h);
-        ok && PathBuf::from(String::from_utf16_lossy(&buf[..len as usize]))
-            .file_name()
-            .is_some_and(|n| n.eq_ignore_ascii_case(EXE_NAME))
+        ok
     }
+}
+
+/// Whether the process behind `h` (opened with at least query-limited rights) runs an exe named
+/// `exe_name`.
+fn image_is(h: HANDLE, exe_name: &str) -> bool {
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    // SAFETY: `buf` and `len` are valid for the call; `h` is a live process handle.
+    let ok = unsafe {
+        QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len)
+    }
+    .is_ok();
+    ok && PathBuf::from(String::from_utf16_lossy(&buf[..len as usize]))
+        .file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case(exe_name))
 }
 
 /// Whether the Kuality core is running in this session (its single-instance mutex exists).
@@ -172,6 +185,104 @@ pub fn core_running() -> bool {
             Err(_) => false,
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Link to the core: the settings window lives only as long as the core process.
+
+/// The running core process, opened so we can wait for it to exit.
+#[derive(Debug)]
+pub struct CoreProcess {
+    handle: HANDLE,
+    pub pid: u32,
+}
+
+impl CoreProcess {
+    /// Opens process `pid` if it is a running `kuality.exe` (guards against a reused pid).
+    pub fn open(pid: u32) -> Option<Self> {
+        // SAFETY: the handle is checked, and owned by the returned value or closed here.
+        unsafe {
+            let h = OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                pid,
+            )
+            .ok()?;
+            if image_is(h, CORE_EXE_NAME) {
+                Some(Self { handle: h, pid })
+            } else {
+                let _ = CloseHandle(h);
+                None
+            }
+        }
+    }
+
+    /// Waits for the process to exit on a background thread; the receiver fires then (for any
+    /// exit: tray Quit, `taskkill`, crash).
+    pub fn watch(self) -> io::Result<oneshot::Receiver<()>> {
+        let (tx, rx) = oneshot::channel();
+        // The thread takes over the handle; a raw value crosses the thread boundary.
+        let raw = self.handle.0 as usize;
+        std::mem::forget(self);
+        std::thread::Builder::new()
+            .name("kuality-settings-core-watch".into())
+            .spawn(move || {
+                let h = HANDLE(raw as *mut core::ffi::c_void);
+                // SAFETY: `h` is the process handle opened in `open` and owned by this thread
+                // from here on; it is closed once after the wait.
+                unsafe {
+                    WaitForSingleObject(h, INFINITE);
+                    let _ = CloseHandle(h);
+                }
+                let _ = tx.send(());
+            })?;
+        Ok(rx)
+    }
+}
+
+impl Drop for CoreProcess {
+    fn drop(&mut self) {
+        // SAFETY: the handle is owned by this value and closed once.
+        let _ = unsafe { CloseHandle(self.handle) };
+    }
+}
+
+/// The running core of this session, found through its main window. Waits up to 3 s when the
+/// core's mutex exists but its window is not created yet (core still starting).
+pub fn find_core() -> Option<CoreProcess> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        // SAFETY: plain lookup by a static class name.
+        if let Ok(hwnd) = unsafe { FindWindowW(CORE_WINDOW_CLASS, PCWSTR::null()) } {
+            let mut pid = 0u32;
+            // SAFETY: `pid` is a valid out pointer.
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            if let Some(core) = CoreProcess::open(pid) {
+                return Some(core);
+            }
+        }
+        if !core_running() || Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Starts `kuality.exe` from `exe_dir` (it applies the same data-dir rule as this app).
+pub fn start_core(exe_dir: &Path) -> io::Result<CoreProcess> {
+    let exe = exe_dir.join(CORE_EXE_NAME);
+    if !exe.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{CORE_EXE_NAME} was not found in {}", exe_dir.display()),
+        ));
+    }
+    // The child handle is dropped: the core keeps running on its own.
+    let child = std::process::Command::new(&exe)
+        .current_dir(exe_dir)
+        .spawn()?;
+    CoreProcess::open(child.id())
+        .ok_or_else(|| io::Error::other(format!("{CORE_EXE_NAME} exited right after starting")))
 }
 
 // ---------------------------------------------------------------------------------------------

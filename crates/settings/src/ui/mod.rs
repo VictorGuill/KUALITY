@@ -27,8 +27,17 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// A recording ends by itself after this long.
 const RECORD_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Opens the window and runs until it is closed.
-pub fn run(config_path: PathBuf) {
+/// How this window is tied to the core process.
+#[derive(Debug)]
+pub enum CoreLink {
+    /// The window closes (after flushing a pending save) when this process exits.
+    Attached(platform::CoreProcess),
+    /// No core could be found or started: the window shows why.
+    Missing(String),
+}
+
+/// Opens the window and runs until it is closed or the core exits.
+pub fn run(config_path: PathBuf, core: CoreLink) {
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
@@ -45,7 +54,7 @@ pub fn run(config_path: PathBuf) {
             };
             let opened = gpui_kit::open_window(options, cx, |window, cx| {
                 Theme::sync_system_appearance(Some(window), cx);
-                cx.new(|cx| SettingsWindow::new(config_path, window, cx))
+                cx.new(|cx| SettingsWindow::new(config_path, core, window, cx))
             });
             if let Err(e) = opened {
                 log::error!("cannot open the settings window: {e}");
@@ -117,6 +126,8 @@ pub struct SettingsWindow {
     tab: Tab,
     status: Status,
     core_running: bool,
+    /// Why no core is attached (shown as a banner); `None` when attached.
+    core_missing: Option<String>,
     save_task: Option<Task<()>>,
     pub(crate) widget_editor: Option<widgets::WidgetEditor>,
     pub(crate) binding_editor: Option<shortcuts::BindingEditor>,
@@ -126,8 +137,29 @@ pub struct SettingsWindow {
 }
 
 impl SettingsWindow {
-    fn new(config_path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        config_path: PathBuf,
+        core: CoreLink,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let doc = Document::load(config_path);
+        let core_missing = match core {
+            CoreLink::Attached(core) => {
+                match core.watch() {
+                    Ok(exited) => cx
+                        .spawn(async move |this, cx| {
+                            if exited.await.is_ok() {
+                                let _ = this.update(cx, |this, cx| this.core_exited(cx));
+                            }
+                        })
+                        .detach(),
+                    Err(e) => log::error!("cannot watch the Kuality process: {e}"),
+                }
+                None
+            }
+            CoreLink::Missing(why) => Some(why),
+        };
         log::info!("editing {} ({:?})", doc.path().display(), doc.state());
         let poll = cx.spawn_in(window, async move |this, cx| {
             loop {
@@ -164,6 +196,7 @@ impl SettingsWindow {
             tab: Tab::General,
             status: Status::Idle,
             core_running: platform::core_running(),
+            core_missing,
             save_task: None,
             widget_editor: None,
             binding_editor: None,
@@ -205,6 +238,14 @@ impl SettingsWindow {
             }
         }
         cx.notify();
+    }
+
+    /// The core exited (tray Quit, `taskkill`, crash): save what is pending and close.
+    fn core_exited(&mut self, cx: &mut Context<Self>) {
+        log::info!("Kuality exited; closing the settings window");
+        self.cancel_recording(cx);
+        self.flush(cx);
+        cx.quit();
     }
 
     /// Writes a pending change at once (window closing).
@@ -372,6 +413,17 @@ impl SettingsWindow {
                     )
                     .child(h_flex().child(controls::open_config_button(self, cx)))
                     .into_any_element(),
+            ),
+            _ if self.core_missing.is_some() => Some(
+                Alert::warning(
+                    "core-missing",
+                    format!(
+                        "{} Changes are still saved to config.json and apply when Kuality                          starts.",
+                        self.core_missing.as_deref().unwrap_or_default()
+                    ),
+                )
+                .title("Kuality is not running")
+                .into_any_element(),
             ),
             _ if self.doc.newer_version() => Some(
                 Alert::warning(
