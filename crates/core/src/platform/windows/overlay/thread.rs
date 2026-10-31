@@ -30,15 +30,16 @@ use ::windows::Win32::System::Threading::GetCurrentThreadId;
 use ::windows::Win32::UI::Accessibility::HWINEVENTHOOK;
 use ::windows::Win32::UI::WindowsAndMessaging::{
     CHILDID_SELF, ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER, GW_CHILD, GW_HWNDNEXT,
-    GetMessageW, GetWindow, KillTimer, MSG, MSGFLT_ALLOW, OBJID_WINDOW, PBT_APMRESUMEAUTOMATIC,
-    PostMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassExW, RegisterWindowMessageW,
-    SetTimer, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DISPLAYCHANGE,
-    WM_POWERBROADCAST, WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW,
-    WS_EX_TOOLWINDOW, WS_POPUP, WTS_SESSION_UNLOCK,
+    DispatchMessageW, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER, EVENT_SYSTEM_FOREGROUND,
+    GW_CHILD, GW_HWNDNEXT, GetForegroundWindow, GetMessageW, GetWindow, KillTimer, MSG,
+    MSGFLT_ALLOW, OBJID_WINDOW, PBT_APMRESUMEAUTOMATIC, PostMessageW, PostQuitMessage,
+    PostThreadMessageW, RegisterClassExW, RegisterWindowMessageW, SetTimer, TranslateMessage,
+    WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DISPLAYCHANGE, WM_POWERBROADCAST, WM_SETTINGCHANGE,
+    WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP, WTS_SESSION_UNLOCK,
 };
 use ::windows::core::{PCWSTR, w};
 
+use super::fullscreen;
 use super::render::D2d;
 use super::taskbars;
 use super::theme;
@@ -212,6 +213,19 @@ struct State {
     shell_hooks: Vec<HWINEVENTHOOK>,
     retries: u32,
     session_registered: bool,
+    fullscreen: FullscreenWatch,
+}
+
+/// Fullscreen detection state (only active with `hide_on_fullscreen`).
+#[derive(Default)]
+struct FullscreenWatch {
+    /// `EVENT_SYSTEM_FOREGROUND`, all processes.
+    foreground_hook: Option<HWINEVENTHOOK>,
+    /// `EVENT_OBJECT_LOCATIONCHANGE` limited to the foreground window's process (catches F11).
+    location_hook: Option<(HWINEVENTHOOK, u32)>,
+    foreground: HWND,
+    /// Monitor covered by the fullscreen foreground window.
+    monitor: Option<HMONITOR>,
 }
 
 fn thread_main(rx: Receiver<OverlayCommand>, ready: mpsc::SyncSender<io::Result<(isize, u32)>>) {
@@ -250,6 +264,7 @@ fn thread_main(rx: Receiver<OverlayCommand>, ready: mpsc::SyncSender<io::Result<
         shell_hooks: Vec::new(),
         retries: 0,
         session_registered,
+        fullscreen: FullscreenWatch::default(),
     }));
     // SAFETY: no arguments.
     let thread_id = unsafe { GetCurrentThreadId() };
@@ -388,6 +403,7 @@ impl State {
     fn teardown(&mut self) {
         self.taskbars.clear();
         self.unhook_explorer();
+        self.unhook_fullscreen();
         for id in [TIMER_REFRESH, TIMER_LATE_2S, TIMER_LATE_5S, TIMER_RETRY] {
             self.kill_timer(id);
         }
@@ -494,6 +510,8 @@ impl State {
         }
         // Dropping the hosts of vanished taskbars destroys their windows.
         drop(old);
+        // Before layout, so windows are created hidden on a fullscreen monitor.
+        self.sync_fullscreen();
         self.layout_all();
         log::debug!(
             "overlay refreshed: {} taskbar(s), {} widget window(s)",
@@ -584,6 +602,89 @@ impl State {
         }
     }
 
+    /// Installs or removes the fullscreen hooks to match the config, then re-evaluates.
+    fn sync_fullscreen(&mut self) {
+        if !self.config.hide_on_fullscreen {
+            self.unhook_fullscreen();
+            self.set_fullscreen_monitor(None);
+            return;
+        }
+        if self.fullscreen.foreground_hook.is_none() {
+            self.fullscreen.foreground_hook =
+                taskbars::hook(EVENT_SYSTEM_FOREGROUND, 0, Some(fullscreen_event));
+            log::debug!("fullscreen hooks installed");
+        }
+        // SAFETY: no arguments.
+        let fg = unsafe { GetForegroundWindow() };
+        self.on_foreground(fg);
+    }
+
+    fn unhook_fullscreen(&mut self) {
+        let f = &mut self.fullscreen;
+        let had = f.foreground_hook.is_some();
+        if let Some(h) = f.foreground_hook.take() {
+            taskbars::unhook(h);
+        }
+        if let Some((h, _)) = f.location_hook.take() {
+            taskbars::unhook(h);
+        }
+        f.foreground = HWND::default();
+        f.monitor = None;
+        if had {
+            log::debug!("fullscreen hooks removed");
+        }
+    }
+
+    /// The foreground window changed: watch its process for location changes and re-check.
+    fn on_foreground(&mut self, fg: HWND) {
+        if self.fullscreen.foreground_hook.is_none() {
+            return;
+        }
+        self.fullscreen.foreground = fg;
+        let pid = if fg.is_invalid() {
+            0
+        } else {
+            taskbars::window_pid(fg)
+        };
+        let current = self.fullscreen.location_hook.map(|(_, p)| p);
+        if current != Some(pid) {
+            if let Some((h, _)) = self.fullscreen.location_hook.take() {
+                taskbars::unhook(h);
+            }
+            if pid != 0 {
+                self.fullscreen.location_hook =
+                    taskbars::hook(EVENT_OBJECT_LOCATIONCHANGE, pid, Some(fullscreen_event))
+                        .map(|h| (h, pid));
+            }
+        }
+        self.update_fullscreen();
+    }
+
+    fn update_fullscreen(&mut self) {
+        let monitor = fullscreen::fullscreen_monitor(self.fullscreen.foreground);
+        self.set_fullscreen_monitor(monitor);
+    }
+
+    /// Hides the widgets of the taskbar on `monitor`, shows all others. Acts only on flips.
+    fn set_fullscreen_monitor(&mut self, monitor: Option<HMONITOR>) {
+        if self.fullscreen.monitor != monitor {
+            self.fullscreen.monitor = monitor;
+            log::debug!(
+                "fullscreen foreground: {}",
+                if monitor.is_some() { "yes" } else { "no" }
+            );
+        }
+        for tb in &mut self.taskbars {
+            let hidden = monitor.is_some_and(|m| m == tb.monitor);
+            if hidden != tb.hidden_by_fullscreen {
+                tb.hidden_by_fullscreen = hidden;
+                for (_, w) in &tb.windows {
+                    w.show(!hidden);
+                }
+            }
+        }
+    }
+
     fn on_shell_event(&mut self, event: u32, hwnd: HWND, id_object: i32, id_child: i32) {
         let Some(tb) = self.taskbars.iter().find(|t| t.hwnd == hwnd) else {
             return;
@@ -622,6 +723,33 @@ unsafe extern "system" fn shell_event(
         return;
     }
     with_state(|s| s.on_shell_event(event, hwnd, id_object, id_child));
+}
+
+/// WinEvent callback for the fullscreen hooks.
+unsafe extern "system" fn fullscreen_event(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    match event {
+        EVENT_SYSTEM_FOREGROUND => {
+            with_state(|s| s.on_foreground(hwnd));
+        }
+        EVENT_OBJECT_LOCATIONCHANGE
+            if id_object == OBJID_WINDOW.0 && id_child == CHILDID_SELF as i32 =>
+        {
+            with_state(|s| {
+                if s.fullscreen.foreground == hwnd {
+                    s.update_fullscreen();
+                }
+            });
+        }
+        _ => {}
+    }
 }
 
 /// `WM_SETTINGCHANGE` with this `lParam` string: the light/dark mode changed.

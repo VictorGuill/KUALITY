@@ -51,7 +51,7 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 - [x] Direct2D/DirectWrite rendering, DPI aware
 - [x] Positioning: `x`/`y` in px or %, `anchor`, `origin`, `width`
 - [x] Re-attach on Explorer restart (`TaskbarCreated`), handle monitor/DPI changes
-- [ ] Hide on fullscreen apps
+- [x] Hide on fullscreen apps
 - [x] Follow Windows light/dark theme
 - [x] First widget: static `text`
 - [ ] Right-click on widget → small menu (Settings / Hide)
