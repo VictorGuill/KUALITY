@@ -68,8 +68,15 @@ const TIMER_REFRESH: usize = 1;
 const TIMER_LATE_2S: usize = 2;
 const TIMER_LATE_5S: usize = 3;
 const TIMER_RETRY: usize = 4;
+const TIMER_CREATE_RETRY: usize = 5;
 const REFRESH_DEBOUNCE_MS: u32 = 300;
 const RETRY_MS: u32 = 1000;
+/// Failed widget window creation (e.g. `CreateWindowExW` denied while Explorer is busy) is
+/// retried with this backoff: 1, 2, 4, 8, 16, then 30 s, at most `MAX_CREATE_RETRIES` times.
+/// Afterwards only the usual refresh triggers retry.
+const CREATE_RETRY_FIRST_MS: u32 = 1000;
+const CREATE_RETRY_MAX_MS: u32 = 30_000;
+const MAX_CREATE_RETRIES: u32 = 12;
 /// Retries while `Shell_TrayWnd` is missing at startup (then rely on `TaskbarCreated`).
 const MAX_RETRIES: u32 = 30;
 
@@ -221,6 +228,8 @@ struct State {
     /// `EVENT_OBJECT_REORDER` + `EVENT_OBJECT_LOCATIONCHANGE` limited to Explorer.
     shell_hooks: Vec<HWINEVENTHOOK>,
     retries: u32,
+    /// Consecutive refreshes in which a widget window could not be created (0 = all fine).
+    create_retries: u32,
     session_registered: bool,
     fullscreen: FullscreenWatch,
 }
@@ -272,6 +281,7 @@ fn thread_main(rx: Receiver<OverlayCommand>, ready: mpsc::SyncSender<io::Result<
         explorer_pid: 0,
         shell_hooks: Vec::new(),
         retries: 0,
+        create_retries: 0,
         session_registered,
         fullscreen: FullscreenWatch::default(),
     }));
@@ -413,10 +423,17 @@ impl State {
         self.taskbars.clear();
         self.unhook_explorer();
         self.unhook_fullscreen();
-        for id in [TIMER_REFRESH, TIMER_LATE_2S, TIMER_LATE_5S, TIMER_RETRY] {
+        for id in [
+            TIMER_REFRESH,
+            TIMER_LATE_2S,
+            TIMER_LATE_5S,
+            TIMER_RETRY,
+            TIMER_CREATE_RETRY,
+        ] {
             self.kill_timer(id);
         }
         self.retries = 0;
+        self.create_retries = 0;
     }
 
     fn kill_timer(&self, id: usize) {
@@ -449,7 +466,7 @@ impl State {
         self.kill_timer(id);
         if matches!(
             id,
-            TIMER_REFRESH | TIMER_LATE_2S | TIMER_LATE_5S | TIMER_RETRY
+            TIMER_REFRESH | TIMER_LATE_2S | TIMER_LATE_5S | TIMER_RETRY | TIMER_CREATE_RETRY
         ) {
             self.refresh();
         }
@@ -521,7 +538,8 @@ impl State {
         drop(old);
         // Before layout, so windows are created hidden on a fullscreen monitor.
         self.sync_fullscreen();
-        self.layout_all();
+        let create_error = self.layout_all();
+        self.after_create(create_error);
         log::debug!(
             "overlay refreshed: {} taskbar(s), {} widget window(s)",
             self.taskbars.len(),
@@ -529,12 +547,43 @@ impl State {
         );
     }
 
-    /// Creates, moves, renders and destroys widget windows to match the config on every
-    /// taskbar.
-    fn layout_all(&mut self) {
-        let Some(d2d) = self.d2d.as_mut() else {
+    /// Schedules a retry (with backoff) after a failed window creation, or reports recovery.
+    /// Logs once per failure streak, not per attempt.
+    fn after_create(&mut self, error: Option<io::Error>) {
+        let Some(e) = error else {
+            if self.create_retries > 0 {
+                log::info!(
+                    "widget windows created after {} retr{}",
+                    self.create_retries,
+                    if self.create_retries == 1 { "y" } else { "ies" }
+                );
+                self.create_retries = 0;
+                self.kill_timer(TIMER_CREATE_RETRY);
+            }
             return;
         };
+        if self.create_retries == 0 {
+            log::warn!("cannot create widget window(s): {e}; retrying with backoff");
+        }
+        if self.create_retries < MAX_CREATE_RETRIES {
+            let delay = CREATE_RETRY_FIRST_MS
+                .saturating_mul(1 << self.create_retries.min(5))
+                .min(CREATE_RETRY_MAX_MS);
+            self.set_timer(TIMER_CREATE_RETRY, delay);
+        } else if self.create_retries == MAX_CREATE_RETRIES {
+            log::warn!(
+                "widget windows still cannot be created; retrying on the next taskbar change"
+            );
+        }
+        self.create_retries = self.create_retries.saturating_add(1);
+    }
+
+    /// Creates, moves, renders and destroys widget windows to match the config on every
+    /// taskbar. Returns the first window creation error, if any (those items are missing until
+    /// a retry succeeds).
+    fn layout_all(&mut self) -> Option<io::Error> {
+        let mut create_error = None;
+        let d2d = self.d2d.as_mut()?;
         let theme = self.theme;
         // Natural sizes in DIPs do not depend on the monitor: measure once.
         let items: Vec<_> = self
@@ -560,7 +609,7 @@ impl State {
                     None => match WidgetWindow::create(tb.hwnd) {
                         Ok(w) => w,
                         Err(e) => {
-                            log::warn!("cannot create a widget window: {e}");
+                            create_error.get_or_insert(e);
                             continue;
                         }
                     },
@@ -584,6 +633,7 @@ impl State {
                 tb.windows.push((item.key.clone(), win));
             }
         }
+        create_error
     }
 
     fn hook_explorer(&mut self, pid: u32) {
@@ -667,6 +717,10 @@ impl State {
 
     /// The foreground window changed: watch its process for location changes and re-check.
     fn on_foreground(&mut self, fg: HWND) {
+        if self.create_retries > 0 {
+            // e.g. Start opened or closed: retry the missing windows.
+            self.schedule_refresh();
+        }
         if self.fullscreen.foreground_hook.is_none() {
             return;
         }
@@ -719,6 +773,10 @@ impl State {
         let Some(tb) = self.taskbars.iter().find(|t| t.hwnd == hwnd) else {
             return;
         };
+        if self.create_retries > 0 {
+            // A window is missing: any taskbar activity is a good moment to retry.
+            self.schedule_refresh();
+        }
         match event {
             EVENT_OBJECT_REORDER => {
                 if !tb.ours_on_top() {

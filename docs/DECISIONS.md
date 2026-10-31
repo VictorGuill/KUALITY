@@ -117,6 +117,8 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **Text drawing** — `ID2D1RenderTarget::DrawText` into the box rect with `D2D1_DRAW_TEXT_OPTIONS_CLIP` (avoids a direct `windows-numerics` dependency that `DrawTextLayout` would need); measured with `IDWriteTextLayout`. Font fallback cached per family, logged once.
 - **Hit testing** — every render clears to transparent and fills the box with black at alpha 1/255 through Direct2D, then draws the content.
 - **Fullscreen hooks** — installed only while widgets are enabled and `hide_on_fullscreen` is true; the foreground hook skips our own process (our menu taking focus keeps the previous state).
+- **Create retry** — a failed widget window creation (seen: `CreateWindowExW` "Access is denied" for minutes after a Hide, cleared by opening Start) is retried by a one-shot timer with backoff 1, 2, 4, 8, 16, then 30 s, at most 12 times; while one is pending, taskbar reorder/size and foreground changes also refresh. Logged once per failure streak (+ one line on recovery). Debug builds: `KUALITY_TEST_FAIL_CREATES=<n>` fails the first n creations to test this path.
+- **Widget menu position** — bottom-aligned at the taskbar's top edge with the taskbar rect excluded (`TPM_VERTICAL` + `TPMPARAMS`); at the cursor it could open partly behind the taskbar band.
 - **Widget menu → Settings** — the overlay thread posts `WM_APP_OPEN_SETTINGS` to the `Kuality.Core` window, which queues `Event::OpenSettings` (no channel: there is no data).
 - **Debug console close** — `taskkill` without `/F` also closes the debug console (it reports our process as owner): `CTRL_CLOSE_EVENT`, logoff and shutdown now request the normal quit and block until the process exits.
 

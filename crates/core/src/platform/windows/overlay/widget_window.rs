@@ -58,6 +58,10 @@ pub struct WidgetWindow {
 impl WidgetWindow {
     /// Creates a hidden window in `parent` (a taskbar).
     pub fn create(parent: HWND) -> io::Result<Self> {
+        #[cfg(debug_assertions)]
+        if test_fail_create() {
+            return Err(io::Error::from_raw_os_error(5));
+        }
         // SAFETY: plain window creation; the parent belongs to Explorer (no messages are sent to
         // it thanks to WS_EX_NOPARENTNOTIFY).
         let hwnd = unsafe {
@@ -144,6 +148,27 @@ impl Drop for WidgetWindow {
         let _ = unsafe { DestroyWindow(self.hwnd) };
         DESTROYING.set(false);
     }
+}
+
+/// Debug builds only: `KUALITY_TEST_FAIL_CREATES=<n>` makes the first `n` window creations
+/// fail with "Access is denied", to test the retry path.
+#[cfg(debug_assertions)]
+fn test_fail_create() -> bool {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    // -1 = not read yet.
+    static LEFT: AtomicI64 = AtomicI64::new(-1);
+    if LEFT.load(Ordering::Relaxed) == -1 {
+        let n = std::env::var("KUALITY_TEST_FAIL_CREATES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        LEFT.store(n, Ordering::Relaxed);
+    }
+    if LEFT.load(Ordering::Relaxed) > 0 {
+        LEFT.fetch_sub(1, Ordering::Relaxed);
+        return true;
+    }
+    false
 }
 
 fn post_host(msg: u32, wparam: WPARAM, lparam: LPARAM) {
