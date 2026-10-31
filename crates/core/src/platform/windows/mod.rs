@@ -21,7 +21,7 @@ pub use folders::roaming_app_data_dir;
 pub use instance::Instance;
 pub use keyboard::Keyboard;
 pub use overlay::Overlay;
-pub use shell::{launch, open_url, open_with_default_app};
+pub use shell::{launch, open_url, open_with_default_app, spawn_detached};
 pub use time::local_time_now;
 pub use tray::{Tray, set_tray_paused};
 pub use watcher::Watcher;

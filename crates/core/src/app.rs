@@ -18,6 +18,19 @@ use crate::{logging, shortcuts};
 /// How long quit waits for a running `launch`/`open_url` action.
 const ACTIONS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// File stem of the settings app, shipped next to the core.
+const SETTINGS_EXE_STEM: &str = "kuality-settings";
+
+/// Path of the settings app next to the running exe, if it exists.
+fn settings_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let path = exe.with_file_name(format!(
+        "{SETTINGS_EXE_STEM}{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    path.is_file().then_some(path)
+}
+
 /// State owned by the main thread.
 #[derive(Debug)]
 pub struct App<W: DirWatcher> {
@@ -62,6 +75,25 @@ impl<W: DirWatcher> App<W> {
         app
     }
 
+    /// Starts `kuality-settings.exe` from the folder of the running exe; falls back to opening
+    /// `config.json` in the default editor if it is missing or cannot be started.
+    fn open_settings(&self) {
+        match settings_exe() {
+            Some(exe) => match platform::spawn_detached(&exe) {
+                Ok(()) => {
+                    log::info!("started {}", exe.display());
+                    return;
+                }
+                Err(e) => log::error!("could not start {}: {e}", exe.display()),
+            },
+            None => log::warn!("{SETTINGS_EXE_STEM} not found next to the core"),
+        }
+        log::info!("opening {}", self.config_path.display());
+        if let Err(e) = platform::open_with_default_app(&self.config_path) {
+            log::error!("could not open {}: {e}", self.config_path.display());
+        }
+    }
+
     /// Handles one event from the main loop.
     pub fn handle(&mut self, event: Event) -> ControlFlow<()> {
         match event {
@@ -72,11 +104,7 @@ impl<W: DirWatcher> App<W> {
                 ControlFlow::Continue(())
             }
             Event::OpenSettings => {
-                // Placeholder until the settings app exists (Phase 5).
-                log::info!("opening {}", self.config_path.display());
-                if let Err(e) = platform::open_with_default_app(&self.config_path) {
-                    log::error!("could not open {}: {e}", self.config_path.display());
-                }
+                self.open_settings();
                 ControlFlow::Continue(())
             }
             Event::TogglePause => {

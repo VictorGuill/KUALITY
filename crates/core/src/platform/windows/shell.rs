@@ -62,6 +62,19 @@ pub fn open_with_default_app(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Starts `exe` (working folder: its own folder) without waiting for it. The new process may
+/// take the foreground (it brings its window to the front).
+pub fn spawn_detached(exe: &Path) -> io::Result<()> {
+    // SAFETY: plain call without pointers. Failure only means the child may open behind.
+    let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+    let mut cmd = std::process::Command::new(exe);
+    if let Some(dir) = exe.parent() {
+        cmd.current_dir(dir);
+    }
+    // The child handle is dropped: the process keeps running on its own.
+    cmd.spawn().map(drop)
+}
+
 /// Runs a `launch` action: `%VAR%` expanded in all parts, `cwd` defaults to the parent folder of
 /// an absolute `path`, else `%USERPROFILE%`. Supports programs, `.lnk`, documents, folders and
 /// `shell:AppsFolder\<AUMID>`.
