@@ -22,7 +22,7 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 
 **Done when:** `kuality.exe` starts, shows a tray icon, creates/reads `config.json`, reacts to edits, and quits cleanly.
 
-## Phase 1 — Hyperkey
+## Phase 1 — Hyperkey ✅
 
 - [x] Spec `docs/specs/hyperkey.md`
 - [x] Low-level keyboard hook on a dedicated thread
