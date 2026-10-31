@@ -43,6 +43,8 @@ impl<W: DirWatcher> App<W> {
         if let Some(k) = &app.keyboard {
             k.apply(&app.config.hyperkey);
         }
+        // Also cleans up after a crash when Hyperkey is now disabled.
+        reconcile_office_key(app.config.hyperkey.enabled);
         app
     }
 
@@ -80,6 +82,7 @@ impl<W: DirWatcher> App<W> {
                 if let Some(mut k) = self.keyboard.take() {
                     k.shutdown();
                 }
+                reconcile_office_key(false);
                 if let Some(w) = self.watcher.take() {
                     w.stop();
                 }
@@ -101,7 +104,25 @@ impl<W: DirWatcher> App<W> {
             // On every reload: the keyboard thread reinstalls the hook, which is harmless.
             k.apply(&new.hyperkey);
         }
+        if new.hyperkey.enabled != self.config.hyperkey.enabled {
+            reconcile_office_key(new.hyperkey.enabled);
+        }
         self.config = new;
+    }
+}
+
+/// Disables the Office key while Hyperkey is enabled, restores it otherwise. Failures are only
+/// logged: they never stop Hyperkey.
+fn reconcile_office_key(hyperkey_enabled: bool) {
+    let (what, result) = if hyperkey_enabled {
+        ("disabled", platform::office_key::apply())
+    } else {
+        ("restored", platform::office_key::restore())
+    };
+    match result {
+        Ok(true) => log::info!("Office key {what}"),
+        Ok(false) => {}
+        Err(e) => log::warn!("cannot update the Office key override: {e}"),
     }
 }
 

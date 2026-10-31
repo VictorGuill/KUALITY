@@ -6,6 +6,7 @@ mod folders;
 mod input;
 mod instance;
 mod keyboard;
+pub mod office_key;
 mod shell;
 mod time;
 mod tray;

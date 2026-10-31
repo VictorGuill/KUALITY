@@ -15,7 +15,7 @@ mod windows;
 #[cfg(windows)]
 pub use self::windows::{
     Instance, Keyboard, Tray, Watcher, dpi_awareness, init_main_thread, install_crash_guard,
-    local_time_now, open_with_default_app, roaming_app_data_dir, set_tray_paused,
+    local_time_now, office_key, open_with_default_app, roaming_app_data_dir, set_tray_paused,
 };
 
 #[cfg(not(windows))]
