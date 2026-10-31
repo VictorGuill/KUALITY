@@ -103,6 +103,8 @@ pub struct Shortcuts {
 /// type, missing field…) are kept as raw JSON so they survive a save, and skipped at runtime.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+// Invalid entries are rare and lists are short: boxing would only complicate matching.
+#[allow(clippy::large_enum_variant)]
 pub enum BindingEntry {
     Valid(Binding),
     Invalid(Value),
