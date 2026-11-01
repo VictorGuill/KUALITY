@@ -3288,6 +3288,7 @@ name = "kuality"
 version = "0.1.0"
 dependencies = [
  "kuality-protocol",
+ "kuality-settings",
  "log",
  "serde_json",
  "windows 0.62.2",

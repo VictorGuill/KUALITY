@@ -1,10 +1,11 @@
-//! Kuality core (`kuality.exe`): always-running process with the tray icon.
+//! `kuality.exe`: the always-running core with the tray icon, and with `--settings` the settings
+//! window in a separate process of the same exe (`docs/specs/distribution.md`).
 //!
 //! Phase 0: config load/create/hot-reload, logging, single instance, tray menu
 //! (`docs/specs/skeleton.md`). Phase 1: Hyperkey (`docs/specs/hyperkey.md`). Phase 2: Shortcuts
 //! (`docs/specs/shortcuts.md`). Phase 3: taskbar overlay and text widget (`docs/specs/overlay.md`).
 
-// No console window in release builds; debug builds keep it for log output.
+// No console window in release builds (every mode); debug builds keep it for log output.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actions;
@@ -34,7 +35,20 @@ const INSTANCE_MUTEX: &str = r"Local\Kuality.Core";
 /// Changes to the config dir are grouped until it has been quiet for this long.
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
 
+/// First argument that runs the settings window instead of the core.
+const SETTINGS_ARG: &str = "--settings";
+
 fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        // Own process: the core never loads GPUI, and the window's memory is freed when it closes.
+        Some(SETTINGS_ARG) => kuality_settings::run(&args[1..]),
+        _ => run_core(&args),
+    }
+}
+
+/// The core: tray, config hot-reload, Hyperkey, shortcuts and taskbar widgets.
+fn run_core(args: &[String]) -> ExitCode {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf))
@@ -84,6 +98,9 @@ fn main() -> ExitCode {
     );
     if data_dir.source == DataDirSource::Fallback {
         log::warn!("could not resolve %APPDATA%, using the exe directory");
+    }
+    if !args.is_empty() {
+        log::warn!("ignoring unknown arguments: {args:?}");
     }
     log::info!("DPI awareness: {:?}", platform::dpi_awareness());
 

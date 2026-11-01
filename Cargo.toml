@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 kuality-protocol = { path = "crates/protocol" }
+kuality-settings = { path = "crates/settings" }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

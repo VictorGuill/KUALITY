@@ -54,11 +54,11 @@ cargo fmt --all                             # format
 cargo clippy --all-targets -- -D warnings   # lint, must be clean
 cargo test                                  # unit tests (all crates)
 cargo run -p kuality                        # run the core (tray icon; Ctrl+C in the console quits cleanly)
-cargo run -p kuality-settings               # settings app (GPUI window; same data-dir rule as the core)
+cargo run -p kuality -- --settings          # settings window (second process of the same exe; starts the core if needed)
 cargo run -p kuality --example keyviewer    # dev tool: prints key messages + modifier state (Hyperkey tests)
 ```
 
 Runtime files: `%APPDATA%\Kuality\config.json` and `%APPDATA%\Kuality\logs\kuality.log`.
 For a throwaway setup, create an empty file `target\debug\portable`: config and logs then live in `target\debug\`.
 To quit a running core from a script, close it gracefully (`taskkill /IM kuality.exe`, without `/F`).
-Tray / widget "Settings" start `kuality-settings.exe` from the core's folder, so build the whole workspace (`cargo build`) before testing that path; only one settings window runs at a time.
+There is one executable: `kuality.exe` is the core, `kuality.exe --settings` the settings window (tray / widget "Settings" start it as a second process); only one settings window runs at a time.

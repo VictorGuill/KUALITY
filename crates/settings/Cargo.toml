@@ -1,14 +1,13 @@
 [package]
 name = "kuality-settings"
-description = "Kuality settings app (GPUI window that edits config.json)"
+description = "Kuality settings window (GPUI, edits config.json); runs as `kuality.exe --settings`"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[[bin]]
-name = "kuality-settings"
-path = "src/main.rs"
+[lib]
+path = "src/lib.rs"
 
 [dependencies]
 kuality-protocol.workspace = true

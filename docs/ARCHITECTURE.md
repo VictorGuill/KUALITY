@@ -5,7 +5,7 @@
 ## Processes
 
 ```
-kuality.exe  (core, always running, few MB)
+kuality.exe  (core, always running, few MB)   — one exe, two processes (docs/specs/distribution.md)
 ├── Keyboard hook thread   → Hyperkey + shortcut detection (hook must return instantly);
 │                            also injects `send_hotkey` chords (it owns the Hyper modifiers)
 ├── Action worker thread   → runs `launch` / `open_url` (ShellExecuteExW), spawned on first use
@@ -13,13 +13,13 @@ kuality.exe  (core, always running, few MB)
 ├── Data providers         → media session, (later) extensions' data
 ├── Tray icon              → Settings / Pause / Quit
 ├── Config watcher         → hot-reloads config.json
-└── IPC server             → (later) named pipe for kuality-settings.exe
+└── IPC server             → (later) named pipe for the settings window
 
-kuality-settings.exe  (GPUI via gpui-kit, only alive while open; started by tray/widget "Settings")
+kuality.exe --settings  (GPUI via gpui-kit, only alive while open; started by tray/widget "Settings")
 ├── UI thread              → window, auto-save (300 ms), 1 s check for outside edits of config.json
 ├── Core watch thread      → waits on the core process; when it exits the window saves and quits
 └── Recorder thread        → WH_KEYBOARD_LL hook, only while a Record button is active
-    Started with --core-pid by the core, or on its own (then it attaches to / starts kuality.exe)
+    Started with --core-pid by the core, or on its own (then it attaches to / starts the core)
     (Phase 5: talks to the core only through config.json, which the core hot-reloads)
 
 extensions/*  (later, separate processes in any language)
@@ -30,8 +30,8 @@ extensions/*  (later, separate processes in any language)
 
 ```
 crates/
-├── core/       → package/binary `kuality`
-├── settings/   → package/binary `kuality-settings`
+├── core/       → package/binary `kuality` (the only exe; `--settings` runs the settings library)
+├── settings/   → package `kuality-settings`, library: the settings window
 └── protocol/   → package `kuality-protocol`, library: config types, key names, data-dir rule (`paths`),
                   atomic config write (`store`), Windows argument quoting (`quote`); later IPC and extension types
 ```
@@ -42,7 +42,7 @@ Current `core` modules (Phases 0–3):
 
 | Module | Role |
 |---|---|
-| `main.rs` | Startup sequence: data dir → single instance → logging → config → tray → watcher → main loop |
+| `main.rs` | Mode by first argument (`--settings` → `kuality_settings::run`), else the core's startup sequence: data dir → single instance → logging → config → tray → watcher → main loop |
 | `app.rs` | Main-thread state; handles `Event::{Wake, OpenSettings, TogglePause, Quit}`, applies reloaded configs (Hyperkey + compiled shortcuts, widgets when their section changed), reconciles the Office key |
 | `hyperkey/engine.rs` | Portable Hyperkey state machine + shortcut lookup, consumed keys and the `send_hotkey` sequence (no OS types, no allocation), unit-tested |
 | `hyperkey/mod.rs` | `KeyboardController` (start / apply / set_paused / shutdown) and `KeyboardCommand` |
@@ -61,7 +61,7 @@ Current `core` modules (Phases 0–3):
 
 | Module | Role |
 |---|---|
-| `main.rs` | Single instance (or focus the open window), data dir, link to the core (`--core-pid`, running core, or start it), stderr logger in debug builds |
+| `lib.rs` | `run(args)`: single instance (or focus the open window), data dir, link to the core (`--core-pid`, running core, or start it), stderr logger in debug builds |
 | `model.rs` | `Document`: load / save / poll of `config.json`, read-only on invalid file; field validation helpers (unit-tested, no UI) |
 | `recorder.rs` | Portable key-recording state machine (trigger key or chord, swallowed keys) |
 | `platform.rs` | Windows: known folder, `Local\Kuality.Settings` mutex + focus existing window, core-running check, `CoreProcess` (open / find / start / watch the core), recorder hook thread |

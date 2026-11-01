@@ -1,7 +1,9 @@
-//! Kuality settings app: a window that edits `config.json`. The core hot-reloads the file, so
-//! every saved change applies live. See `docs/specs/settings.md`.
-
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+//! Kuality settings window: edits `config.json`. The core hot-reloads the file, so every saved
+//! change applies live. See `docs/specs/settings.md`.
+//!
+//! Library part of the single `kuality.exe`: the binary runs [`run`] for
+//! `kuality.exe --settings`, in its own process, so the core never loads GPUI
+//! (`docs/specs/distribution.md`).
 
 mod apps;
 mod model;
@@ -9,12 +11,15 @@ mod platform;
 mod recorder;
 mod ui;
 
+use std::process::ExitCode;
+
 use kuality_protocol::paths::{DataDir, DataDirSource};
 
 #[cfg(not(windows))]
 compile_error!("Kuality only supports Windows for now (see docs/DECISIONS.md).");
 
-fn main() {
+/// Runs the settings window until it closes. `args` are the arguments after `--settings`.
+pub fn run(args: &[String]) -> ExitCode {
     init_logging();
     let _instance = match platform::Instance::acquire() {
         Ok(Some(i)) => Some(i),
@@ -22,7 +27,7 @@ fn main() {
             if !platform::activate_existing() {
                 log::warn!("another settings window is running but was not found");
             }
-            return;
+            return ExitCode::SUCCESS;
         }
         Err(e) => {
             // Better two windows than none.
@@ -38,15 +43,16 @@ fn main() {
     if data_dir.source == DataDirSource::Fallback {
         log::warn!("could not resolve %APPDATA%, using the exe directory");
     }
-    let core = match link_core(&exe_dir) {
+    let core = match link_core(args) {
         Some(core) => core,
         // The core that opened this window has already exited: nothing to configure live.
-        None => return,
+        None => return ExitCode::SUCCESS,
     };
     ui::run(data_dir.config_file(), core);
+    ExitCode::SUCCESS
 }
 
-/// Argument the core passes with its pid when it opens this window.
+/// Argument the core passes with its pid when it opens this window (after `--settings`).
 const CORE_PID_ARG: &str = "--core-pid";
 
 /// `--core-pid <n>` from the command line, if present and valid.
@@ -65,8 +71,8 @@ fn core_pid_arg(args: impl IntoIterator<Item = String>) -> Option<u32> {
 
 /// Finds the core this window belongs to, starting it when none is running. `None` = the core
 /// that started us is already gone (quit right away).
-fn link_core(exe_dir: &std::path::Path) -> Option<ui::CoreLink> {
-    if let Some(pid) = core_pid_arg(std::env::args().skip(1)) {
+fn link_core(args: &[String]) -> Option<ui::CoreLink> {
+    if let Some(pid) = core_pid_arg(args.iter().cloned()) {
         return match platform::CoreProcess::open(pid) {
             Some(core) => {
                 log::info!("attached to Kuality (pid {pid})");
@@ -89,7 +95,7 @@ fn link_core(exe_dir: &std::path::Path) -> Option<ui::CoreLink> {
             "Its process was found but this window could not attach to it.".into(),
         ));
     }
-    match platform::start_core(exe_dir) {
+    match platform::start_core() {
         Ok(core) => {
             log::info!("started Kuality (pid {})", core.pid);
             Some(ui::CoreLink::Attached(core))

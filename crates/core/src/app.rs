@@ -18,21 +18,10 @@ use crate::{logging, shortcuts};
 /// How long quit waits for a running `launch`/`open_url` action.
 const ACTIONS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Argument telling the settings app which core started it (it closes when that process ends).
+/// Arguments that open the settings window: a second process of this same exe. The pid tells it
+/// which core started it (it closes when that process ends).
+const SETTINGS_ARG: &str = "--settings";
 const CORE_PID_ARG: &str = "--core-pid";
-
-/// File stem of the settings app, shipped next to the core.
-const SETTINGS_EXE_STEM: &str = "kuality-settings";
-
-/// Path of the settings app next to the running exe, if it exists.
-fn settings_exe() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let path = exe.with_file_name(format!(
-        "{SETTINGS_EXE_STEM}{}",
-        std::env::consts::EXE_SUFFIX
-    ));
-    path.is_file().then_some(path)
-}
 
 /// State owned by the main thread.
 #[derive(Debug)]
@@ -78,22 +67,26 @@ impl<W: DirWatcher> App<W> {
         app
     }
 
-    /// Starts `kuality-settings.exe` from the folder of the running exe, passing our pid so the
-    /// window closes when the core exits; falls back to opening `config.json` in the default
-    /// editor if it is missing or cannot be started.
+    /// Starts the settings window (`kuality.exe --settings --core-pid <pid>`, this same exe),
+    /// so it closes when the core exits; falls back to opening `config.json` in the default
+    /// editor if it cannot be started.
     fn open_settings(&self) {
-        match settings_exe() {
-            Some(exe) => match platform::spawn_detached(
+        match std::env::current_exe() {
+            Ok(exe) => match platform::spawn_detached(
                 &exe,
-                &[CORE_PID_ARG.into(), std::process::id().to_string()],
+                &[
+                    SETTINGS_ARG.into(),
+                    CORE_PID_ARG.into(),
+                    std::process::id().to_string(),
+                ],
             ) {
                 Ok(()) => {
-                    log::info!("started {}", exe.display());
+                    log::info!("started the settings window");
                     return;
                 }
-                Err(e) => log::error!("could not start {}: {e}", exe.display()),
+                Err(e) => log::error!("could not start the settings window: {e}"),
             },
-            None => log::warn!("{SETTINGS_EXE_STEM} not found next to the core"),
+            Err(e) => log::error!("cannot find our own exe: {e}"),
         }
         log::info!("opening {}", self.config_path.display());
         if let Err(e) = platform::open_with_default_app(&self.config_path) {

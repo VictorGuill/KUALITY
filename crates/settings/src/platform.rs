@@ -48,11 +48,17 @@ use crate::recorder::{Mode, Outcome, Recording};
 pub const WINDOW_TITLE: &str = "Kuality Settings";
 const INSTANCE_MUTEX: &str = r"Local\Kuality.Settings";
 const CORE_MUTEX: &str = r"Local\Kuality.Core";
-const EXE_NAME: &str = "kuality-settings.exe";
-/// The core's exe, shipped next to this one.
-pub const CORE_EXE_NAME: &str = "kuality.exe";
 /// Class of the core's hidden main window (owns the tray icon).
 const CORE_WINDOW_CLASS: PCWSTR = w!("Kuality.Core");
+
+/// File name of the running exe (`kuality.exe`). The core and the settings window are two
+/// processes of this same exe, so process checks compare against it (a renamed exe still works).
+fn own_exe_name() -> OsString {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_os_string()))
+        .unwrap_or_else(|| "kuality.exe".into())
+}
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -157,13 +163,14 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     false.into()
 }
 
+/// Whether `pid` runs this exe (the window title check already tells settings from the core).
 fn process_is_settings(pid: u32) -> bool {
     // SAFETY: the handle is checked and closed once.
     unsafe {
         let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
             return false;
         };
-        let ok = image_is(h, EXE_NAME);
+        let ok = image_is(h, &own_exe_name());
         let _ = CloseHandle(h);
         ok
     }
@@ -171,7 +178,7 @@ fn process_is_settings(pid: u32) -> bool {
 
 /// Whether the process behind `h` (opened with at least query-limited rights) runs an exe named
 /// `exe_name`.
-fn image_is(h: HANDLE, exe_name: &str) -> bool {
+fn image_is(h: HANDLE, exe_name: &std::ffi::OsStr) -> bool {
     let mut buf = [0u16; 1024];
     let mut len = buf.len() as u32;
     // SAFETY: `buf` and `len` are valid for the call; `h` is a live process handle.
@@ -210,7 +217,7 @@ pub struct CoreProcess {
 }
 
 impl CoreProcess {
-    /// Opens process `pid` if it is a running `kuality.exe` (guards against a reused pid).
+    /// Opens process `pid` if it runs this exe (guards against a reused pid).
     pub fn open(pid: u32) -> Option<Self> {
         // SAFETY: the handle is checked, and owned by the returned value or closed here.
         unsafe {
@@ -220,7 +227,7 @@ impl CoreProcess {
                 pid,
             )
             .ok()?;
-            if image_is(h, CORE_EXE_NAME) {
+            if image_is(h, &own_exe_name()) {
                 Some(Self { handle: h, pid })
             } else {
                 let _ = CloseHandle(h);
@@ -280,21 +287,14 @@ pub fn find_core() -> Option<CoreProcess> {
     }
 }
 
-/// Starts `kuality.exe` from `exe_dir` (it applies the same data-dir rule as this app).
-pub fn start_core(exe_dir: &Path) -> io::Result<CoreProcess> {
-    let exe = exe_dir.join(CORE_EXE_NAME);
-    if !exe.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("{CORE_EXE_NAME} was not found in {}", exe_dir.display()),
-        ));
-    }
+/// Starts the core: this same exe without arguments (it applies the same data-dir rule).
+pub fn start_core() -> io::Result<CoreProcess> {
+    let exe = std::env::current_exe()?;
+    let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
     // The child handle is dropped: the core keeps running on its own.
-    let child = std::process::Command::new(&exe)
-        .current_dir(exe_dir)
-        .spawn()?;
+    let child = std::process::Command::new(&exe).current_dir(dir).spawn()?;
     CoreProcess::open(child.id())
-        .ok_or_else(|| io::Error::other(format!("{CORE_EXE_NAME} exited right after starting")))
+        .ok_or_else(|| io::Error::other("Kuality exited right after starting"))
 }
 
 // ---------------------------------------------------------------------------------------------
