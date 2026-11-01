@@ -8,8 +8,7 @@
 //! message loop delivers them after `DispatchMessageW` returns. This keeps the handler free of
 //! re-entrancy (e.g. while `TrackPopupMenu` runs its own modal loop).
 //!
-//! The icon is a monochrome glyph, white on a dark taskbar and black on a light one, chosen like
-//! the widgets' default text color: from the primary taskbar's pixels, the registry as fallback.
+//! The icon is the app icon (resource 1, the same tile as the exe and the settings window).
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -18,8 +17,7 @@ use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use ::windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
+use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use ::windows::Win32::System::Console::{
     CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
     SetConsoleCtrlHandler,
@@ -32,19 +30,15 @@ use ::windows::Win32::UI::Shell::{
 };
 use ::windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowExW, FindWindowW,
-    GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowRect, HICON, IDI_APPLICATION,
-    IMAGE_ICON, KillTimer, LR_DEFAULTCOLOR, LoadIconW, LoadImageW, MF_CHECKED, MF_SEPARATOR,
+    DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, HICON,
+    IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTCOLOR, LoadIconW, LoadImageW, MF_CHECKED, MF_SEPARATOR,
     MF_STRING, MF_UNCHECKED, MSG, MSGFLT_ALLOW, PostMessageW, RegisterClassExW,
-    RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON, SetForegroundWindow, SetTimer,
-    TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-    WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_ENDSESSION, WM_NULL, WM_SETTINGCHANGE,
-    WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_OVERLAPPED,
+    RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON, SetForegroundWindow, TPM_BOTTOMALIGN,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP,
+    WM_CLOSE, WM_CONTEXTMENU, WM_ENDSESSION, WM_NULL, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_OVERLAPPED,
 };
 use ::windows::core::{BOOL, PCWSTR, w};
 
-use super::overlay::{fullscreen, theme};
-use crate::overlay::widgets::Theme;
 use crate::platform::{Event, TrayIcon, Waker};
 
 const CLASS_NAME: PCWSTR = w!("Kuality.Core");
@@ -53,12 +47,8 @@ const WM_APP_WAKE: u32 = WM_APP + 2;
 /// Another thread asks for the Settings action (widget context menu).
 const WM_APP_OPEN_SETTINGS: u32 = WM_APP + 3;
 const TRAY_ICON_ID: u32 = 1;
-/// Tray icons embedded by `build.rs`: white glyph for dark taskbars, black for light ones.
-const TRAY_ICON_WHITE: u16 = 2;
-const TRAY_ICON_BLACK: u16 = 3;
-/// Timers that sample the taskbar again after a color-mode change or a taskbar (re)creation:
-/// Explorer repaints asynchronously (same delays as the widgets).
-const THEME_TIMERS: [(usize, u32); 3] = [(101, 300), (102, 2000), (103, 5000)];
+/// App icon resource embedded by `build.rs` (also the exe's and the settings window's icon).
+const APP_ICON: u16 = 1;
 /// `NIN_SELECT | NINF_KEY`: icon activated with the keyboard (missing from the `windows` crate).
 const NIN_KEYSELECT: u32 = NIN_SELECT | 1;
 const MENU_SETTINGS: usize = 1;
@@ -79,8 +69,6 @@ thread_local! {
     static PAUSED: Cell<bool> = const { Cell::new(false) };
     /// The icon given to the shell, owned by us (destroyed when replaced).
     static ICON: Cell<Option<HICON>> = const { Cell::new(None) };
-    /// Taskbar theme the current icon was chosen for.
-    static ICON_THEME: Cell<Option<Theme>> = const { Cell::new(None) };
 }
 
 /// Updates the Pause check mark and the tooltip (`<tooltip> (paused)`). Call on the tray thread.
@@ -185,10 +173,7 @@ impl TrayIcon for Tray {
             let _ = SetConsoleCtrlHandler(Some(console_ctrl_handler), true);
 
             match add_icon(hwnd) {
-                Ok(()) => {
-                    log::debug!("tray icon added");
-                    schedule_theme_checks(hwnd);
-                }
+                Ok(()) => log::debug!("tray icon added"),
                 // Explorer may not be running yet; the icon is added on `TaskbarCreated`.
                 Err(e) => log::warn!("could not add tray icon yet: {e}"),
             }
@@ -261,9 +246,7 @@ fn add_icon(hwnd: HWND) -> io::Result<()> {
     let mut nid = icon_data(hwnd);
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     nid.uCallbackMessage = WM_APP_TRAY;
-    let theme = taskbar_theme();
-    log::debug!("taskbar is {theme:?}: tray icon chosen");
-    nid.hIcon = tray_icon(theme)?;
+    nid.hIcon = tray_icon()?;
     fill_tooltip(&mut nid);
     nid.Anonymous.uVersion = NOTIFYICON_VERSION_4;
     // SAFETY: `nid` is fully initialized and alive for the calls.
@@ -276,78 +259,9 @@ fn add_icon(hwnd: HWND) -> io::Result<()> {
     Ok(())
 }
 
-/// Light or dark primary taskbar: sampled from its pixels (unless a fullscreen window covers
-/// it), else the last sample, else the registry.
-fn taskbar_theme() -> Theme {
-    // SAFETY: plain lookups and queries (no messages sent to Explorer).
-    let sampled = unsafe {
-        FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null())
-            .ok()
-            .filter(|&taskbar| {
-                let covered = fullscreen::fullscreen_monitor(GetForegroundWindow())
-                    .is_some_and(|m| m == MonitorFromWindow(taskbar, MONITOR_DEFAULTTONEAREST));
-                !covered
-            })
-            .and_then(|taskbar| theme::sample(taskbar, &our_widget_rects(taskbar)))
-    };
-    match sampled {
-        Some((t, _)) => t,
-        None => ICON_THEME.get().unwrap_or_else(theme::current),
-    }
-}
-
-/// Screen rects of our widget windows on `taskbar` (left out of the sample).
-fn our_widget_rects(taskbar: HWND) -> Vec<RECT> {
-    let mut rects = Vec::new();
-    let mut after = None;
-    // SAFETY: enumerates child windows of a class only we register; out-params are locals.
-    unsafe {
-        while let Ok(child) =
-            FindWindowExW(Some(taskbar), after, w!("KualityWidget"), PCWSTR::null())
-        {
-            let mut r = RECT::default();
-            if GetWindowRect(child, &mut r).is_ok() {
-                rects.push(r);
-            }
-            after = Some(child);
-        }
-    }
-    rects
-}
-
-/// Samples the taskbar again later (see [`THEME_TIMERS`]).
-fn schedule_theme_checks(hwnd: HWND) {
-    for (id, ms) in THEME_TIMERS {
-        // SAFETY: timers on our own window, handled in `wndproc`.
-        unsafe { SetTimer(Some(hwnd), id, ms, None) };
-    }
-}
-
-/// Swaps the icon if the taskbar theme changed since it was chosen.
-fn update_icon_theme(hwnd: HWND) {
-    let theme = taskbar_theme();
-    if ICON_THEME.get() == Some(theme) {
-        return;
-    }
-    let Ok(icon) = tray_icon(theme) else {
-        return;
-    };
-    log::debug!("taskbar is {theme:?}: tray icon updated");
-    let mut nid = icon_data(hwnd);
-    nid.uFlags = NIF_ICON;
-    nid.hIcon = icon;
-    // SAFETY: `nid` identifies our icon and is alive for the call.
-    let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) };
-}
-
-/// The tray icon for `theme` at the small-icon size of the system DPI (what the notification
-/// area shows); the stock application icon if that fails.
-fn tray_icon(theme: Theme) -> io::Result<HICON> {
-    // White glyph on a dark taskbar, black on a light one.
-    let resource = match theme {
-        Theme::Dark => TRAY_ICON_WHITE,
-        Theme::Light => TRAY_ICON_BLACK,
-    };
+/// The app icon at the small-icon size of the system DPI (what the notification area shows),
+/// reloaded each time the icon is (re-)added; the stock application icon if that fails.
+fn tray_icon() -> io::Result<HICON> {
     // SAFETY: plain calls; the module handle of our own exe is valid; the resource id is passed
     // as an integer resource id (MAKEINTRESOURCE).
     let loaded = unsafe {
@@ -359,7 +273,7 @@ fn tray_icon(theme: Theme) -> io::Result<HICON> {
         GetModuleHandleW(None).and_then(|module| {
             LoadImageW(
                 Some(module.into()),
-                PCWSTR(resource as usize as *const u16),
+                PCWSTR(APP_ICON as usize as *const u16),
                 IMAGE_ICON,
                 cx,
                 cy,
@@ -370,7 +284,6 @@ fn tray_icon(theme: Theme) -> io::Result<HICON> {
     match loaded {
         Ok(h) => {
             let icon = HICON(h.0);
-            ICON_THEME.set(Some(theme));
             if let Some(old) = ICON.replace(Some(icon)) {
                 // SAFETY: `old` was loaded by us (not shared) and the shell keeps its own copy.
                 let _ = unsafe { DestroyIcon(old) };
@@ -486,21 +399,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             push(Event::OpenSettings);
             LRESULT(0)
         }
-        WM_TIMER if THEME_TIMERS.iter().any(|&(id, _)| id == wparam.0) => {
-            // SAFETY: one-shot: stops the timer that fired on our own window.
-            let _ = unsafe { KillTimer(Some(hwnd), wparam.0) };
-            update_icon_theme(hwnd);
-            LRESULT(0)
-        }
-        WM_SETTINGCHANGE => {
-            if is_color_set_change(lparam) {
-                log::debug!("Windows color mode changed; checking the taskbar");
-                update_icon_theme(hwnd);
-                schedule_theme_checks(hwnd);
-            }
-            // SAFETY: default handling with the arguments we received.
-            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-        }
         WM_APP_WAKE => {
             push(Event::Wake);
             LRESULT(0)
@@ -524,25 +422,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             log::info!("taskbar (re)created, re-adding tray icon");
             // Remove first in case the icon survived (e.g. the message was not from a restart).
             remove_icon(hwnd);
-            match add_icon(hwnd) {
-                Ok(()) => schedule_theme_checks(hwnd),
-                Err(e) => log::warn!("could not re-add tray icon: {e}"),
+            if let Err(e) = add_icon(hwnd) {
+                log::warn!("could not re-add tray icon: {e}");
             }
             LRESULT(0)
         }
         // SAFETY: default handling with the arguments we received.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
-}
-
-/// `WM_SETTINGCHANGE` with this `lParam` string: the light/dark mode changed.
-fn is_color_set_change(lparam: LPARAM) -> bool {
-    if lparam.0 == 0 {
-        return false;
-    }
-    // SAFETY: for WM_SETTINGCHANGE a non-null lParam is a NUL-terminated UTF-16 string.
-    let s = unsafe { PCWSTR(lparam.0 as *const u16).to_string() };
-    s.is_ok_and(|s| s == "ImmersiveColorSet")
 }
 
 /// Asks the main loop to run the Settings action (same as the tray item). Any thread.

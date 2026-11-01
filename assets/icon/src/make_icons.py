@@ -4,10 +4,8 @@ Usage:  python assets/icon/src/make_icons.py
 Needs:  resvg on PATH (`cargo install resvg`) and Pillow (`pip install pillow`).
 
 Writes, into assets/icon/:
-  kuality.svg, tray-white.svg, tray-black.svg   master vectors
+  kuality.svg      master vector
   kuality.ico      app icon: 16 20 24 32 40 48 64 128 256 (16-32 hand-tuned on the pixel grid)
-  tray-white.ico   tray icon for dark taskbars: 16 20 24 32 40 48 (each size hand-tuned)
-  tray-black.ico   same, for light taskbars
   png/kuality-N.png   app tile PNGs, N = 16 20 24 32 40 48 64 128 256 512
   wizard-small-55.bmp, wizard-small-110.bmp   Inno Setup WizardSmallImageFile
   wizard-164x314.bmp,  wizard-328x628.bmp     Inno Setup WizardImageFile
@@ -95,22 +93,6 @@ def small_tile(n):
 """
 
 
-# Tray glyph per size (just the K, monochrome), on whole pixels.
-TRAY_K = {
-    16: (3, 2, 12, 3, 13, 3.5, 4.5),
-    20: (4, 3, 14, 4, 16, 4, 5),
-    24: (5, 3, 18, 5, 20, 5, 6.3),
-    32: (6, 4, 24, 7, 27, 7, 8.9),
-    40: (8, 5, 30, 9, 34, 9, 10.2),
-    48: (8, 6, 36, 10, 40, 11, 14),
-}
-
-
-def tray(n, color):
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {n} {n}" width="{n}" height="{n}">\n'
-            f'<path fill="{color}" d="{k_path(*TRAY_K[n])}"/>\n</svg>\n')
-
-
 # Inno Setup large wizard image, designed at 164 x 314 (rendered 1x and 2x).
 WIZARD = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 164 314" width="164" height="314">
 <defs>{GRADIENTS}
@@ -187,12 +169,8 @@ def main():
     PNG_DIR.mkdir(exist_ok=True)
 
     (OUT / "kuality.svg").write_text(MASTER, encoding="utf-8")
-    (OUT / "tray-white.svg").write_text(tray(16, "#ffffff"), encoding="utf-8")
-    (OUT / "tray-black.svg").write_text(tray(16, "#000000"), encoding="utf-8")
     for n in SMALL:
         (SRC / f"tile-{n}.svg").write_text(small_tile(n), encoding="utf-8")
-    for n in TRAY_K:
-        (SRC / f"tray-{n}.svg").write_text(tray(n, "#ffffff"), encoding="utf-8")
     (SRC / "wizard.svg").write_text(WIZARD, encoding="utf-8")
 
     def tile_png(n):
@@ -202,9 +180,6 @@ def main():
     for n, img in tiles.items():
         img.save(PNG_DIR / f"kuality-{n}.png", optimize=True)
     write_ico(OUT / "kuality.ico", [tiles[n] for n in (16, 20, 24, 32, 40, 48, 64, 128, 256)])
-
-    for name, color in (("tray-white", "#ffffff"), ("tray-black", "#000000")):
-        write_ico(OUT / f"{name}.ico", [render(tray(n, color), n) for n in TRAY_K])
 
     for n in (55, 110):
         flatten(render(MASTER, n), "#ffffff").save(OUT / f"wizard-small-{n}.bmp")

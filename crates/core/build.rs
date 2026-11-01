@@ -7,9 +7,8 @@
 //! - DLLs only the settings window (GPUI) uses are delay-loaded, so the always-running core does
 //!   not map them (see `docs/specs/distribution.md`).
 //! - Icons and version info are compiled from a generated `.rc` with `embed-resource` (already
-//!   in the tree through GPUI): resource 1 is the app icon (`assets/icon/kuality.ico`), 2 and 3
-//!   the monochrome tray icons (`tray-white.ico` for dark taskbars, `tray-black.ico` for light
-//!   ones). Replacing the files and rebuilding is enough to change them.
+//!   in the tree through GPUI): resource 1 is the app icon (`assets/icon/kuality.ico`), used
+//!   everywhere, tray included. Replacing the file and rebuilding is enough to change it.
 
 use std::env;
 use std::fmt::Write as _;
@@ -80,12 +79,8 @@ fn embed_icon_and_version() {
 }
 
 /// Icon resources: id and file in `assets/icon/`. Id 1 is also what Explorer shows for the exe
-/// and what GPUI loads for its window; the tray picks 2 or 3 (see `platform/windows/tray.rs`).
-const ICONS: [(u16, &str); 3] = [
-    (1, "kuality.ico"),
-    (2, "tray-white.ico"),
-    (3, "tray-black.ico"),
-];
+/// and what GPUI loads for its window and the tray (see `platform/windows/tray.rs`).
+const ICONS: [(u16, &str); 1] = [(1, "kuality.ico")];
 
 /// Resource script: the icons and `VS_VERSION_INFO`. Numeric constants instead of `winver.h`,
 /// so no SDK include path is needed.
