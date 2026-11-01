@@ -19,14 +19,17 @@ While CapsLock is held, the system behaves as if Ctrl+Shift+Alt+Win are held. Ca
 ## Config
 
 ```json
-"hyperkey": { "enabled": false }
+"hyperkey": { "enabled": false, "include_win": true }
 ```
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `hyperkey.enabled` | bool | `false` | Turn the CapsLock → Hyper remap on. |
+| `hyperkey.include_win` | bool | **`true`** | *(2026-11-01)* Hyper is Ctrl+Shift+Alt+**Win**. Off: Ctrl+Shift+Alt. |
 
-No other keys in this phase. Missing section/field → default. Changes apply on hot-reload within one reload cycle.
+*(2026-11-01)* `include_win` off: Hyper presses and releases only LCtrl, LShift, LAlt (rule 2 / release sequence skip LWin). The Office letters are not dropped (rule 7) and the Office-key registry override is not applied (restored if it was): both exist only because Explorer owns Ctrl+Shift+Alt+**Win** (+letter), which Hyper no longer produces. On some layouts (e.g. Spanish) Ctrl+Alt acts as AltGr, so Hyper+some keys may type a character; the settings app says so.
+
+No other keys. Missing section/field → default. Changes apply on hot-reload within one reload cycle.
 
 ## Implementation
 
@@ -69,12 +72,12 @@ impl Engine {
 Rules (exhaustive):
 
 1. Every event updates `physical` if the key is one of the 8 sided modifiers (generic `CTRL/SHIFT/ALT` never arrive in LL hooks; ignore them).
-2. `CAPSLOCK` down, `held == false` → `held = true`; synth = (if `caps_toggled_on`: `Down(CAPSLOCK), Up(CAPSLOCK)`) then `Down(LCTRL), Down(LSHIFT), Down(LALT), Down(LWIN)`; `injected = all`; swallow.
+2. `CAPSLOCK` down, `held == false` → `held = true`; synth = (if `caps_toggled_on`: `Down(CAPSLOCK), Up(CAPSLOCK)`) then `Down(LCTRL), Down(LSHIFT), Down(LALT), Down(LWIN)` (no `LWIN` when `include_win` is off); `injected` = those; swallow. *(2026-11-01: rules 2–5 apply only while `hyperkey.enabled`; with Hyperkey off the hook may still run for normal hotkeys, and CapsLock then passes.)*
 3. `CAPSLOCK` down, `held == true` (auto-repeat) → swallow, no synth.
 4. `CAPSLOCK` up, `held == true` → synth = release sequence (below); `held = false`; swallow.
 5. `CAPSLOCK` up, `held == false` (we missed the down, e.g. hook installed while CapsLock was down) → swallow, no synth.
 6. Any of the 8 sided modifiers, down or up, while `held` → swallow, no synth (only `physical` is updated).
-7. Anything else → pass (`swallow = false`). Phase 2 inserts its binding check here, followed by the Office-letter drop: a down of one of `OFFICE_LETTERS` (W, X, P, O, T, D, N, L, Y) while `held` and not bound → swallow and mark consumed (its repeats and up are swallowed too, as for bound keys).
+7. Anything else → pass (`swallow = false`). Phase 2 inserts its binding check here, followed by the Office-letter drop: a down of one of `OFFICE_LETTERS` (W, X, P, O, T, D, N, L, Y) while `held`, `include_win` on and not bound → swallow and mark consumed (its repeats and up are swallowed too, as for bound keys).
 
 Release sequence (`force_release` returns the same when `held`; empty otherwise):
 `Down(MASK), Up(MASK)`, then `Up` for each key in `injected` in order LWIN, LALT, LSHIFT, LCTRL, **skipping any whose sided key is physically down** in `physical` (so a Shift the user is still holding stays down). Then `injected = empty`, `held = false`.
@@ -115,7 +118,7 @@ extern "system" fn proc(code, wparam, lparam) -> LRESULT
 - Borrow the engine, call `on_event`, **drop the borrow**, then if `synth` is non-empty call `SendInput` once with all events.
 - Return `1` if `swallow`, else `CallNextHookEx`.
 - Whole body inside `std::panic::catch_unwind`; on panic: emergency release (below) and `CallNextHookEx`.
-- Forbidden inside the callback: heap allocation, locks, logging, registry/file I/O, `SendMessage`, anything that can block. Allowed: the engine call, `GetKeyState`, one `SendInput` (≤ 32 INPUTs), one `PostMessageW` to our own window.
+- Forbidden inside the callback: heap allocation, locks, logging, registry/file I/O, `SendMessage`, anything that can block. Allowed: the engine call, `GetKeyState`, `GetAsyncKeyState` (8 sided modifiers, only to clear missed modifier ups for normal hotkeys, see shortcuts.md), one `SendInput` (≤ 32 INPUTs), one `PostMessageW` to our own window.
 - Logging: the callback may `PostMessageW(hwnd, WM_APP_TRACE, code, 0)` for state transitions (Hyper down, Hyper up, forced release); the window proc logs them at `debug`. **Never log key codes or typed keys** (privacy).
 
 ### SendInput (`platform/windows/input.rs`)
@@ -148,6 +151,7 @@ Explorer registers `Ctrl+Shift+Alt+Win` alone and with W/X/T/O/P/D/L/N/Y as Offi
 - **Office letters** (engine rule 7): while Hyper is held, unbound Office letters are dropped in the hook, so Explorer never sees them. Observed on Windows 11 IoT Enterprise LTSC, build 26300 (2026-11-01): with only the `ms-officeapp` override, Explorer still opened `https://go.microsoft.com/fwlink/?linkid=…` pages in the default browser (T Teams 2044782, W 2044666, X 2044684, P 2044769, O 2044778, N 2044773, Y 2044904, L LinkedIn 2044786; D opened nothing). `https` cannot be overridden, and apps never receive these combos anyway (Explorer takes the key down). Hyper+L opened LinkedIn and did not lock the PC.
 - **Office key alone**: launched through the `ms-officeapp` protocol. Override it in HKCU:
 
+- *(2026-11-01)* Wanted while `hyperkey.enabled && hyperkey.include_win`; everything below that says "enabled" means this.
 - **Apply** (idempotent): if `HKCU\Software\Kuality\OfficeKey` value `Applied` (DWORD) is 1 → do nothing. Otherwise record backup under `HKCU\Software\Kuality\OfficeKey`: `PrevExisted` (DWORD 0/1: whether `HKCU\Software\Classes\ms-officeapp` existed) and `PrevCommand` (REG_SZ, the previous default value of `...\ms-officeapp\Shell\Open\Command`, only if it existed). Then create `HKCU\Software\Classes\ms-officeapp\Shell\Open\Command` with default value (REG_SZ) `rundll32`, set `Applied = 1`, call `SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, null, null)`.
 - **Restore**: if `Applied != 1` → nothing. If `PrevExisted == 0` → `RegDeleteTreeW(HKCU\Software\Classes\ms-officeapp)`. Else if `PrevCommand` was recorded → write it back as the default value; else delete only the default value we wrote. Delete `HKCU\Software\Kuality\OfficeKey`, `SHChangeNotify`.
 - Runs on the **main thread** (registry I/O must not delay the hook thread):
@@ -185,7 +189,7 @@ Explorer registers `Ctrl+Shift+Alt+Win` alone and with W/X/T/O/P/D/L/N/Y as Offi
 
 ## Out of scope
 
-- Real CapsLock via double-tap, tap actions, remapping any key other than CapsLock, choosing which modifiers Hyper sends.
+- Real CapsLock via double-tap, tap actions, remapping any key other than CapsLock, choosing which modifiers Hyper sends (beyond `include_win`).
 - Hooking keys that go to elevated windows when the core is not elevated (Phase 6 "Run elevated").
 - Disabling Explorer's own registration of the Office hotkeys (requires restarting Explorer).
 

@@ -36,15 +36,15 @@ Do not contradict these without asking the user. To change one, edit the line an
 ## Hyperkey (2026-10-31)
 
 - **Mechanism** — low-level keyboard hook (`WH_KEYBOARD_LL`) + `SendInput`; injected events tagged via `dwExtraInfo` to avoid loops.
-- **Mapping** — while CapsLock is held, Ctrl+Shift+Alt+Win are held; on release they are released. Nothing else.
+- **Mapping** — while CapsLock is held, Ctrl+Shift+Alt+Win are held; on release they are released. Nothing else. *(2026-11-01: Win is optional, see "Include Windows key".)*
 - **Real CapsLock** — not available while Hyperkey is enabled (double-tap to toggle real CapsLock may come later).
 - **Tap actions** — none (no single/double tap behaviors for now).
 - **Start menu / menu bar side effects** — send a neutral "mask" key before releasing Win/Alt (AutoHotkey technique) so Start menu / app menu bar don't open.
-- **Office key** — when Hyperkey is enabled, disable Windows' Office key shortcut via registry; restore when disabled.
+- **Office key** — when Hyperkey is enabled, disable Windows' Office key shortcut via registry; restore when disabled. *(2026-11-01: only while Hyper includes Win.)*
 
 ## Shortcuts (2026-10-31)
 
-- **Definition** — Hyper+key → action, stored in config. Initial actions: launch program, send hotkey, open URL.
+- **Definition** — Hyper+key → action, stored in config. Initial actions: launch program, send hotkey, open URL. *(2026-11-01: any hotkey, see "Any hotkey".)*
 
 ## Settings app (2026-10-31)
 
@@ -98,7 +98,7 @@ Do not contradict these without asking the user. To change one, edit the line an
 
 ## Shortcuts implementation (2026-10-31, Phase 2)
 
-- **Requires Hyperkey** — shortcuts only fire while Hyperkey is active; tray Pause stops both. A warning is logged when `shortcuts.enabled` is on but `hyperkey.enabled` is off.
+- **Requires Hyperkey** — shortcuts only fire while Hyperkey is active; tray Pause stops both. A warning is logged when `shortcuts.enabled` is on but `hyperkey.enabled` is off. *(2026-11-01, user request: applies to Hyper hotkeys only; normal hotkeys only need `shortcuts.enabled`. The warning is logged when an active binding is a Hyper hotkey and Hyperkey is off.)*
 - **Bindings** — typed `BindingEntry` (valid binding, or raw JSON kept verbatim); compiled on the main thread on every load into an `Arc<CompiledBindings>` with a generation; actions triggered against an older generation are dropped. Linear lookup in the hook (no allocation).
 - **Log identity** — compiled entries keep their index in `shortcuts.bindings`; logs say `shortcut #<index>` plus the action type or skip reason, never key names (key/chord parse errors never echo the input).
 - **Consumed keys vs. hook reinstall** — every `Apply` still reinstalls the hook with a forced release (Phase 1), but the consumed-key set is restored afterwards, so the up of a bound key held across a config reload is still swallowed. `reset`, Pause/disable and lock/suspend clear it.
@@ -108,6 +108,15 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **Foreground for launched apps** — before each `ShellExecuteExW` the worker sends one empty, tagged mouse `SendInput` so Windows counts Kuality as the last input source; only then does `AllowSetForegroundWindow(ASFW_ANY)` take effect (the hook swallows the shortcut key, so otherwise the foreground lock keeps launched apps and `open_url` targets behind). Same technique as PowerToys' `BringToForeground`.
 - **Foreground after the Hyper release** *(2026-11-01)* — the grant given before `ShellExecuteExW` ends at the next input, and releasing Hyper is input (the user's CapsLock up and our injected modifier ups), so an app whose first window appears after the release (Character Map: ~250–400 ms) opens behind; renewing the grant after the release did not help (tested). Instead the action thread watches for up to 3 s (50 ms thread timer, jobs never wait) for the first visible, unowned, non-tool top-level window of the started process (PID from `SEE_MASK_NOCLOSEPROCESS`), or of any process if it was not there before the launch (no process handle for packaged apps, `shell:AppsFolder`, URLs, launcher stubs), and brings it forward (empty tagged mouse input + `SetForegroundWindow`) only while the foreground is still the window that was in front when the shortcut fired. If the foreground changed, the app came forward itself or the user moved on, and nothing is done.
 - **Argument quoting** — `launch.args` lists use `CommandLineToArgvW` rules; besides space, tab and `"`, newline and vertical tab also trigger quoting (as in Microsoft's reference implementation).
+
+- **Any hotkey** *(2026-11-01, user request)* — a shortcut is Hyper+key or a normal combination (`ctrl+t`, `win+e`, `ctrl+alt+k`). `bindings[].key` is a chord of the existing key names plus a `hyper` modifier; a bare key (`"1"`) keeps meaning Hyper+1 so old files work. The settings app writes `hyper+<key>` for Hyper hotkeys. Modifier sides are ignored (`rctrl` = `ctrl`); matching needs exactly the bound set. `hyper` cannot be combined with other modifiers. A normal hotkey needs at least one of Ctrl/Shift/Alt/Win (a lone key would be swallowed everywhere, and a bare name already means Hyper).
+- **Override by default** *(2026-11-01, user request)* — a bound hotkey is swallowed (down, repeats, up): the app in front never gets it, Win+E no longer opens Explorer. `bindings[].pass_through: true` ("Also send to the app", default `false`) runs the action and lets the key through.
+- **Normal hotkeys: modifier state** — tracked by the engine from the hook's own events; on a key down with modifiers believed down, bits the system (`GetAsyncKeyState`) reports up are cleared (an up missed while the hook was off or an elevated window was in front). The system state only clears, never sets; on hook install it is copied once. A swallowed normal hotkey is followed by the mask key, so releasing Win/Alt/Ctrl+Shift opens no Start menu, menu bar or input-language switch.
+- **`send_hotkey` from a normal hotkey** — the modifiers the user still holds are released (mask first) before the chord and pressed again after it, in the same `SendInput`, followed by the mask key when Win or Alt is among them.
+- **Reserved hotkeys** — Ctrl+Alt+Del (any extra modifiers) and Win+L cannot be bound: the parser rejects them (binding skipped with a warning) and the recorder refuses them with a message. Elevated windows in front hide keys from the hook (documented limitation; "Run elevated" later).
+- **Duplicates** — compared as parsed triggers (`"1"` = `"hyper+1"`, `alt+ctrl+k` = `ctrl+alt+k`): first enabled one wins, later ones logged and flagged in the UI.
+- **Include Windows key** *(2026-11-01, user request)* — `hyperkey.include_win`, default **true** (Ctrl+Shift+Alt+Win as before); off → Hyper is Ctrl+Shift+Alt. The Office-key registry override and the Office-letter dropping exist only because of Ctrl+Shift+Alt+Win: both apply only while `include_win` is on (Explorer never sees the Office combination otherwise). The settings app warns that on some layouts (e.g. Spanish) Ctrl+Alt acts as AltGr.
+- **Hook without Hyperkey** — the keyboard hook is installed when Hyperkey is enabled or any active binding is a normal hotkey (and not paused); with Hyperkey off, CapsLock and modifiers pass untouched.
 
 ## Taskbar overlay implementation (2026-10-31, Phase 3)
 
@@ -147,10 +156,14 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **No core available** *(2026-10-31)* — when `kuality.exe` is missing or fails to start, the window opens anyway with a "Kuality is not running" banner giving the reason; no second core is started when the core mutex exists but its window is not found.
 - **Logging** — no log file; debug builds log to stderr (shared with a debug core's console), release builds are a GUI-subsystem exe with no console.
 - **Accessibility** — icon-only buttons, switches and checkboxes carry accessibility labels (they double as stable names for UI automation).
-- **Shortcuts editor** *(2026-11-01)* — Raycast-style table, one row per binding: enabled switch, Hotkey recorder button (`Hyper + 1`), Action button opening a searchable picker, delete. No expandable cards, no key dropdown (a hotkey that cannot be recorded is edited in `config.json`); `name` is not shown and is kept in the file. Reason: the card editor was confusing; the user's model is "press the hotkey, then pick what it does".
+- **Shortcuts editor** *(2026-11-01)* — Raycast-style table, one row per binding: enabled switch, Hotkey recorder button (`Hyper + 1`), Action button opening a searchable picker, delete. No expandable cards, no key dropdown (a hotkey that cannot be recorded is edited in `config.json`); `name` is not shown and is kept in the file. Reason: the card editor was confusing; the user's model is "press the hotkey, then pick what it does". *(2026-11-01, follow-up: columns Enabled | Name | Hotkey | Action; see "Name column".)*
 - **App picker source** *(2026-11-01)* — the shell's Applications folder (`FOLDERID_AppsFolder`, the Start menu's "All apps"): desktop and Store apps alike, saved as `launch` of `shell:AppsFolder\<parsing name>` (no config change; the core already launches these through `ShellExecuteExW`). Listed once per window on thread `kuality-settings-apps` (names first, then 32 px icons through `IShellItemImageFactory`), kept in memory while the window is open.
 - **Action kinds** *(2026-11-01)* — the picker's entries are derived from the existing three actions: app (`shell:AppsFolder\…` without arguments), Open website (`open_url`; a bare `github.com` gets `https://`), Send keys (`send_hotkey`), Open file or folder (`launch` of a non-program without arguments), Run program (`.exe`/`.com`/`.bat`/`.cmd`, or anything with arguments or a working folder; arguments under "Advanced"). Unknown fields inside `action` survive when the `type` stays the same.
 - **Extra icons** *(2026-11-01)* — Lucide icons beyond gpui-component's default set (AppWindow, Keyboard) are embedded one by one with `icon_assets!` in front of the default asset source, not the whole catalog. `image` (already in GPUI's tree) is a direct dependency for the icon pixel buffers.
+- **Name column** *(2026-11-01, user request)* — `name` is back as an optional inline text field; when empty it shows the action in grey (`Open Helium`, `Send Win + 1`). The Action cell reads `Open: [icon] Helium`.
+- **Hyper icon** *(2026-11-01, user request)* — Hyper is a white four-pointed star ✦ on a dark keycap (same in light and dark mode), drawn from an SVG path (`Icon::data`), shown as `[✦] + [1]` in the Hotkey column and on the Hyperkey tab.
+- **Hotkey recorder** *(2026-11-01)* — records a full chord: CapsLock held → `hyper+<key>`, else the held modifiers + key (`ctrl+alt+k`); a key alone or a reserved combination is refused with a message and recording restarts. Esc alone cancels (Ctrl+Esc is a hotkey).
+- **Pass-through option** *(2026-11-01)* — "Also send to the app" lives in a per-row "⋯" popover (checkbox + one-line explanation) so the row stays clean; a row with it on shows "The app in front also gets this hotkey."
 
 ## Out of scope for now
 

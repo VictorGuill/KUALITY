@@ -56,7 +56,10 @@ A `Lenient::Invalid` value read from the file is shown as its raw JSON text with
 
 | Field | Control | Notes |
 |---|---|---|
-| `hyperkey.enabled` | Switch "Enable Hyperkey" | Text: "Hold CapsLock to press Ctrl+Shift+Alt+Win. While enabled, CapsLock does not toggle caps and the Office key shortcut is disabled. Tray → Pause turns it off temporarily." |
+| `hyperkey.enabled` | Switch "Enable Hyperkey" | Text: "Hold CapsLock to press Ctrl+Shift+Alt+Win." plus the legend `[CapsLock] → [✦] = [Ctrl] [Shift] [Alt] [Win]` and notes (CapsLock does not toggle caps; the Office key shortcut is disabled while Win is included; Tray → Pause; Hyper shortcuts need it, Ctrl/Alt/Shift/Win shortcuts do not). |
+| `hyperkey.include_win` | Switch "Include Windows key" (default on) | "On: Hyper is Ctrl+Shift+Alt+Win. Off: Ctrl+Shift+Alt." + hint "On some keyboard layouts (e.g. Spanish) Ctrl+Alt acts as AltGr, so some keys may type a character when Win is excluded." The legend drops `[Win]` when off. |
+
+The Hyper glyph everywhere is a white four-pointed star ✦ on a dark keycap (`#3A3A3C`, same in light and dark mode), drawn from an SVG path (`controls::HYPER_STAR_SVG`, `Icon::data`), not a font glyph.
 
 ### Shortcuts
 
@@ -64,22 +67,26 @@ A `Lenient::Invalid` value read from the file is shown as its raw JSON text with
 
 | Field | Control | Notes |
 |---|---|---|
-| `shortcuts.enabled` | Switch "Enable shortcuts" | If Hyperkey is off: callout "Shortcuts only work while Hyperkey is enabled" + button **Enable Hyperkey** |
-| `shortcuts.bindings` | Two-column table; button **Add shortcut** | — |
+| `shortcuts.enabled` | Switch "Enable shortcuts" | If Hyperkey is off and an enabled binding is a Hyper hotkey: callout `[✦] Hyper shortcuts only work while Hyperkey is enabled` + button **Enable Hyperkey** |
+| `shortcuts.bindings` | Table; button **Add shortcut** | — |
 
 The table has one row per binding, in file order:
 
+*(2026-11-01, follow-up: columns Enabled | Name | Hotkey | Action, ⋯ menu.)*
+
 ```
- [on] | Hotkey          | Action                         | delete
- [on] | [ Hyper + 1 ]   | [ (icon) Helium            v ] |
- [on] | [ Hyper + 3 ]   | [ (kbd)  Send Win + 1      v ] |
+ Enabled | Name             | Hotkey              | Action                          |
+ [on]    | [Open Helium   ] | [ [✦] + [1] ]       | [ Open: (icon) Helium       v ] | ⋯ delete
+ [on]    | [Task Manager  ] | [ [Ctrl]+[Alt]+[K] ] | [ Send: (kbd) Ctrl + Shift… v ] | ⋯ delete
 ```
 
 - **Enabled switch** (`enabled`). A disabled row is dimmed.
-- **Hotkey button** (`key`): shows `Hyper + <Key>` (keys as people write them: `Hyper + 1`, `Hyper + Page Up`, `Hyper + ;`). Click → `Press Hyper + a key…`; hold CapsLock and press a key (the key alone works too). Esc, a click, focus loss or 10 s cancel (see "Key capture"). A key that is not valid in the file shows its raw text plus a warning; another enabled binding with the same key → warning "Another shortcut uses this hotkey: only the first one works" (still saved, core rule).
-- **Action button** (`action`): icon + label, opens the **action picker**. Labels: an app → its Start-menu name (and icon); `open_url` → `Open github.com` (scheme, `www.` and trailing `/` dropped for web addresses); `send_hotkey` → `Send Win + 1`; `launch` of a document, folder or shortcut → `Open <file name>`; `launch` of a program, or with arguments or a working folder → `Run <name>` (`Run notepad.exe …` with arguments). A value the core would skip (empty path, bad chord, URL without scheme) shows a warning under the row.
+- **Name** (`name`): optional inline text input; when empty its grey placeholder is the action with its verb (`Open Helium`, `Send Win + 1`, `Run notepad.exe`). Saved as typed. The draft row shows "Name it later".
+- **Hotkey button** (`key`): the hotkey as keycaps: `[✦] + [1]`, `[Ctrl] + [Alt] + [K]` (keys as people write them: `Page Up`, `;`); tooltip `Hyper + 1`. Click → `Press a hotkey…`; hold CapsLock (Hyper) or Ctrl/Alt/Shift/Win and press a key. Esc, a click, focus loss or 10 s cancel (see "Key capture"). A key alone or Ctrl+Alt+Del / Win+L is refused with a message under the row and recording continues. A hotkey that is not valid in the file shows its raw text plus a warning; another enabled binding with the same hotkey (`1` = `hyper+1`) → warning "Another shortcut uses this hotkey: only the first one works" (still saved, core rule). Recorded Hyper hotkeys are written as `hyper+<key>`, others canonical (`ctrl+alt+k`); untouched bare keys stay as they are.
+- **Action button** (`action`): muted verb + icon + object (`Open: [icon] Helium`, `Open: (globe) github.com`, `Send: (kbd) Win + 1`, `Run: (terminal) notepad.exe`), opens the **action picker**. Labels: an app → its Start-menu name (and icon); `open_url` → `Open github.com` (scheme, `www.` and trailing `/` dropped for web addresses); `send_hotkey` → `Send Win + 1`; `launch` of a document, folder or shortcut → `Open <file name>`; `launch` of a program, or with arguments or a working folder → `Run <name>` (`Run notepad.exe …` with arguments). A value the core would skip (empty path, bad chord, URL without scheme) shows a warning under the row.
+- **⋯** (popover): checkbox **Also send to the app** (`pass_through`) with "Off: Kuality takes the hotkey, the app in front never gets it. On: the action runs and the app gets the hotkey too." A row with it on shows "The app in front also gets this hotkey."
 - **Delete** (confirm dialog). `BindingEntry::Invalid` entries show as `Unrecognized shortcut (kept as is)` with only Delete.
-- `name` is not shown; existing values are kept in the file. New bindings get `name: ""`.
+- New bindings get `name: ""`, `pass_through: false`.
 
 **Add shortcut** appends a *draft* row with its Hotkey button already recording; once a key is recorded the picker opens. The draft is written once it has both a valid key and an action, and is lost on close or with its delete button (hint shown on the row). Only one draft at a time.
 
@@ -101,10 +108,10 @@ The app list is read once per window on thread `kuality-settings-apps` (COM STA:
 
 ### Key capture (Record buttons)
 
-- Clicking a Hotkey button or **Record keys** starts recording; the button says so (`Press Hyper + a key…` / `Press the keys… (Esc to cancel)`). Recording stops on: a recorded result, Esc (no modifier held), a click anywhere, the window losing focus, or 10 s.
+- Clicking a Hotkey button or **Record keys** starts recording; the button says so (`Press a hotkey…` / `Press the keys… (Esc to cancel)`). Recording stops on: a recorded result, Esc (no modifier held), a click anywhere, the window losing focus, or 10 s.
 - Capture uses a `WH_KEYBOARD_LL` hook in the settings process, installed only while recording, on a dedicated thread `kuality-settings-recorder` with its own message loop. The callback only reads the event, pushes it into a channel and returns. It ignores injected events (`LLKHF_INJECTED`). While recording, and only while the settings window is the foreground window, it **swallows** the keys (so Win+D, Ctrl+Shift+Esc… do not act); every key whose down was swallowed also has its up swallowed, even after recording ends (the hook stays until those keys are up).
 - Why a hook: GPUI key events lose the virtual-key code (layout-dependent names) and never see system combos. And the hook works with **Hyperkey active**: our hook is installed after the core's, so it runs first and sees the raw CapsLock before the core turns it into Hyper modifiers; swallowing means the core does not inject modifiers or fire a bound shortcut. If the core's hook happens to run first (it reinstalls on resume/unlock), injected Hyper modifiers are ignored and a key already bound may be consumed by the core; the chord field stays as fallback for Send keys, and a hotkey can be edited in `config.json`.
-- **Trigger key** recorder: the first key down that is not a modifier and not CapsLock → `Key(vk).name()` (unnamed codes become `vk:0xNN`). Modifiers and CapsLock are ignored, so pressing either `G` or `CapsLock+G` records `g`.
+- **Hotkey** recorder *(2026-11-01)*: tracks CapsLock and the modifiers held; the first other key down ends it. CapsLock held → `hyper+<name>` (other modifiers ignored); else the held modifiers (sides ignored) + key → canonical text (`ctrl+alt+k`); no modifier → refused ("Add Ctrl, Alt, Shift or Win, or hold CapsLock (Hyper).") ; Ctrl+Alt+Del / Win+L → refused (Win+L still locks the PC: Windows handles it first). A refusal shows its message and restarts the recording. Esc with nothing held cancels; Ctrl+Esc etc. are hotkeys. Unnamed codes become `vk:0xNN`.
 - **Chord** recorder: modifiers pressed (in order, max 4) then a non-modifier key down → chord. Left modifiers are written as `ctrl` / `shift` / `alt` / `win`, right ones as `rctrl` / `rshift` / `ralt` / `rwin`. If all modifiers are released without another key, the chord is the modifiers alone (e.g. `win`). CapsLock is ignored (type `capslock` by hand if wanted).
 
 ## Config file handling

@@ -69,9 +69,9 @@ Current `core` modules (Phases 0–3):
 | `ui/{general,widgets,hyperkey,shortcuts}.rs` | One tab each; widgets and shortcuts have list rows with an inline editor |
 | `ui/controls.rs` | Layout helpers (sections, rows, fields, segmented buttons) |
 
-Keyboard thread (`platform/windows/keyboard.rs`): owns a hidden top-level window (class `KualityKeyboard`) for session/power broadcasts and a `EVENT_SYSTEM_DESKTOPSWITCH` WinEvent hook. The `WH_KEYBOARD_LL` hook is installed only while Hyperkey is active; its callback runs the engine and at most one tagged `SendInput` (no allocation, locks or logging). Commands arrive through `mpsc` + `PostMessageW(WM_APP_COMMAND)`; `Apply` carries the Hyperkey config and an `Arc<CompiledBindings>` compiled on the main thread. `crash.rs` installs a panic hook and an unhandled-exception filter that release injected modifiers.
+Keyboard thread (`platform/windows/keyboard.rs`): owns a hidden top-level window (class `KualityKeyboard`) for session/power broadcasts and a `EVENT_SYSTEM_DESKTOPSWITCH` WinEvent hook. The `WH_KEYBOARD_LL` hook is installed only while needed and not paused (Hyperkey enabled, or a shortcut with a normal hotkey such as `ctrl+t`); its callback runs the engine and at most one tagged `SendInput` (no allocation, locks or logging). Commands arrive through `mpsc` + `PostMessageW(WM_APP_COMMAND)`; `Apply` carries the Hyperkey config and an `Arc<CompiledBindings>` compiled on the main thread. `crash.rs` installs a panic hook and an unhandled-exception filter that release injected modifiers.
 
-Shortcuts: when a bound key goes down while Hyper is held, the engine marks it consumed (its repeats and up are swallowed) and the callback only posts `WM_APP_ACTION(index, generation)` to its own window. The window procedure drops the message if the table generation changed, injects `send_hotkey` chords itself (releasing and re-pressing the injected Hyper modifiers in the same `SendInput`), and hands `launch` / `open_url` to the `ActionWorker` (`kuality-actions`, STA with a message loop, `ShellExecuteExW`). The worker never touches keyboard state. Because the shell may leave hidden windows in our process, the action thread hooks the threads that own them so a `WM_CLOSE` (e.g. from `taskkill`) still quits the app cleanly; Kuality's own window threads are named `kuality-*`. Quit stops the keyboard thread first, then the worker (1 s timeout each).
+Shortcuts: when a bound key goes down while Hyper is held (Hyper hotkey), or with exactly the bound modifiers held (normal hotkey, modifier state tracked by the engine itself), the engine marks it consumed (or "passed" for `pass_through` bindings) (its repeats and up are swallowed) and the callback only posts `WM_APP_ACTION(index, generation)` to its own window. The window procedure drops the message if the table generation changed, injects `send_hotkey` chords itself (releasing and re-pressing the injected Hyper modifiers, or the modifiers the user still holds, in the same `SendInput`), and hands `launch` / `open_url` to the `ActionWorker` (`kuality-actions`, STA with a message loop, `ShellExecuteExW`). The worker never touches keyboard state. Because the shell may leave hidden windows in our process, the action thread hooks the threads that own them so a `WM_CLOSE` (e.g. from `taskkill`) still quits the app cleanly; Kuality's own window threads are named `kuality-*`. Quit stops the keyboard thread first, then the worker (1 s timeout each).
 
 Overlay thread (`platform/windows/overlay/`, see `docs/specs/overlay.md`): `kuality-overlay` owns a hidden top-level window (class `KualityOverlayHost`) that receives `TaskbarCreated`, display, setting, power and session broadcasts and owns the refresh timers. For every (taskbar, item) it creates a `WS_EX_LAYERED` child window (class `KualityWidget`) of `Shell_TrayWnd` / `Shell_SecondaryTrayWnd`, rendered with one software `ID2D1DCRenderTarget` into a per-window DIB section and shown with `UpdateLayeredWindow`. A full refresh (re-enumerate taskbars, reconcile windows, lay out, render) runs on `Apply` and, debounced, on every change trigger; nothing runs while idle. WinEvent hooks limited to Explorer's pid keep widgets on top (`EVENT_OBJECT_REORDER`) and relayout on taskbar size changes; with `hide_on_fullscreen`, a foreground hook plus a location hook on the foreground process hide the widgets of a monitor covered by a fullscreen window. Because widget windows are children of Explorer's taskbar, the thread's input queue is attached to Explorer's: it never blocks (no `SendMessage` to Explorer, no waits, only the theme registry read). Widget right-click → Settings posts to the main window; Hide is session-only state of the thread.
 
@@ -90,14 +90,14 @@ Draft shape (will be refined per phase):
 {
   "version": 1,
   "general": { "autostart": false, "run_elevated": false },
-  "hyperkey": { "enabled": false },
+  "hyperkey": { "enabled": false, "include_win": true },
   "shortcuts": {
     "enabled": false,
     "bindings": [
-      { "key": "1", "name": "Notepad", "enabled": true,
+      { "key": "hyper+1", "name": "Notepad", "enabled": true, "pass_through": false,
         "action": { "type": "launch", "path": "C:\\Windows\\notepad.exe", "args": [], "cwd": null } },
       { "key": "2", "action": { "type": "send_hotkey", "keys": "ctrl+shift+esc" } },
-      { "key": "G", "action": { "type": "open_url", "url": "https://github.com" } }
+      { "key": "ctrl+alt+g", "action": { "type": "open_url", "url": "https://github.com" } }
     ]
   },
   "widgets": {
