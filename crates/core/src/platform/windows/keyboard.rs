@@ -312,7 +312,7 @@ impl Ctx {
                 // `update` releases a held Hyper with the modifiers it really injected, so the
                 // new settings may be set first.
                 self.enabled = hyperkey.enabled;
-                ENGINE.with_borrow_mut(|e| e.set_hyper(hyperkey.enabled, hyperkey.include_win));
+                ENGINE.with_borrow_mut(|e| e.set_hyper(hyperkey.enabled, hyperkey.modifiers));
                 self.update(true);
                 if self.hook.is_some() {
                     // Apply does not forget pressed keys (shortcuts.md).

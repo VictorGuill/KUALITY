@@ -13,9 +13,10 @@ pub mod test_util;
 
 pub use config::{
     Action, Anchor, Binding, BindingEntry, CONFIG_VERSION, Color, CommonItem, Config,
-    DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, Dimension, FontWeight, General, Hyperkey, LaunchAction,
-    LaunchArgs, Length, Lenient, LogLevel, MAX_URL_LEN, OpenUrlAction, Origin, SendHotkeyAction,
-    Shortcuts, TextAlign, TextWidget, WidgetEntry, WidgetItem, Widgets, valid_url,
+    DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, Dimension, FontWeight, General, HyperModifiers,
+    Hyperkey, LaunchAction, LaunchArgs, Length, Lenient, LogLevel, MAX_URL_LEN, OpenUrlAction,
+    Origin, SendHotkeyAction, Shortcuts, TextAlign, TextWidget, WidgetEntry, WidgetItem, Widgets,
+    valid_url,
 };
 pub use keys::{
     Chord, Key, KeyParseError, Mods, Trigger, TriggerError, parse_chord, parse_key, parse_trigger,

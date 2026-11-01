@@ -185,7 +185,7 @@ impl<W: DirWatcher> App<W> {
 /// The Office key override is only needed when Hyper presses Ctrl+Shift+Alt+Win (the Office
 /// key combination); without Win, Hyper never produces it.
 fn office_override_wanted(config: &Config) -> bool {
-    config.hyperkey.enabled && config.hyperkey.include_win
+    config.hyperkey.enabled && config.hyperkey.modifiers.includes_win()
 }
 
 /// Disables the Office key while Hyperkey (with Win) is enabled, restores it otherwise. Failures are only

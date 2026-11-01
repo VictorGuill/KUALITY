@@ -91,7 +91,7 @@ Draft shape (will be refined per phase):
 {
   "version": 1,
   "general": { "log_level": "info" },
-  "hyperkey": { "enabled": false, "include_win": true },
+  "hyperkey": { "enabled": false, "modifiers": "none" },
   "shortcuts": {
     "enabled": false,
     "bindings": [

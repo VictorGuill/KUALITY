@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use kuality_protocol::{Chord, Key, Mods};
+use kuality_protocol::{Chord, HyperModifiers, Key, Mods};
 
 use crate::shortcuts::CompiledBindings;
 
@@ -203,8 +203,8 @@ pub struct Engine {
     /// Hyperkey is on: CapsLock is Hyper. Off: CapsLock is a normal key (the hook may still run
     /// for normal hotkeys).
     hyper_enabled: bool,
-    /// Hyper includes Win (Ctrl+Shift+Alt+Win) or not (Ctrl+Shift+Alt).
-    include_win: bool,
+    /// Modifiers Hyper injects (none: Hyper only triggers Kuality shortcuts).
+    modifiers: HyperModifiers,
     /// Hyper is active (CapsLock physically down).
     held: bool,
     /// Hyper modifiers we have injected down.
@@ -229,7 +229,8 @@ impl Engine {
     pub const fn new() -> Self {
         Self {
             hyper_enabled: true,
-            include_win: true,
+            // Tests start from the full Ctrl+Shift+Alt+Win; the core always calls `set_hyper`.
+            modifiers: HyperModifiers::CtrlShiftAltWin,
             held: false,
             injected: ModSet(0),
             physical: ModSet(0),
@@ -240,17 +241,17 @@ impl Engine {
     }
 
     /// Hyperkey settings. Call [`Engine::force_release`] first if Hyper may be held.
-    pub fn set_hyper(&mut self, enabled: bool, include_win: bool) {
+    pub fn set_hyper(&mut self, enabled: bool, modifiers: HyperModifiers) {
         self.hyper_enabled = enabled;
-        self.include_win = include_win;
+        self.modifiers = modifiers;
     }
 
-    /// Modifiers Hyper presses, in press order.
+    /// Modifiers Hyper presses, in press order (none in Kuality-only mode).
     fn hyper_press_order(&self) -> impl Iterator<Item = Key> + use<> {
-        let include_win = self.include_win;
+        let m = self.modifiers;
         HYPER_PRESS_ORDER
             .into_iter()
-            .filter(move |&k| include_win || k != Key::LWIN)
+            .filter(move |&k| m.injects() && (m.includes_win() || k != Key::LWIN))
     }
 
     /// Replaces the shortcut table and returns the previous one (so the caller decides where it
@@ -343,8 +344,9 @@ impl Engine {
             };
         }
 
-        // Rule 6: physical modifiers add nothing while Hyper is held.
-        if self.held && is_modifier {
+        // Rule 6: physical modifiers add nothing while Hyper is held. In Kuality-only mode they
+        // pass: nothing was injected, so a swallowed up would leave the key stuck.
+        if self.held && is_modifier && self.modifiers.injects() {
             return Verdict::swallow();
         }
 
@@ -381,7 +383,14 @@ impl Engine {
         // Office letters: Explorer owns Ctrl+Shift+Alt+Win+letter for these and opens Office
         // web pages; an unbound one is dropped (until its up) so Explorer never sees it. Without
         // Win in Hyper, Explorer does not see the Office combination: nothing to drop.
-        if ev.down && self.held && self.include_win && OFFICE_LETTERS.contains(&ev.key) {
+        if ev.down && self.held && self.modifiers.includes_win() && OFFICE_LETTERS.contains(&ev.key)
+        {
+            self.consumed.set(ev.key, true);
+            return Verdict::swallow();
+        }
+        // Kuality-only mode: an unbound key pressed with Hyper is dropped (until its up), so
+        // holding CapsLock never types into the app in front.
+        if ev.down && self.held && !is_modifier && !self.modifiers.injects() {
             self.consumed.set(ev.key, true);
             return Verdict::swallow();
         }
@@ -392,7 +401,8 @@ impl Engine {
 
     /// Shortcut `index` fires on `key`'s press. Swallowed unless the binding passes through;
     /// a swallowed normal hotkey gets the mask key, so releasing its Win / Alt / Ctrl+Shift
-    /// opens no Start menu, menu bar or input-language switch.
+    /// opens no Start menu, menu bar or input-language switch. So does a Hyper hotkey in
+    /// Kuality-only mode while the user physically holds a modifier.
     fn fire(&mut self, key: Key, index: u16, normal: bool) -> Verdict {
         let pass_through = self
             .bindings
@@ -404,7 +414,7 @@ impl Engine {
         } else {
             self.consumed.set(key, true);
             let mut v = Verdict::swallow();
-            if normal {
+            if normal || (self.injected.is_empty() && !self.physical.is_empty()) {
                 v.synth.push(Synth::Down(Key::MASK));
                 v.synth.push(Synth::Up(Key::MASK));
             }
@@ -417,13 +427,18 @@ impl Engine {
     /// Events for a `send_hotkey` chord, in one batch, so the target sees exactly the chord:
     /// - Hyper held: its injected modifiers are released first (mask key, physically held ones
     ///   kept) and pressed again after the chord.
-    /// - Otherwise the modifiers the user still holds (e.g. the Ctrl of a `ctrl+t` hotkey) are
+    /// - Otherwise (or Hyper held in Kuality-only mode) the modifiers the user still holds (e.g. the Ctrl of a `ctrl+t` hotkey) are
     ///   released first (mask key) and pressed again after the chord, followed by the mask key
     ///   when Win or Alt is among them (their later release must not open Start / the menu bar).
     pub fn hotkey(&mut self, chord: &Chord) -> SynthBuf {
         let held = self.held;
-        let user_mods = if held { ModSet::EMPTY } else { self.physical };
-        let mut out = if held {
+        let injecting = held && self.modifiers.injects();
+        let user_mods = if injecting {
+            ModSet::EMPTY
+        } else {
+            self.physical
+        };
+        let mut out = if injecting {
             self.release_injected()
         } else {
             SynthBuf::new()
@@ -445,7 +460,7 @@ impl Engine {
         for &m in chord.mods().iter().rev() {
             out.push(Synth::Up(m));
         }
-        if held {
+        if injecting {
             for k in self.hyper_press_order() {
                 out.push(Synth::Down(k));
                 self.injected.set(k, true);
@@ -479,10 +494,10 @@ impl Engine {
     /// table and the Hyperkey settings.
     pub fn reset(&mut self) {
         let bindings = self.bindings.take();
-        let (enabled, include_win) = (self.hyper_enabled, self.include_win);
+        let (enabled, modifiers) = (self.hyper_enabled, self.modifiers);
         *self = Self::new();
         self.bindings = bindings;
-        self.set_hyper(enabled, include_win);
+        self.set_hyper(enabled, modifiers);
     }
 
     /// Whether Kuality currently holds injected modifiers down.
@@ -502,9 +517,13 @@ impl Engine {
         out
     }
 
-    /// Mask key, then `Up` for each injected modifier not physically held.
+    /// Mask key, then `Up` for each injected modifier not physically held. Empty when nothing
+    /// is injected (Kuality-only mode).
     fn release_injected(&mut self) -> SynthBuf {
         let mut out = SynthBuf::new();
+        if self.injected.is_empty() {
+            return out;
+        }
         out.push(Synth::Down(Key::MASK));
         out.push(Synth::Up(Key::MASK));
         for k in HYPER_RELEASE_ORDER {
@@ -807,7 +826,7 @@ mod tests {
     #[test]
     fn hyperkey_off_leaves_capslock_alone_but_normal_hotkeys_work() {
         let mut e = engine_of(&[("ctrl+t", false), ("hyper+1", false)]);
-        e.set_hyper(false, true);
+        e.set_hyper(false, HyperModifiers::CtrlShiftAltWin);
         assert_eq!(e.on_event(down(Key::CAPSLOCK), false), Verdict::default());
         assert_eq!(e.on_event(down(K1), false), Verdict::default());
         assert_eq!(e.on_event(up(K1), false), Verdict::default());
@@ -838,7 +857,7 @@ mod tests {
     #[test]
     fn hyper_without_win() {
         let mut e = engine_of(&[]);
-        e.set_hyper(true, false);
+        e.set_hyper(true, HyperModifiers::CtrlShiftAlt);
         let v = e.on_event(down(Key::CAPSLOCK), false);
         assert_eq!(
             v.synth.as_slice(),
@@ -869,6 +888,77 @@ mod tests {
         // reset keeps the setting.
         e.reset();
         assert_eq!(e.on_event(down(Key::CAPSLOCK), false).synth.len(), 3);
+    }
+
+    #[test]
+    fn kuality_only_injects_nothing() {
+        let mut e = engine_of(&[("hyper+1", false), ("hyper+k", true)]);
+        e.set_hyper(true, HyperModifiers::None);
+        // CapsLock toggled on is still turned off; no modifier goes down.
+        let v = e.on_event(down(Key::CAPSLOCK), true);
+        assert!(v.swallow);
+        assert_eq!(v.synth.as_slice(), [Down(Key::CAPSLOCK), Up(Key::CAPSLOCK)]);
+        assert!(e.is_held() && !e.modifiers_down());
+        // Bound key fires and is swallowed, without a mask key.
+        let v = e.on_event(down(K1), false);
+        assert_eq!(v.action, Some(0));
+        assert!(v.swallow && v.synth.is_empty());
+        assert!(e.on_event(up(K1), false).swallow);
+        // Pass-through binding: the plain key reaches the app.
+        let v = e.on_event(down(KK), false);
+        assert_eq!(v.action, Some(1));
+        assert!(!v.swallow);
+        e.on_event(up(KK), false);
+        // Unbound keys (Office letters included) are dropped until their up.
+        for key in [T, E] {
+            assert!(e.on_event(down(key), false).swallow);
+            assert!(e.on_event(down(key), false).swallow, "repeat");
+            assert!(e.on_event(up(key), false).swallow);
+        }
+        // Release injects nothing.
+        let v = e.on_event(up(Key::CAPSLOCK), false);
+        assert!(v.swallow && v.synth.is_empty());
+        assert!(!e.is_held());
+    }
+
+    #[test]
+    fn kuality_only_lets_physical_modifiers_through() {
+        let mut e = engine_of(&[("hyper+1", false)]);
+        e.set_hyper(true, HyperModifiers::None);
+        e.on_event(down(Key::LALT), false);
+        e.on_event(down(Key::CAPSLOCK), false);
+        // A swallowed Hyper hotkey with Alt physically held gets the mask key.
+        let v = e.on_event(down(K1), false);
+        assert_eq!(v.action, Some(0));
+        assert_eq!(v.synth.as_slice(), [Down(Key::MASK), Up(Key::MASK)]);
+        e.on_event(up(K1), false);
+        // Its up must reach the system: nothing was injected to release it later.
+        assert!(!e.on_event(up(Key::LALT), false).swallow);
+        assert!(e.on_event(up(Key::CAPSLOCK), false).synth.is_empty());
+    }
+
+    #[test]
+    fn kuality_only_send_hotkey_sends_just_the_chord() {
+        let mut e = engine_of(&[]);
+        e.set_hyper(true, HyperModifiers::None);
+        e.on_event(down(Key::CAPSLOCK), false);
+        let chord = kuality_protocol::parse_chord("ctrl+alt+f24").unwrap();
+        let f24 = chord.key.unwrap();
+        assert_eq!(
+            e.hotkey(&chord).as_slice(),
+            [
+                Down(Key::LCTRL),
+                Down(Key::LALT),
+                Down(f24),
+                Up(f24),
+                Up(Key::LALT),
+                Up(Key::LCTRL),
+            ]
+        );
+        assert!(!e.modifiers_down());
+        // reset keeps the setting.
+        e.reset();
+        assert!(e.on_event(down(Key::CAPSLOCK), false).synth.is_empty());
     }
 
     #[test]

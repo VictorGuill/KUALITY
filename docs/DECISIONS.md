@@ -36,7 +36,7 @@ Do not contradict these without asking the user. To change one, edit the line an
 ## Hyperkey (2026-10-31)
 
 - **Mechanism** — low-level keyboard hook (`WH_KEYBOARD_LL`) + `SendInput`; injected events tagged via `dwExtraInfo` to avoid loops.
-- **Mapping** — while CapsLock is held, Ctrl+Shift+Alt+Win are held; on release they are released. Nothing else. *(2026-11-01: Win is optional, see "Include Windows key".)*
+- **Mapping** — while CapsLock is held, Ctrl+Shift+Alt+Win are held; on release they are released. Nothing else. *(2026-11-01: Win is optional, see "Include Windows key"; then injecting is optional and off by default, see "Kuality-only Hyper".)*
 - **Real CapsLock** — not available while Hyperkey is enabled (double-tap to toggle real CapsLock may come later).
 - **Tap actions** — none (no single/double tap behaviors for now).
 - **Start menu / menu bar side effects** — send a neutral "mask" key before releasing Win/Alt (AutoHotkey technique) so Start menu / app menu bar don't open.
@@ -116,6 +116,7 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **Reserved hotkeys** — Ctrl+Alt+Del (any extra modifiers) and Win+L cannot be bound: the parser rejects them (binding skipped with a warning) and the recorder refuses them with a message. Elevated windows in front hide keys from the hook (documented limitation; "Run elevated" later).
 - **Duplicates** — compared as parsed triggers (`"1"` = `"hyper+1"`, `alt+ctrl+k` = `ctrl+alt+k`): first enabled one wins, later ones logged and flagged in the UI.
 - **Include Windows key** *(2026-11-01, user request)* — `hyperkey.include_win`, default **true** (Ctrl+Shift+Alt+Win as before); off → Hyper is Ctrl+Shift+Alt. The Office-key registry override and the Office-letter dropping exist only because of Ctrl+Shift+Alt+Win: both apply only while `include_win` is on (Explorer never sees the Office combination otherwise). The settings app warns that on some layouts (e.g. Spanish) Ctrl+Alt acts as AltGr.
+- **Kuality-only Hyper** *(2026-11-01, user request)* — `hyperkey.modifiers`: `"none"` (**default**) \| `"ctrl_shift_alt"` \| `"ctrl_shift_alt_win"`, replacing `include_win` (old key kept in `extra`, ignored). `none`: Hyper injects nothing; it only triggers Kuality shortcuts, unbound keys are dropped while CapsLock is held, physical modifiers pass, and apps are reached through `send_hotkey` (e.g. Hyper+K → Ctrl+Alt+F24). Rejected: making Hyper an F13–F24 key, since apps only treat Ctrl/Shift/Alt/Win as modifiers. Office-key override and Office-letter dropping only for `ctrl_shift_alt_win`.
 - **Hook without Hyperkey** — the keyboard hook is installed when Hyperkey is enabled or any active binding is a normal hotkey (and not paused); with Hyperkey off, CapsLock and modifiers pass untouched.
 
 ## Taskbar overlay implementation (2026-10-31, Phase 3)

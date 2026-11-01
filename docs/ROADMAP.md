@@ -42,6 +42,7 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 - [x] Actions: `launch`, `send_hotkey`, `open_url`
 - [x] Bound shortcuts are consumed (not forwarded); unbound ones pass through as the Hyper combo
 - [x] *(2026-11-01, follow-up)* Any hotkey (`ctrl+t`, `win+e`…) besides Hyper+key, "Also send to the app" option, Hyperkey "Include Windows key" option; settings table with a Name column and the ✦ Hyper keycap
+- [x] *(2026-11-01, follow-up)* Kuality-only Hyper (default): `hyperkey.modifiers` = none / Ctrl+Shift+Alt / Ctrl+Shift+Alt+Win, "Apps see" control in settings
 
 **Done when:** Hyper+1 opens the configured program and Hyper+2 sends the configured hotkey.
 

@@ -83,8 +83,9 @@ pub enum LogLevel {
 #[serde(default)]
 pub struct Hyperkey {
     pub enabled: bool,
-    /// Hyper is Ctrl+Shift+Alt+**Win** (default) or Ctrl+Shift+Alt.
-    pub include_win: bool,
+    /// Modifiers apps see while Hyper is held (default: none, Hyper only triggers Kuality
+    /// shortcuts). The old `include_win` key is kept in `extra` and ignored.
+    pub modifiers: HyperModifiers,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -93,9 +94,32 @@ impl Default for Hyperkey {
     fn default() -> Self {
         Self {
             enabled: false,
-            include_win: true,
+            modifiers: HyperModifiers::None,
             extra: Extra::new(),
         }
+    }
+}
+
+/// What holding Hyper presses for other apps, snake_case in JSON.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HyperModifiers {
+    /// Nothing: Hyper only exists for Kuality's own shortcuts.
+    #[default]
+    None,
+    CtrlShiftAlt,
+    CtrlShiftAltWin,
+}
+
+impl HyperModifiers {
+    /// Hyper injects modifiers at all.
+    pub fn injects(self) -> bool {
+        self != Self::None
+    }
+
+    /// Hyper presses Win (the Office key combination).
+    pub fn includes_win(self) -> bool {
+        self == Self::CtrlShiftAltWin
     }
 }
 
@@ -610,7 +634,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.version, CONFIG_VERSION);
         assert!(!c.hyperkey.enabled);
-        assert!(c.hyperkey.include_win, "include_win defaults to true");
+        assert_eq!(c.hyperkey.modifiers, HyperModifiers::None);
         assert!(!c.shortcuts.enabled);
         assert!(c.shortcuts.bindings.is_empty());
         assert!(!c.widgets.enabled);
@@ -629,7 +653,11 @@ mod tests {
         )
         .unwrap();
         assert!(c.hyperkey.enabled);
-        assert!(c.hyperkey.include_win, "missing include_win is true");
+        assert_eq!(
+            c.hyperkey.modifiers,
+            HyperModifiers::None,
+            "missing modifiers is none"
+        );
         assert_eq!(c.general.log_level, LogLevel::Debug);
         assert!(c.widgets.hide_on_fullscreen);
         assert_eq!(c.version, CONFIG_VERSION);
@@ -654,7 +682,7 @@ mod tests {
         // Known fields missing from the input are written with their defaults.
         let mut expected = input;
         expected["general"]["log_level"] = json!("info");
-        expected["hyperkey"]["include_win"] = json!(true);
+        expected["hyperkey"]["modifiers"] = json!("none");
         assert_eq!(back, expected);
     }
 
@@ -663,7 +691,7 @@ mod tests {
         let expected = json!({
             "version": 1,
             "general": { "log_level": "info" },
-            "hyperkey": { "enabled": false, "include_win": true },
+            "hyperkey": { "enabled": false, "modifiers": "none" },
             "shortcuts": { "enabled": false, "bindings": [] },
             "widgets": { "enabled": false, "hide_on_fullscreen": true, "items": [] }
         });
@@ -734,20 +762,34 @@ mod tests {
     }
 
     #[test]
-    fn include_win_and_pass_through_are_read() {
+    fn modifiers_and_pass_through_are_read() {
         let c = Config::from_json(
-            br#"{ "hyperkey": { "enabled": true, "include_win": false },
+            br#"{ "hyperkey": { "enabled": true, "modifiers": "ctrl_shift_alt" },
                   "shortcuts": { "bindings": [
                     { "key": "ctrl+t", "pass_through": true,
                       "action": { "type": "open_url", "url": "https://a.b" } } ] } }"#,
         )
         .unwrap();
-        assert!(!c.hyperkey.include_win);
+        assert_eq!(c.hyperkey.modifiers, HyperModifiers::CtrlShiftAlt);
         let BindingEntry::Valid(b) = &c.shortcuts.bindings[0] else {
             panic!("invalid");
         };
         assert!(b.pass_through);
         assert_eq!(b.key, "ctrl+t");
+    }
+
+    #[test]
+    fn old_include_win_is_kept_but_ignored() {
+        let c = Config::from_json(br#"{ "hyperkey": { "enabled": true, "include_win": true } }"#)
+            .unwrap();
+        assert_eq!(c.hyperkey.modifiers, HyperModifiers::None);
+        assert_eq!(c.hyperkey.extra["include_win"], json!(true));
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["hyperkey"]["modifiers"], json!("none"));
+        assert!(
+            Config::from_json(br#"{ "hyperkey": { "modifiers": "win" } }"#).is_err(),
+            "unknown modifiers value is an error"
+        );
     }
 
     #[test]

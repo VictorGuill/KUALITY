@@ -7,7 +7,7 @@ Lightweight Windows 11 utility: taskbar widgets, CapsLock Hyperkey and keyboard 
 ## Features (planned)
 
 - **Taskbar widgets** — media player, custom text and more, placed anywhere on top of the taskbar.
-- **Hyperkey** — hold CapsLock to get Ctrl+Shift+Alt+Win.
+- **Hyperkey** — hold CapsLock for a layer of Kuality shortcuts that apps never see (optionally, apps can get Ctrl+Shift+Alt(+Win)).
 - **Shortcuts** — Hyper+key or any hotkey (Ctrl+Alt+K, Win+E…) to launch apps, send hotkeys, open URLs.
 - **Settings app** — clean window to configure everything.
 - **Extensions** — add widgets and actions written in any language.

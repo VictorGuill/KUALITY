@@ -57,7 +57,7 @@ A `Lenient::Invalid` value read from the file is shown as its raw JSON text with
 | Field | Control | Notes |
 |---|---|---|
 | `hyperkey.enabled` | Switch "Enable Hyperkey" | Text: "Hold CapsLock to press Ctrl+Shift+Alt+Win." plus the legend `[CapsLock] → [✦] = [Ctrl] [Shift] [Alt] [Win]` and notes (CapsLock does not toggle caps; the Office key shortcut is disabled while Win is included; Tray → Pause; Hyper shortcuts need it, Ctrl/Alt/Shift/Win shortcuts do not). |
-| `hyperkey.include_win` | Switch "Include Windows key" (default on) | "On: Hyper is Ctrl+Shift+Alt+Win. Off: Ctrl+Shift+Alt." + hint "On some keyboard layouts (e.g. Spanish) Ctrl+Alt acts as AltGr, so some keys may type a character when Win is excluded." The legend drops `[Win]` when off. |
+| `hyperkey.modifiers` | Segmented "Apps see": Nothing (default) / Ctrl+Shift+Alt / Ctrl+Shift+Alt+Win *(2026-11-01, replaces the "Include Windows key" switch)* | "What other apps receive while CapsLock is held." + a hint per value (Nothing: apps never see Hyper, unbound keys do nothing, use "Send hotkey" to reach an app; Ctrl+Shift+Alt: the AltGr warning). The legend shows only `[CapsLock] → [✦]` for Nothing. |
 
 The Hyper glyph everywhere is a white four-pointed star ✦ on a dark keycap (`#3A3A3C`, same in light and dark mode), drawn from an SVG path (`controls::HYPER_STAR_SVG`, `Icon::data`), not a font glyph.
 

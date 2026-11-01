@@ -5,7 +5,7 @@
 A small, fast, always-running Windows 11 utility that lets the user:
 
 1. **Show anything on the taskbar**: widgets placed exactly where the user wants (absolute px or %), always visible on top of the taskbar. Examples: currently playing media (with cover and controls), custom text, fan speeds, notifications.
-2. **Use CapsLock as a Hyperkey**: holding CapsLock sends Ctrl+Shift+Alt+Win, giving a whole new layer of shortcuts that never collide with other apps.
+2. **Use CapsLock as a Hyperkey**: holding CapsLock gives a whole new layer of shortcuts that never collide with other apps.
 3. **Bind actions to shortcuts**: Hyper+key launches a program, sends another hotkey, opens a URL… (more complex actions later).
 4. **Configure everything in a clean settings window** (Raycast-like: centered window, tabs on the left).
 5. **Extend it**: installable extensions (any language) that add widgets and actions, e.g. "read fan speeds", "control program X".

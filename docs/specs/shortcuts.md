@@ -253,7 +253,7 @@ Automated:
 - `compile`: duplicates (first wins), disabled entries, invalid key/url/path skipped, `enabled:false` → empty.
 - Arg quoting: `a b` → `"a b"`, `x"y` → `"x\"y"`, `C:\dir\` with space → trailing backslash doubled, empty arg → `""`.
 - Engine: held + bound key down → swallow + action; repeat → swallow no action; up → swallow; up after Caps released → swallow; unbound key → pass; not held → pass; `reset` clears consumed.
-- Any hotkey: `parse_trigger` (bare key = Hyper, `hyper+…`, normal chords, sides, order, rejects, reserved); compile (normal triggers, duplicates across spellings, pass-through); engine (exact modifier match + mask, pass-through fires once and passes, normal hotkeys ignored while Hyper held, Hyperkey off leaves CapsLock alone, stale modifiers dropped / synced, `send_hotkey` from a normal chord releases and restores the user's modifiers); config defaults (`pass_through` false, `include_win` true, old files load).
+- Any hotkey: `parse_trigger` (bare key = Hyper, `hyper+…`, normal chords, sides, order, rejects, reserved); compile (normal triggers, duplicates across spellings, pass-through); engine (exact modifier match + mask, pass-through fires once and passes, normal hotkeys ignored while Hyper held, Hyperkey off leaves CapsLock alone, stale modifiers dropped / synced, `send_hotkey` from a normal chord releases and restores the user's modifiers); config defaults (`pass_through` false, `hyperkey.modifiers` none, old files load).
 
 Manual (Hyperkey + shortcuts enabled, the example config above):
 1. Hyper+1 → Notepad opens (and takes focus). Holding Hyper+1 for 3 s opens exactly one Notepad.
