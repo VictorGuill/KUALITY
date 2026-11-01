@@ -300,11 +300,40 @@ pub fn set(want: Entry) -> Result<(), Error> {
 const EXIT_FAILED: u8 = 1;
 const EXIT_CANCELLED: u8 = 2;
 
-/// `kuality.exe --startup <off|normal|elevated>` (installer, uninstaller, scripts).
+/// What `--startup <arg>` asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Request {
+    Set(Entry),
+    /// `on`: start at logon, keeping an elevated entry if there is one (the installer's
+    /// "Start with Windows" must not undo "Run as administrator" chosen later in the window).
+    On,
+}
+
+fn parse_request(arg: &str) -> Option<Request> {
+    match arg {
+        "on" => Some(Request::On),
+        other => Entry::parse(other).map(Request::Set),
+    }
+}
+
+/// The entry `request` resolves to when `current` is in effect.
+fn resolve(request: Request, current: Entry) -> Entry {
+    match request {
+        Request::Set(e) => e,
+        Request::On if current == Entry::Elevated => Entry::Elevated,
+        Request::On => Entry::Normal,
+    }
+}
+
+/// `kuality.exe --startup <off|on|normal|elevated>` (installer, uninstaller, scripts).
 pub fn cli(args: &[String]) -> ExitCode {
-    let Some(want) = args.first().and_then(|a| Entry::parse(a)) else {
-        eprintln!("usage: kuality.exe --startup <off|normal|elevated>");
+    let Some(request) = args.first().and_then(|a| parse_request(a)) else {
+        eprintln!("usage: kuality.exe --startup <off|on|normal|elevated>");
         return ExitCode::from(EXIT_FAILED);
+    };
+    let want = match request {
+        Request::Set(e) => e,
+        Request::On => resolve(request, read().entry()),
     };
     match set(want) {
         Ok(()) => ExitCode::SUCCESS,
@@ -515,6 +544,20 @@ mod tests {
             "D:(A;;FA;;;BA)(A;;FA;;;SY)(A;;GR;;;S-1-5-21-9)"
         );
         assert_eq!(task_name("S-1-5-21-9"), "Start elevated S-1-5-21-9");
+    }
+
+    #[test]
+    fn on_keeps_elevated() {
+        assert_eq!(parse_request("on"), Some(Request::On));
+        assert_eq!(parse_request("off"), Some(Request::Set(Entry::Off)));
+        assert_eq!(parse_request("yes"), None);
+        assert_eq!(resolve(Request::On, Entry::Off), Entry::Normal);
+        assert_eq!(resolve(Request::On, Entry::Normal), Entry::Normal);
+        assert_eq!(resolve(Request::On, Entry::Elevated), Entry::Elevated);
+        assert_eq!(
+            resolve(Request::Set(Entry::Normal), Entry::Elevated),
+            Entry::Normal
+        );
     }
 
     #[test]

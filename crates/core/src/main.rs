@@ -45,7 +45,7 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         // Own process: the core never loads GPUI, and the window's memory is freed when it closes.
         Some(SETTINGS_ARG) => kuality_settings::run(&args[1..]),
-        // Start at logon: `--startup <off|normal|elevated>` (installer, scripts) and the
+        // Start at logon: `--startup <off|on|normal|elevated>` (installer, scripts) and the
         // elevated helper it starts through UAC.
         Some(STARTUP_ARG) => kuality_settings::startup::cli(&args[1..]),
         Some(STARTUP_TASK_ARG) => kuality_settings::startup::task_cli(&args[1..]),
