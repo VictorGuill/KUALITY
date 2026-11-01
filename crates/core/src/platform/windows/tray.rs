@@ -21,17 +21,19 @@ use ::windows::Win32::System::Console::{
     SetConsoleCtrlHandler,
 };
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use ::windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
 use ::windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
     NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use ::windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, IDI_APPLICATION,
-    LoadIconW, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MSGFLT_ALLOW, PostMessageW,
-    RegisterClassExW, RegisterWindowMessageW, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CLOSE,
-    WM_CONTEXTMENU, WM_ENDSESSION, WM_NULL, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_OVERLAPPED,
+    DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, HICON,
+    IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTCOLOR, LoadIconW, LoadImageW, MF_CHECKED, MF_SEPARATOR,
+    MF_STRING, MF_UNCHECKED, MSG, MSGFLT_ALLOW, PostMessageW, RegisterClassExW,
+    RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON, SetForegroundWindow, TPM_BOTTOMALIGN,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP,
+    WM_CLOSE, WM_CONTEXTMENU, WM_ENDSESSION, WM_NULL, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_OVERLAPPED,
 };
 use ::windows::core::{BOOL, PCWSTR, w};
 
@@ -43,6 +45,8 @@ const WM_APP_WAKE: u32 = WM_APP + 2;
 /// Another thread asks for the Settings action (widget context menu).
 const WM_APP_OPEN_SETTINGS: u32 = WM_APP + 3;
 const TRAY_ICON_ID: u32 = 1;
+/// The app icon embedded by `build.rs` (`assets/icon/kuality.ico`).
+const APP_ICON_RESOURCE: u16 = 1;
 /// `NIN_SELECT | NINF_KEY`: icon activated with the keyboard (missing from the `windows` crate).
 const NIN_KEYSELECT: u32 = NIN_SELECT | 1;
 const MENU_SETTINGS: usize = 1;
@@ -61,6 +65,8 @@ thread_local! {
     static EXIT: Cell<bool> = const { Cell::new(false) };
     static TOOLTIP: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
     static PAUSED: Cell<bool> = const { Cell::new(false) };
+    /// The icon given to the shell, owned by us (destroyed when replaced).
+    static ICON: Cell<Option<HICON>> = const { Cell::new(None) };
 }
 
 /// Updates the Pause check mark and the tooltip (`<tooltip> (paused)`). Call on the tray thread.
@@ -238,8 +244,7 @@ fn add_icon(hwnd: HWND) -> io::Result<()> {
     let mut nid = icon_data(hwnd);
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     nid.uCallbackMessage = WM_APP_TRAY;
-    // SAFETY: loads a shared stock icon; it must not be destroyed.
-    nid.hIcon = unsafe { LoadIconW(None, IDI_APPLICATION) }.map_err(io::Error::other)?;
+    nid.hIcon = tray_icon()?;
     fill_tooltip(&mut nid);
     nid.Anonymous.uVersion = NOTIFYICON_VERSION_4;
     // SAFETY: `nid` is fully initialized and alive for the calls.
@@ -250,6 +255,45 @@ fn add_icon(hwnd: HWND) -> io::Result<()> {
         let _ = Shell_NotifyIconW(NIM_SETVERSION, &nid);
     }
     Ok(())
+}
+
+/// The app icon at the small-icon size of the system DPI (what the notification area shows),
+/// loaded again each time the icon is (re-)added; the stock application icon if that fails.
+fn tray_icon() -> io::Result<HICON> {
+    // SAFETY: plain calls; the module handle of our own exe is valid; resource 1 is passed as
+    // an integer resource id (MAKEINTRESOURCE).
+    let loaded = unsafe {
+        let dpi = GetDpiForSystem();
+        let (cx, cy) = (
+            GetSystemMetricsForDpi(SM_CXSMICON, dpi),
+            GetSystemMetricsForDpi(SM_CYSMICON, dpi),
+        );
+        GetModuleHandleW(None).and_then(|module| {
+            LoadImageW(
+                Some(module.into()),
+                PCWSTR(APP_ICON_RESOURCE as usize as *const u16),
+                IMAGE_ICON,
+                cx,
+                cy,
+                LR_DEFAULTCOLOR,
+            )
+        })
+    };
+    match loaded {
+        Ok(h) => {
+            let icon = HICON(h.0);
+            if let Some(old) = ICON.replace(Some(icon)) {
+                // SAFETY: `old` was loaded by us (not shared) and the shell keeps its own copy.
+                let _ = unsafe { DestroyIcon(old) };
+            }
+            Ok(icon)
+        }
+        Err(e) => {
+            log::warn!("cannot load the app icon ({e}); using the stock icon");
+            // SAFETY: loads a shared stock icon; it must not be destroyed.
+            unsafe { LoadIconW(None, IDI_APPLICATION) }.map_err(io::Error::other)
+        }
+    }
 }
 
 fn remove_icon(hwnd: HWND) {

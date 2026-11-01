@@ -21,6 +21,10 @@ serde_json.workspace = true
 [dev-dependencies]
 kuality-protocol = { workspace = true, features = ["test-util"] }
 
+[build-dependencies]
+# Compiles the icon + version resource (already in the tree: GPUI uses it for its manifest).
+embed-resource = "3"
+
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [

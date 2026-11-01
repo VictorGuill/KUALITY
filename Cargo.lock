@@ -3287,6 +3287,7 @@ dependencies = [
 name = "kuality"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "kuality-protocol",
  "kuality-settings",
  "log",
