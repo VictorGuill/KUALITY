@@ -3307,6 +3307,7 @@ version = "0.1.0"
 dependencies = [
  "futures-channel",
  "gpui-kit",
+ "image",
  "kuality-protocol",
  "log",
  "serde_json",

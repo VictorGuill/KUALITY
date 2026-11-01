@@ -19,6 +19,8 @@ serde_json.workspace = true
 gpui-kit = "=0.8.1"
 # Oneshot channel for the key recorder (already in GPUI's dependency tree).
 futures-channel = "0.3"
+# Pixel buffers for app icons (GPUI's own image type wraps them; already in its dependency tree).
+image = { version = "0.25", default-features = false }
 
 [dev-dependencies]
 kuality-protocol = { workspace = true, features = ["test-util"] }
@@ -27,11 +29,13 @@ kuality-protocol = { workspace = true, features = ["test-util"] }
 workspace = true
 features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ]
 

@@ -10,17 +10,28 @@ use std::time::{Duration, Instant};
 
 use futures_channel::oneshot;
 use kuality_protocol::Key;
+use windows::Win32::Foundation::SIZE;
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, WPARAM,
 };
-use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
+    DeleteObject, GetDIBits, GetObjectW, HBITMAP,
+};
+use windows::Win32::System::Com::{
+    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoTaskMemFree, CoUninitialize,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcessId, GetCurrentThreadId, INFINITE, OpenMutexW, OpenProcess,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     QueryFullProcessImageNameW, SYNCHRONIZATION_SYNCHRONIZE, WaitForSingleObject,
 };
-use windows::Win32::UI::Shell::{FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+use windows::Win32::UI::Shell::{
+    BHID_EnumItems, FOLDERID_AppsFolder, FOLDERID_RoamingAppData, IEnumShellItems, IShellItem,
+    IShellItemImageFactory, KF_FLAG_DEFAULT, SHGetKnownFolderItem, SHGetKnownFolderPath, SIGDN,
+    SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, SIIGBF_ICONONLY,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, EnumWindows, FindWindowW, GetForegroundWindow, GetMessageW,
     GetWindowTextW, GetWindowThreadProcessId, HC_ACTION, IsIconic, IsWindowVisible,
@@ -28,8 +39,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow, TranslateMessage,
     UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
 };
-use windows::core::{BOOL, PCWSTR, PWSTR, w};
+use windows::core::{BOOL, Interface as _, PCWSTR, PWSTR, w};
 
+use crate::apps::{AppInfo, ICON_PX, RawIcon, straight_alpha};
 use crate::recorder::{Mode, Outcome, Recording};
 
 /// Window title, also used by a second instance to find the first one.
@@ -451,4 +463,149 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     }
     // SAFETY: forwards the event to the next hook with the arguments we received.
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Installed apps: the shell's Applications folder (`shell:AppsFolder`), read on the
+// `kuality-settings-apps` thread (see `apps.rs`).
+
+/// Reads every app of the Applications folder and sends the list (in the order `order` gives),
+/// then their icons in the same order. Runs on the calling thread; COM is initialised for it.
+pub fn read_apps_folder(
+    order: impl FnOnce(&[AppInfo]) -> Vec<usize>,
+    list_tx: oneshot::Sender<Result<Vec<AppInfo>, String>>,
+    icons_tx: oneshot::Sender<Vec<Option<RawIcon>>>,
+) {
+    // SAFETY: plain call; balanced by CoUninitialize below when it succeeded.
+    let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+    {
+        let items = match apps_folder_items() {
+            Ok(items) => items,
+            Err(e) => {
+                log::warn!("cannot list the installed apps: {e}");
+                let _ = list_tx.send(Err(e.message()));
+                return;
+            }
+        };
+        let infos: Vec<AppInfo> = items.iter().map(|(info, _)| info.clone()).collect();
+        let order = order(&infos);
+        log::debug!("{} apps in the Applications folder", order.len());
+        let list = order.iter().map(|&i| infos[i].clone()).collect();
+        if list_tx.send(Ok(list)).is_err() {
+            return;
+        }
+        let icons = order.iter().map(|&i| item_icon(&items[i].1)).collect();
+        let _ = icons_tx.send(icons);
+    }
+    if com.is_ok() {
+        // SAFETY: matches the successful CoInitializeEx above; every COM object of this thread
+        // was dropped at the end of the block.
+        unsafe { CoUninitialize() };
+    }
+}
+
+fn apps_folder_items() -> windows::core::Result<Vec<(AppInfo, IShellItem)>> {
+    // SAFETY: plain COM calls on interfaces we own; out values are checked.
+    unsafe {
+        let folder: IShellItem = SHGetKnownFolderItem(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, None)?;
+        let items: IEnumShellItems = folder.BindToHandler(None, &BHID_EnumItems)?;
+        let mut out = Vec::new();
+        loop {
+            let mut batch: [Option<IShellItem>; 32] = Default::default();
+            let mut fetched = 0u32;
+            items.Next(&mut batch, Some(&mut fetched))?;
+            if fetched == 0 {
+                break;
+            }
+            for item in batch.into_iter().take(fetched as usize).flatten() {
+                let name = display_name(&item, SIGDN_NORMALDISPLAY);
+                let id = display_name(&item, SIGDN_PARENTRELATIVEPARSING);
+                if let (Some(name), Some(id)) = (name, id) {
+                    out.push((AppInfo { name, id }, item));
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+fn display_name(item: &IShellItem, kind: SIGDN) -> Option<String> {
+    // SAFETY: on success the PWSTR is a NUL-terminated string we own and free once.
+    unsafe {
+        let p = item.GetDisplayName(kind).ok()?;
+        let s = p.to_string().ok();
+        CoTaskMemFree(Some(p.as_ptr() as *const _));
+        s
+    }
+}
+
+/// The item's icon at [`ICON_PX`], straight-alpha BGRA.
+fn item_icon(item: &IShellItem) -> Option<RawIcon> {
+    // SAFETY: COM calls on a live item; the returned bitmap is owned here and deleted once.
+    unsafe {
+        let factory: IShellItemImageFactory = item.cast().ok()?;
+        let size = SIZE {
+            cx: ICON_PX as i32,
+            cy: ICON_PX as i32,
+        };
+        let hbm = factory.GetImage(size, SIIGBF_ICONONLY).ok()?;
+        let icon = bitmap_pixels(hbm);
+        let _ = DeleteObject(hbm.into());
+        icon
+    }
+}
+
+fn bitmap_pixels(hbm: HBITMAP) -> Option<RawIcon> {
+    let mut bm = BITMAP::default();
+    // SAFETY: `bm` is a valid out buffer of the size given.
+    let n = unsafe {
+        GetObjectW(
+            hbm.into(),
+            std::mem::size_of::<BITMAP>() as i32,
+            Some(&mut bm as *mut BITMAP as *mut core::ffi::c_void),
+        )
+    };
+    let (w, h) = (bm.bmWidth, bm.bmHeight.abs());
+    if n == 0 || w <= 0 || h <= 0 || w > 256 || h > 256 {
+        return None;
+    }
+    let mut info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            // Negative: rows top-down.
+            biHeight: -h,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bgra = vec![0u8; (w * h * 4) as usize];
+    // SAFETY: `bgra` holds exactly `h` rows of `w` 32-bit pixels as described by `info`; the
+    // memory DC is created and deleted here.
+    let lines = unsafe {
+        let dc = CreateCompatibleDC(None);
+        let lines = GetDIBits(
+            dc,
+            hbm,
+            0,
+            h as u32,
+            Some(bgra.as_mut_ptr() as *mut core::ffi::c_void),
+            &mut info,
+            DIB_RGB_COLORS,
+        );
+        let _ = DeleteDC(dc);
+        lines
+    };
+    if lines != h {
+        return None;
+    }
+    straight_alpha(&mut bgra);
+    Some(RawIcon {
+        width: w as u32,
+        height: h as u32,
+        bgra,
+    })
 }

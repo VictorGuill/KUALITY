@@ -4,6 +4,7 @@
 mod controls;
 mod general;
 mod hyperkey;
+mod picker;
 mod shortcuts;
 mod widgets;
 
@@ -16,6 +17,7 @@ use gpui_kit::component::{ActiveTheme as _, IconName, Theme, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use crate::apps::{self, Catalog};
 use crate::model::{DiskState, Document, PollOutcome, SaveOutcome};
 use crate::platform::{self, KeyRecorder, WINDOW_TITLE};
 use crate::recorder::{Mode, Outcome};
@@ -36,10 +38,31 @@ pub enum CoreLink {
     Missing(String),
 }
 
+// Lucide icons beyond gpui-component's default set, embedded one by one.
+gpui_kit::assets::icon_assets!(ExtraIcons, [AppWindow, Keyboard]);
+
+/// gpui-component's default icons plus [`ExtraIcons`].
+struct AppAssets;
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        match ExtraIcons.load(path)? {
+            Some(bytes) => Ok(Some(bytes)),
+            None => gpui_kit::assets::Assets.load(path),
+        }
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let mut all = ExtraIcons.list(path)?;
+        all.extend(gpui_kit::assets::Assets.list(path)?);
+        Ok(all)
+    }
+}
+
 /// Opens the window and runs until it is closed or the core exits.
 pub fn run(config_path: PathBuf, core: CoreLink) {
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
             let options = WindowOptions {
@@ -109,9 +132,9 @@ enum Status {
 /// What a running recording fills in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecordTarget {
-    /// The open binding's trigger key.
-    Trigger,
-    /// The open binding's `send_hotkey` chord.
+    /// The hotkey of a shortcut row.
+    Trigger(shortcuts::Row),
+    /// The chord of the picker.s "Send keys" page.
     Chord,
 }
 
@@ -130,7 +153,10 @@ pub struct SettingsWindow {
     core_missing: Option<String>,
     save_task: Option<Task<()>>,
     pub(crate) widget_editor: Option<widgets::WidgetEditor>,
-    pub(crate) binding_editor: Option<shortcuts::BindingEditor>,
+    pub(crate) draft: Option<shortcuts::Draft>,
+    pub(crate) picker: Option<shortcuts::OpenPicker>,
+    /// Installed apps for the action picker (loaded in the background).
+    pub(crate) catalog: Entity<Catalog>,
     recording: Option<ActiveRecording>,
     _poll: Task<()>,
     _subs: Vec<Subscription>,
@@ -172,7 +198,34 @@ impl SettingsWindow {
                 }
             }
         });
+        let catalog = cx.new(|_| Catalog::default());
+        match apps::start_loading() {
+            Ok(loading) => {
+                let catalog = catalog.clone();
+                cx.spawn(async move |_, cx| {
+                    let Ok(list) = loading.list.await else {
+                        return;
+                    };
+                    catalog.update(cx, |c, cx| {
+                        c.take_list(list);
+                        cx.notify();
+                    });
+                    if let Ok(icons) = loading.icons.await {
+                        catalog.update(cx, |c, cx| {
+                            c.take_icons(icons);
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+            Err(e) => {
+                log::error!("cannot start listing the installed apps: {e}");
+                catalog.update(cx, |c, _| c.take_list(Err(e.to_string())));
+            }
+        }
         let subs = vec![
+            cx.observe(&catalog, |_, _, cx| cx.notify()),
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     this.check_disk(window, cx);
@@ -199,7 +252,9 @@ impl SettingsWindow {
             core_missing,
             save_task: None,
             widget_editor: None,
-            binding_editor: None,
+            draft: None,
+            picker: None,
+            catalog,
             recording: None,
             _poll: poll,
             _subs: subs,
@@ -276,7 +331,7 @@ impl SettingsWindow {
                 self.save_task = None;
                 self.cancel_recording(cx);
                 self.widget_editor = None;
-                self.binding_editor = None;
+                self.picker = None;
                 cx.notify();
             }
             PollOutcome::Removed => {
@@ -293,10 +348,8 @@ impl SettingsWindow {
             self.widget_editor = None;
             self.open_widget(index, window, cx);
         }
-        if let Some(index) = self.binding_editor.as_ref().and_then(|e| e.index) {
-            self.binding_editor = None;
-            self.open_binding(index, window, cx);
-        }
+        // Row indices may have changed.
+        self.close_picker(cx);
     }
 
     fn select_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
@@ -321,7 +374,7 @@ impl SettingsWindow {
     ) {
         self.cancel_recording(cx);
         let mode = match target {
-            RecordTarget::Trigger => Mode::Trigger,
+            RecordTarget::Trigger(_) => Mode::Trigger,
             RecordTarget::Chord => Mode::Chord,
         };
         let (recorder, rx) = match KeyRecorder::start(mode) {
@@ -349,12 +402,25 @@ impl SettingsWindow {
             _recorder: recorder,
             _tasks: vec![result, timeout],
         });
+        if target == RecordTarget::Chord {
+            self.picker_recording(true, cx);
+        }
         cx.notify();
     }
 
     pub(crate) fn cancel_recording(&mut self, cx: &mut Context<Self>) {
-        if self.recording.take().is_some() {
+        if let Some(rec) = self.recording.take() {
+            if rec.target == RecordTarget::Chord {
+                self.picker_recording(false, cx);
+            }
             cx.notify();
+        }
+    }
+
+    /// Tells the open picker whether its "Send keys" recorder runs.
+    fn picker_recording(&self, on: bool, cx: &mut Context<Self>) {
+        if let Some(p) = self.picker.as_ref() {
+            p.view.update(cx, |p, cx| p.set_recording(on, cx));
         }
     }
 
@@ -362,8 +428,12 @@ impl SettingsWindow {
         let Some(rec) = self.recording.take() else {
             return;
         };
-        if let Outcome::Recorded(text) = outcome {
-            self.apply_recorded(rec.target, text, window, cx);
+        match outcome {
+            Outcome::Recorded(text) => self.apply_recorded(rec.target, text, window, cx),
+            Outcome::Cancelled if rec.target == RecordTarget::Chord => {
+                self.picker_recording(false, cx)
+            }
+            Outcome::Cancelled => {}
         }
         cx.notify();
     }
@@ -442,8 +512,7 @@ impl SettingsWindow {
     }
 
     fn render_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let errors = self.widget_editor.as_ref().map_or(0, |e| e.error_count())
-            + self.binding_editor.as_ref().map_or(0, |e| e.error_count());
+        let errors = self.widget_editor.as_ref().map_or(0, |e| e.error_count());
         let theme = cx.theme();
         let (text, color) = if self.read_only() {
             (

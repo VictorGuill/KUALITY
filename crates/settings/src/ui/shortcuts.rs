@@ -1,162 +1,66 @@
-//! Shortcuts tab: the switch, the binding list and the inline binding editor (with drafts).
-
-use std::collections::BTreeMap;
+//! Shortcuts tab: the switch and a two-column table, one row per shortcut:
+//! `[enabled] | Hotkey (recorder button) | Action (button opening the picker) | delete`.
+//! A new shortcut is a draft row until it has both a hotkey and an action.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::searchable_list::SearchableVec;
-use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::popover::Popover;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _,
+    WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use kuality_protocol::{
-    Action, Binding, BindingEntry, Key, LaunchAction, LaunchArgs, OpenUrlAction, SendHotkeyAction,
-    parse_key,
-};
+use kuality_protocol::{Action, Binding, BindingEntry, parse_key};
 
 use super::controls::{
-    self, add_button, divider, field, hint_text, list_header, section, setting_row, warning_text,
+    add_button, divider, hint_text, list_header, section, setting_row, warning_text,
 };
+use super::picker::{ActionPicker, PickerEvent, kind_icon};
 use super::{RecordTarget, SettingsWindow};
-use crate::model;
+use crate::model::{self, ActionKind, Choice};
 
+/// A row of the table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ActionType {
-    Launch,
-    SendHotkey,
-    OpenUrl,
+pub(crate) enum Row {
+    /// `shortcuts.bindings[i]`.
+    Saved(usize),
+    /// The new shortcut, not written yet.
+    Draft,
 }
 
-const ACTION_TYPES: [(ActionType, &str); 3] = [
-    (ActionType::Launch, "Launch"),
-    (ActionType::SendHotkey, "Send hotkey"),
-    (ActionType::OpenUrl, "Open URL"),
-];
-
-fn type_of(a: &Action) -> ActionType {
-    match a {
-        Action::Launch(_) => ActionType::Launch,
-        Action::SendHotkey(_) => ActionType::SendHotkey,
-        Action::OpenUrl(_) => ActionType::OpenUrl,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum BField {
-    Key,
-    Path,
-    Keys,
-    Url,
-}
-
-type KeySelect = SelectState<SearchableVec<SharedString>>;
-
-/// Inputs of the expanded binding. `index == None` is a draft not written yet.
-pub(crate) struct BindingEditor {
-    pub index: Option<usize>,
-    /// The binding as edited: for a saved binding, a copy of the file's entry; for a draft, the
-    /// values entered so far.
-    work: Binding,
-    action_type: ActionType,
-    key_text: String,
-    args_edited: bool,
-    name: Entity<InputState>,
-    key_select: Entity<KeySelect>,
-    path: Entity<InputState>,
-    args: Entity<InputState>,
-    cwd: Entity<InputState>,
-    keys: Entity<InputState>,
-    url: Entity<InputState>,
-    errors: BTreeMap<BField, String>,
-    _subs: Vec<Subscription>,
-}
-
-impl BindingEditor {
-    pub fn error_count(&self) -> usize {
-        if self.index.is_none() {
-            // A draft is not saved until complete; the row says so.
-            return 0;
+impl Row {
+    fn id(self) -> usize {
+        match self {
+            Row::Saved(i) => i,
+            Row::Draft => usize::MAX,
         }
-        self.errors.len()
     }
-}
 
-/// Canonical names of every key that can be a trigger, in a friendly order.
-fn trigger_key_names() -> Vec<SharedString> {
-    let mut keys: Vec<(u8, String)> = (1u16..=0xFE)
-        .map(Key)
-        .filter(|k| k.is_trigger())
-        .filter_map(|k| {
-            let name = k.name();
-            if name.starts_with("vk:") {
-                return None;
-            }
-            let group = match k.0 {
-                0x41..=0x5A => 0,
-                0x30..=0x39 => 1,
-                0x70..=0x87 => 2,
-                0x60..=0x6F => 4,
-                _ => 3,
-            };
-            Some((group, name))
-        })
-        .collect();
-    keys.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| natural(&a.1).cmp(&natural(&b.1)))
-    });
-    keys.into_iter().map(|(_, n)| n.into()).collect()
-}
-
-/// Sort key that puts `f2` before `f10`.
-fn natural(s: &str) -> (String, u32) {
-    let digits: String = s.chars().rev().take_while(char::is_ascii_digit).collect();
-    let n = digits
-        .chars()
-        .rev()
-        .collect::<String>()
-        .parse()
-        .unwrap_or(0);
-    (
-        s.trim_end_matches(|c: char| c.is_ascii_digit()).to_string(),
-        n,
-    )
-}
-
-fn empty_binding() -> Binding {
-    Binding {
-        key: String::new(),
-        name: String::new(),
-        enabled: true,
-        action: Action::Launch(LaunchAction::default()),
-        extra: Default::default(),
-    }
-}
-
-fn action_summary(a: &Action) -> String {
-    match a {
-        Action::Launch(l) => {
-            let name = std::path::Path::new(l.path.trim())
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| l.path.clone());
-            format!("Launch {name}")
+    fn name(self) -> String {
+        match self {
+            Row::Saved(i) => format!("shortcut {i}"),
+            Row::Draft => "new shortcut".into(),
         }
-        Action::SendHotkey(h) => format!("Send {}", h.keys),
-        Action::OpenUrl(u) => format!("Open {}", u.url),
     }
 }
 
-fn key_label(key: &str) -> String {
-    match parse_key(key) {
-        Ok(k) => k.name().to_uppercase(),
-        Err(_) if key.trim().is_empty() => "No key".into(),
-        Err(_) => key.to_string(),
-    }
+/// The new shortcut: written once both parts are set; dropped on close.
+#[derive(Debug, Default)]
+pub(crate) struct Draft {
+    key: String,
+    action: Option<Action>,
 }
+
+/// The action picker, open for one row.
+pub(crate) struct OpenPicker {
+    pub row: Row,
+    pub view: Entity<ActionPicker>,
+    _sub: Subscription,
+}
+
+const HOTKEY_WIDTH: f32 = 168.;
+const SWITCH_WIDTH: f32 = 40.;
 
 impl SettingsWindow {
     fn binding(&self, index: usize) -> Option<&Binding> {
@@ -166,285 +70,92 @@ impl SettingsWindow {
         }
     }
 
-    pub(super) fn open_binding(
-        &mut self,
-        index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(b) = self.binding(index).cloned() else {
-            self.binding_editor = None;
-            return;
-        };
-        self.binding_editor = Some(self.make_binding_editor(Some(index), b, window, cx));
-        self.binding_changed(window, cx, false);
-    }
-
-    fn add_binding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_recording(cx);
-        self.binding_editor = Some(self.make_binding_editor(None, empty_binding(), window, cx));
-        self.binding_changed(window, cx, false);
-    }
-
-    fn make_binding_editor(
-        &mut self,
-        index: Option<usize>,
-        b: Binding,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> BindingEditor {
-        let line = |value: String,
-                    placeholder: &'static str,
-                    window: &mut Window,
-                    cx: &mut Context<Self>| {
-            cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder(placeholder)
-                    .default_value(value)
-            })
-        };
-        let (path, args, cwd, keys, url) = match &b.action {
-            Action::Launch(l) => (
-                l.path.clone(),
-                model::args_display(&l.args),
-                l.cwd.clone().unwrap_or_default(),
-                String::new(),
-                String::new(),
-            ),
-            Action::SendHotkey(h) => (
-                String::new(),
-                String::new(),
-                String::new(),
-                h.keys.clone(),
-                String::new(),
-            ),
-            Action::OpenUrl(u) => (
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                u.url.clone(),
-            ),
-        };
-        let name = line(b.name.clone(), "Optional label", window, cx);
-        let path = line(path, r"C:\Windows\notepad.exe", window, cx);
-        let args = line(args, "Arguments (one command line)", window, cx);
-        let cwd = line(cwd, "Default: the program's folder", window, cx);
-        let keys = line(keys, "ctrl+shift+esc", window, cx);
-        let url = line(url, "https://github.com", window, cx);
-        let selected = parse_key(&b.key).ok().map(|k| SharedString::from(k.name()));
-        let names = trigger_key_names();
-        let selected_ix = selected
-            .as_ref()
-            .and_then(|s| names.iter().position(|n| n == s))
-            .map(gpui_kit::component::IndexPath::new);
-        let key_select = cx.new(|cx| {
-            SelectState::new(SearchableVec::new(names), selected_ix, window, cx).searchable(true)
-        });
-        let mut subs = vec![cx.subscribe_in(
-            &key_select,
-            window,
-            |this, _, ev: &SelectEvent<SearchableVec<SharedString>>, window, cx| {
-                let SelectEvent::Confirm(Some(v)) = ev else {
-                    return;
-                };
-                if let Some(ed) = this.binding_editor.as_mut() {
-                    ed.key_text = v.to_string();
-                }
-                this.binding_changed(window, cx, true);
-            },
-        )];
-        for (input, is_args) in [
-            (&name, false),
-            (&path, false),
-            (&args, true),
-            (&cwd, false),
-            (&keys, false),
-            (&url, false),
-        ] {
-            subs.push(cx.subscribe_in(
-                input,
-                window,
-                move |this, _, ev: &InputEvent, window, cx| {
-                    if matches!(ev, InputEvent::Change) {
-                        if is_args && let Some(ed) = this.binding_editor.as_mut() {
-                            ed.args_edited = true;
-                        }
-                        this.binding_changed(window, cx, true);
-                    }
-                },
-            ));
-        }
-        BindingEditor {
-            index,
-            action_type: type_of(&b.action),
-            key_text: b.key.clone(),
-            work: b,
-            args_edited: false,
-            name,
-            key_select,
-            path,
-            args,
-            cwd,
-            keys,
-            url,
-            errors: BTreeMap::new(),
-            _subs: subs,
+    fn row_action(&self, row: Row) -> Option<&Action> {
+        match row {
+            Row::Saved(i) => self.binding(i).map(|b| &b.action),
+            Row::Draft => self.draft.as_ref().and_then(|d| d.action.as_ref()),
         }
     }
 
-    /// Validates the editor and writes every valid part (or the whole draft once complete).
-    /// `edited` = triggered by the user (else only the messages are refreshed).
-    fn binding_changed(&mut self, _window: &mut Window, cx: &mut Context<Self>, edited: bool) {
+    fn open_picker(&mut self, row: Row, window: &mut Window, cx: &mut Context<Self>) {
         if self.read_only() {
             return;
         }
-        let Some(ed) = self.binding_editor.as_mut() else {
-            return;
-        };
-        let read = |e: &Entity<InputState>| e.read(cx).value().to_string();
-        let name = read(&ed.name);
-        let path = read(&ed.path).trim().to_string();
-        let args = read(&ed.args);
-        let cwd = read(&ed.cwd).trim().to_string();
-        let keys = read(&ed.keys).trim().to_string();
-        let url = read(&ed.url).trim().to_string();
+        self.cancel_recording(cx);
+        let action = self.row_action(row).cloned();
+        let catalog = self.catalog.clone();
+        let view = cx.new(|cx| ActionPicker::new(action.as_ref(), catalog, window, cx));
+        view.update(cx, |p, cx| p.focus_page(window, cx));
+        let sub = cx.subscribe_in(
+            &view,
+            window,
+            move |this, _, ev: &PickerEvent, window, cx| {
+                this.on_picker_event(row, ev.clone(), window, cx)
+            },
+        );
+        self.picker = Some(OpenPicker {
+            row,
+            view,
+            _sub: sub,
+        });
+        cx.notify();
+    }
 
-        let mut errors = BTreeMap::new();
-        let key_ok = match model::validate_trigger(&ed.key_text) {
-            Ok(_) => true,
-            Err(e) => {
-                errors.insert(BField::Key, e.to_string());
-                false
+    pub(super) fn close_picker(&mut self, cx: &mut Context<Self>) {
+        if self.picker.take().is_some() {
+            if self.recording_target() == Some(RecordTarget::Chord) {
+                self.cancel_recording(cx);
             }
-        };
-        let required = match ed.action_type {
-            ActionType::Launch => {
-                model::validate_path(&path).map_err(|e| (BField::Path, e.to_string()))
-            }
-            ActionType::SendHotkey => model::validate_chord(&keys).map_err(|e| (BField::Keys, e)),
-            ActionType::OpenUrl => {
-                model::validate_url(&url).map_err(|e| (BField::Url, e.to_string()))
-            }
-        };
-        let action_ok = match required {
-            Ok(()) => true,
-            Err((f, e)) => {
-                errors.insert(f, e);
-                false
-            }
-        };
-
-        // Build the new action, keeping unknown fields and untouched values of the same type.
-        let old = ed.work.action.clone();
-        let same_type = type_of(&old) == ed.action_type;
-        let action = match ed.action_type {
-            ActionType::Launch => {
-                let prev = match &old {
-                    Action::Launch(l) => l.clone(),
-                    _ => LaunchAction::default(),
-                };
-                Action::Launch(LaunchAction {
-                    path: if action_ok || !same_type {
-                        path
-                    } else {
-                        prev.path.clone()
-                    },
-                    args: if ed.args_edited {
-                        if args.trim().is_empty() {
-                            LaunchArgs::List(Vec::new())
-                        } else {
-                            LaunchArgs::Raw(args)
-                        }
-                    } else {
-                        prev.args.clone()
-                    },
-                    cwd: (!cwd.is_empty()).then_some(cwd),
-                    extra: prev.extra,
-                })
-            }
-            ActionType::SendHotkey => {
-                let prev = match &old {
-                    Action::SendHotkey(h) => h.clone(),
-                    _ => SendHotkeyAction::default(),
-                };
-                Action::SendHotkey(SendHotkeyAction {
-                    keys: if action_ok || !same_type {
-                        keys
-                    } else {
-                        prev.keys.clone()
-                    },
-                    extra: prev.extra,
-                })
-            }
-            ActionType::OpenUrl => {
-                let prev = match &old {
-                    Action::OpenUrl(u) => u.clone(),
-                    _ => OpenUrlAction::default(),
-                };
-                Action::OpenUrl(OpenUrlAction {
-                    url: if action_ok || !same_type {
-                        url
-                    } else {
-                        prev.url.clone()
-                    },
-                    extra: prev.extra,
-                })
-            }
-        };
-        ed.errors = errors;
-        ed.work.name = name;
-        if key_ok {
-            ed.work.key = ed.key_text.clone();
-        }
-        // A new action type replaces the old one only once it is complete.
-        if same_type || action_ok {
-            ed.work.action = action;
-        }
-
-        let mut save = false;
-        match ed.index {
-            Some(i) => {
-                if edited
-                    && let Some(BindingEntry::Valid(b)) =
-                        self.doc.config.shortcuts.bindings.get_mut(i)
-                {
-                    let mut work = ed.work.clone();
-                    work.enabled = b.enabled;
-                    if *b != work {
-                        *b = work;
-                        save = true;
-                    }
-                }
-            }
-            None => {
-                if edited && key_ok && action_ok {
-                    let mut b = ed.work.clone();
-                    b.key = ed.key_text.clone();
-                    self.doc
-                        .config
-                        .shortcuts
-                        .bindings
-                        .push(BindingEntry::Valid(b));
-                    ed.index = Some(self.doc.config.shortcuts.bindings.len() - 1);
-                    save = true;
-                }
-            }
-        }
-        if save {
-            self.changed(cx);
-        } else {
             cx.notify();
         }
     }
 
-    fn set_action_type(&mut self, t: ActionType, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ed) = self.binding_editor.as_mut() {
-            ed.action_type = t;
+    fn on_picker_event(
+        &mut self,
+        row: Row,
+        ev: PickerEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match ev {
+            PickerEvent::Picked(choice) => {
+                self.close_picker(cx);
+                self.apply_choice(row, choice, cx);
+            }
+            PickerEvent::RecordKeys => {
+                self.start_recording(RecordTarget::Chord, window, cx);
+            }
+            PickerEvent::StopRecording => self.cancel_recording(cx),
+            PickerEvent::Close => self.close_picker(cx),
         }
-        self.binding_changed(window, cx, true);
     }
 
+    fn apply_choice(&mut self, row: Row, choice: Choice, cx: &mut Context<Self>) {
+        if self.read_only() {
+            return;
+        }
+        match row {
+            Row::Saved(i) => {
+                if let Some(BindingEntry::Valid(b)) = self.doc.config.shortcuts.bindings.get_mut(i)
+                {
+                    let action = model::build_action(choice, Some(&b.action));
+                    if b.action != action {
+                        b.action = action;
+                        self.changed(cx);
+                    }
+                }
+            }
+            Row::Draft => {
+                if let Some(d) = self.draft.as_mut() {
+                    d.action = Some(model::build_action(choice, None));
+                }
+                self.commit_draft(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// A recording finished with `text` (a key name or a chord).
     pub(super) fn apply_recorded(
         &mut self,
         target: RecordTarget,
@@ -452,53 +163,92 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(ed) = self.binding_editor.as_mut() else {
-            return;
-        };
         match target {
-            RecordTarget::Trigger => {
-                ed.key_text = text.clone();
-                let value = SharedString::from(text);
-                ed.key_select
-                    .update(cx, |s, cx| s.set_selected_value(&value, window, cx));
-            }
             RecordTarget::Chord => {
-                ed.keys.update(cx, |s, cx| s.set_value(text, window, cx));
+                if let Some(p) = self.picker.as_ref() {
+                    p.view.update(cx, |p, cx| p.set_keys(text, window, cx));
+                }
+            }
+            RecordTarget::Trigger(row) => {
+                if self.read_only() || model::validate_trigger(&text).is_err() {
+                    return;
+                }
+                match row {
+                    Row::Saved(i) => {
+                        if let Some(BindingEntry::Valid(b)) =
+                            self.doc.config.shortcuts.bindings.get_mut(i)
+                            && b.key != text
+                        {
+                            b.key = text;
+                            self.changed(cx);
+                        }
+                    }
+                    Row::Draft => {
+                        let Some(d) = self.draft.as_mut() else {
+                            return;
+                        };
+                        d.key = text;
+                        let needs_action = d.action.is_none();
+                        self.commit_draft(cx);
+                        // Raycast-style: hotkey first, then straight to "what does it do".
+                        if needs_action && self.draft.is_some() {
+                            self.open_picker(Row::Draft, window, cx);
+                        }
+                    }
+                }
             }
         }
-        self.binding_changed(window, cx, true);
+        cx.notify();
     }
 
-    fn browse(&mut self, folder: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions {
-            files: !folder,
-            directories: folder,
-            multiple: false,
-            prompt: None,
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
-                return;
-            };
-            let Some(path) = paths.into_iter().next() else {
-                return;
-            };
-            let _ = this.update_in(cx, |this, window, cx| {
-                let Some(ed) = this.binding_editor.as_ref() else {
-                    return;
-                };
-                let input = if folder {
-                    ed.cwd.clone()
-                } else {
-                    ed.path.clone()
-                };
-                input.update(cx, |s, cx| {
-                    s.set_value(path.display().to_string(), window, cx)
-                });
-                this.binding_changed(window, cx, true);
-            });
-        })
-        .detach();
+    /// Writes the draft once it has a valid hotkey and an action.
+    fn commit_draft(&mut self, cx: &mut Context<Self>) {
+        let ready = self
+            .draft
+            .as_ref()
+            .is_some_and(|d| d.action.is_some() && model::validate_trigger(&d.key).is_ok());
+        if !ready || self.read_only() {
+            return;
+        }
+        let Some(Draft {
+            key,
+            action: Some(action),
+        }) = self.draft.take()
+        else {
+            return;
+        };
+        self.doc
+            .config
+            .shortcuts
+            .bindings
+            .push(BindingEntry::Valid(Binding {
+                key,
+                name: String::new(),
+                enabled: true,
+                action,
+                extra: Default::default(),
+            }));
+        if self.picker.as_ref().is_some_and(|p| p.row == Row::Draft) {
+            self.close_picker(cx);
+        }
+        self.changed(cx);
+    }
+
+    fn add_binding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_picker(cx);
+        self.draft = Some(Draft::default());
+        self.start_recording(RecordTarget::Trigger(Row::Draft), window, cx);
+    }
+
+    fn discard_draft(&mut self, cx: &mut Context<Self>) {
+        if self.recording_target() == Some(RecordTarget::Trigger(Row::Draft)) {
+            self.cancel_recording(cx);
+        }
+        if self.picker.as_ref().is_some_and(|p| p.row == Row::Draft) {
+            self.close_picker(cx);
+        }
+        self.draft = None;
+        cx.notify();
     }
 
     fn confirm_delete_binding(
@@ -527,36 +277,31 @@ impl SettingsWindow {
             return;
         }
         self.cancel_recording(cx);
-        self.doc.config.shortcuts.bindings.remove(index);
-        match self.binding_editor.as_ref().and_then(|e| e.index) {
-            Some(i) if i == index => self.binding_editor = None,
-            Some(i) if i > index => {
-                if let Some(ed) = self.binding_editor.as_mut() {
-                    ed.index = Some(i - 1);
-                }
-            }
-            _ => {}
+        if self
+            .picker
+            .as_ref()
+            .is_some_and(|p| matches!(p.row, Row::Saved(_)))
+        {
+            self.close_picker(cx);
         }
+        self.doc.config.shortcuts.bindings.remove(index);
         self.changed(cx);
     }
 
-    fn toggle_binding_editor(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_recording(cx);
-        if self
-            .binding_editor
-            .as_ref()
-            .is_some_and(|e| e.index == Some(index))
-        {
-            self.binding_editor = None;
-            cx.notify();
+    fn toggle_hotkey_recording(&mut self, row: Row, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recording_target() == Some(RecordTarget::Trigger(row)) {
+            self.cancel_recording(cx);
         } else {
-            self.open_binding(index, window, cx);
+            self.close_picker(cx);
+            self.start_recording(RecordTarget::Trigger(row), window, cx);
         }
     }
 
+    // --- Rendering -----------------------------------------------------------------------
+
     pub(super) fn render_shortcuts(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let ro = self.read_only();
@@ -572,20 +317,12 @@ impl SettingsWindow {
             }));
         let count = s.bindings.len();
         let section_off = !s.enabled;
-        let mut rows: Vec<AnyElement> = (0..count)
-            .map(|i| self.render_binding_row(i, window, cx))
-            .collect();
-        if self
-            .binding_editor
-            .as_ref()
-            .is_some_and(|e| e.index.is_none())
-        {
-            rows.push(self.render_draft_row(window, cx));
+        let mut rows: Vec<Row> = (0..count).map(Row::Saved).collect();
+        if self.draft.is_some() {
+            rows.push(Row::Draft);
         }
-        let has_draft = self
-            .binding_editor
-            .as_ref()
-            .is_some_and(|e| e.index.is_none());
+        let has_draft = self.draft.is_some();
+        let table = (!rows.is_empty()).then(|| self.render_table(&rows, cx));
         v_flex()
             .gap_4()
             .child(section(cx).child(setting_row(
@@ -634,372 +371,308 @@ impl SettingsWindow {
                 ))
             })
             .when(rows.is_empty(), |this| {
-                this.child(hint_text("No shortcuts yet. Add one to start.", cx))
+                this.child(hint_text(
+                    "No shortcuts yet. Add one: press its hotkey, then choose what it does.",
+                    cx,
+                ))
             })
-            .children(rows)
+            .children(table)
     }
 
-    fn key_badge(&self, key: &str, cx: &App) -> Div {
-        h_flex()
-            .gap_1()
-            .items_center()
-            .text_xs()
-            .child(
-                div()
-                    .px_1p5()
-                    .py_0p5()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().secondary)
-                    .child("Hyper"),
-            )
-            .child("+")
-            .child(
-                div()
-                    .px_1p5()
-                    .py_0p5()
-                    .min_w(px(24.))
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().secondary)
-                    .child(key_label(key)),
-            )
-    }
-
-    fn render_binding_row(
-        &mut self,
-        index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let ro = self.read_only();
-        let open = self
-            .binding_editor
-            .as_ref()
-            .is_some_and(|e| e.index == Some(index));
-        let delete = Button::new(("delete-binding", index))
-            .small()
-            .ghost()
-            .icon(IconName::Delete)
-            .tooltip("Delete")
-            .accessibility_label(format!("Delete shortcut {index}"))
-            .disabled(ro)
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.confirm_delete_binding(index, window, cx)
-            }));
-        let b = match &self.doc.config.shortcuts.bindings[index] {
-            BindingEntry::Invalid(_) => {
-                return section(cx)
-                    .child(
-                        h_flex()
-                            .px_4()
-                            .py_2()
-                            .justify_between()
-                            .child(hint_text("Unrecognized shortcut (kept as is)", cx))
-                            .child(delete),
-                    )
-                    .into_any_element();
-            }
-            BindingEntry::Valid(b) => b.clone(),
-        };
-        let duplicate = model::duplicate_trigger(&self.doc.config.shortcuts.bindings, index);
-        let toggle = Switch::new(("binding-enabled", index))
-            .accessibility_label(format!("Shortcut {index} enabled"))
-            .checked(b.enabled)
-            .disabled(ro)
-            .on_click(cx.listener(move |this, on: &bool, _, cx| {
-                if let Some(BindingEntry::Valid(b)) =
-                    this.doc.config.shortcuts.bindings.get_mut(index)
-                {
-                    b.enabled = *on;
-                    if let Some(ed) = this.binding_editor.as_mut()
-                        && ed.index == Some(index)
-                    {
-                        ed.work.enabled = *on;
-                    }
-                    this.changed(cx);
-                }
-            }));
-        let summary = action_summary(&b.action);
-        let title = if b.name.trim().is_empty() {
-            summary.clone()
-        } else {
-            b.name.clone()
-        };
-        let expand = Button::new(("expand-binding", index))
-            .small()
-            .ghost()
-            .icon(if open {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronRight
-            })
-            .disabled(ro)
-            .accessibility_label(format!("Edit shortcut {index}"))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.toggle_binding_editor(index, window, cx)
-            }));
+    fn render_table(&mut self, rows: &[Row], cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
         let header = h_flex()
             .px_4()
             .py_2()
             .gap_3()
-            .items_center()
-            .child(toggle)
-            .child(self.key_badge(&b.key, cx))
+            .text_xs()
+            .font_medium()
+            .text_color(muted)
+            .child(div().w(px(SWITCH_WIDTH)).flex_none())
+            .child(div().w(px(HOTKEY_WIDTH)).flex_none().child("Hotkey"))
+            .child(div().flex_1().child("Action"));
+        let mut table = section(cx).child(header);
+        for &row in rows {
+            table = table.child(divider(cx)).child(self.render_row(row, cx));
+        }
+        table.into_any_element()
+    }
+
+    fn render_row(&mut self, row: Row, cx: &mut Context<Self>) -> AnyElement {
+        let ro = self.read_only();
+        let id = row.id();
+        let delete = Button::new(("delete-binding", id))
+            .small()
+            .ghost()
+            .icon(IconName::Delete)
+            .tooltip(if row == Row::Draft {
+                "Discard"
+            } else {
+                "Delete"
+            })
+            .accessibility_label(format!("Delete {}", row.name()))
+            .disabled(ro)
+            .on_click(cx.listener(move |this, _, window, cx| match row {
+                Row::Saved(i) => this.confirm_delete_binding(i, window, cx),
+                Row::Draft => this.discard_draft(cx),
+            }));
+        let (key, enabled, action) = match row {
+            Row::Saved(i) => match &self.doc.config.shortcuts.bindings[i] {
+                BindingEntry::Invalid(_) => {
+                    return h_flex()
+                        .px_4()
+                        .py_2()
+                        .gap_3()
+                        .items_center()
+                        .child(div().w(px(SWITCH_WIDTH)).flex_none())
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(hint_text("Unrecognized shortcut (kept as is)", cx)),
+                        )
+                        .child(delete)
+                        .into_any_element();
+                }
+                BindingEntry::Valid(b) => (b.key.clone(), b.enabled, Some(b.action.clone())),
+            },
+            Row::Draft => {
+                let d = self.draft.as_ref();
+                (
+                    d.map(|d| d.key.clone()).unwrap_or_default(),
+                    true,
+                    d.and_then(|d| d.action.clone()),
+                )
+            }
+        };
+        let toggle = match row {
+            Row::Saved(i) => Switch::new(("binding-enabled", i))
+                .accessibility_label(format!("Shortcut {i} enabled"))
+                .checked(enabled)
+                .disabled(ro)
+                .on_click(cx.listener(move |this, on: &bool, _, cx| {
+                    if let Some(BindingEntry::Valid(b)) =
+                        this.doc.config.shortcuts.bindings.get_mut(i)
+                    {
+                        b.enabled = *on;
+                        this.changed(cx);
+                    }
+                }))
+                .into_any_element(),
+            Row::Draft => div().into_any_element(),
+        };
+        let recording = self.recording_target() == Some(RecordTarget::Trigger(row));
+        let messages = self.row_messages(row, &key, action.as_ref(), recording, cx);
+        h_flex()
+            .px_4()
+            .py_2()
+            .gap_3()
+            .items_start()
+            .child(
+                div()
+                    .w(px(SWITCH_WIDTH))
+                    .h(px(32.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .child(toggle),
+            )
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_sm().truncate().child(title))
-                    .child(hint_text(summary, cx)),
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .items_center()
+                            .when(!enabled, |this| this.opacity(0.55))
+                            .child(self.hotkey_button(row, &key, recording, cx))
+                            .child(self.action_button(row, action.as_ref(), cx)),
+                    )
+                    .children(messages),
             )
-            .when(duplicate && b.enabled, |this| {
-                this.child(warning_text("Same key", cx))
-            })
-            .child(expand)
-            .child(delete);
-        let mut card = section(cx).child(header);
-        if open {
-            card = card
-                .child(divider(cx))
-                .child(self.render_binding_editor(window, cx));
-        }
-        card.into_any_element()
+            .child(div().h(px(32.)).flex().items_center().child(delete))
+            .into_any_element()
     }
 
-    fn render_draft_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let key = self
-            .binding_editor
+    /// Hints and warnings shown under a row.
+    fn row_messages(
+        &self,
+        row: Row,
+        key: &str,
+        action: Option<&Action>,
+        recording: bool,
+        cx: &App,
+    ) -> Vec<Div> {
+        let mut out = Vec::new();
+        if recording {
+            out.push(hint_text(
+                "Hold CapsLock and press a key (or just press the key). Esc cancels.",
+                cx,
+            ));
+        } else if !key.trim().is_empty() && model::validate_trigger(key).is_err() {
+            out.push(warning_text(
+                "This key is not valid in config.json: record a new hotkey.",
+                cx,
+            ));
+        } else {
+            let duplicate = match row {
+                Row::Saved(i) => model::duplicate_trigger(&self.doc.config.shortcuts.bindings, i),
+                Row::Draft => parse_key(key).is_ok_and(|k| {
+                    self.doc
+                        .config
+                        .shortcuts
+                        .bindings
+                        .iter()
+                        .any(|e| matches!(e, BindingEntry::Valid(b) if b.enabled && parse_key(&b.key) == Ok(k)))
+                }),
+            };
+            let enabled = match row {
+                Row::Saved(i) => self.binding(i).is_some_and(|b| b.enabled),
+                Row::Draft => true,
+            };
+            if duplicate && enabled {
+                out.push(warning_text(
+                    "Another shortcut uses this hotkey: only the first one works.",
+                    cx,
+                ));
+            }
+        }
+        if let Some(problem) = action.and_then(action_problem) {
+            out.push(warning_text(problem, cx));
+        }
+        if row == Row::Draft {
+            out.push(hint_text(
+                "New shortcut: it is saved once it has a hotkey and an action.",
+                cx,
+            ));
+        }
+        out
+    }
+
+    fn hotkey_button(
+        &self,
+        row: Row,
+        key: &str,
+        recording: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let label = if recording {
+            "Press Hyper + a key…".to_string()
+        } else {
+            model::hotkey_label(key).unwrap_or_else(|| "Record hotkey".into())
+        };
+        div().w(px(HOTKEY_WIDTH)).flex_none().child(
+            Button::new(("hotkey", row.id()))
+                .w_full()
+                .when(recording, |b| b.primary())
+                .when(!recording, |b| b.outline())
+                .icon(Icon::new(gpui_kit::assets::IconName::Keyboard))
+                .label(label)
+                .accessibility_label(format!("Hotkey of {}", row.name()))
+                .disabled(self.read_only())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.toggle_hotkey_recording(row, window, cx)
+                })),
+        )
+    }
+
+    fn action_button(
+        &self,
+        row: Row,
+        action: Option<&Action>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let catalog = self.catalog.read(cx);
+        let muted = cx.theme().muted_foreground;
+        let (label, icon) = match action {
+            None => ("Choose an action".to_string(), None),
+            Some(a) => {
+                let label = model::action_label(a, |id| catalog.name_of(id));
+                let kind = model::kind_of(a);
+                let app_icon = match a {
+                    Action::Launch(l) => model::app_id(&l.path)
+                        .and_then(|id| catalog.find(id))
+                        .and_then(|i| catalog.icon(i)),
+                    _ => None,
+                };
+                let icon = match app_icon {
+                    Some(image) => img(image).size(px(18.)).flex_none().into_any_element(),
+                    None => Icon::new(kind_icon(kind))
+                        .size(px(18.))
+                        .text_color(muted)
+                        .into_any_element(),
+                };
+                (label, Some(icon))
+            }
+        };
+        let is_empty = action.is_none();
+        let open = self.picker.as_ref().is_some_and(|p| p.row == row);
+        let view = self
+            .picker
             .as_ref()
-            .map(|e| e.key_text.clone())
-            .unwrap_or_default();
-        section(cx)
-            .border_color(cx.theme().primary)
+            .filter(|p| p.row == row)
+            .map(|p| p.view.clone());
+        let trigger = Button::new(("action", row.id()))
+            .outline()
+            .w_full()
+            .disabled(self.read_only())
+            .accessibility_label(format!("Action of {}", row.name()))
             .child(
                 h_flex()
-                    .px_4()
-                    .py_2()
-                    .gap_3()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
                     .items_center()
-                    .child(self.key_badge(&key, cx))
+                    .children(icon)
                     .child(
-                        v_flex()
+                        div()
                             .flex_1()
-                            .child(div().text_sm().child("New shortcut"))
-                            .child(hint_text(
-                                "Not saved yet: it is written once the key and the action are set.",
-                                cx,
-                            )),
+                            .min_w_0()
+                            .truncate()
+                            .text_left()
+                            .when(is_empty, |d| d.text_color(muted))
+                            .child(label),
                     )
-                    .child(
-                        Button::new("discard-draft")
-                            .small()
-                            .ghost()
-                            .label("Discard")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.cancel_recording(cx);
-                                this.binding_editor = None;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(divider(cx))
-            .child(self.render_binding_editor(window, cx))
-            .into_any_element()
-    }
-
-    fn render_binding_editor(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(ed) = self.binding_editor.as_ref() else {
-            return div().into_any_element();
-        };
-        let ro = self.read_only();
-        let recording = self.recording_target();
-        let errors = ed.errors.clone();
-        let err = |f: BField| errors.get(&f).map(String::as_str);
-        let duplicate = ed
-            .index
-            .is_some_and(|i| model::duplicate_trigger(&self.doc.config.shortcuts.bindings, i));
-        let (name, key_select, path, args, cwd, keys, url) = (
-            ed.name.clone(),
-            ed.key_select.clone(),
-            ed.path.clone(),
-            ed.args.clone(),
-            ed.cwd.clone(),
-            ed.keys.clone(),
-            ed.url.clone(),
-        );
-        let action_type = ed.action_type;
-        let key_text = ed.key_text.clone();
-        let record_button = |id: &'static str, target: RecordTarget, cx: &mut Context<Self>| {
-            let active = recording == Some(target);
-            Button::new(id)
-                .small()
-                .when(active, |b| b.primary())
-                .when(!active, |b| b.outline())
-                .label(if active {
-                    "Press a key… (Esc to cancel)"
-                } else {
-                    "Record"
-                })
-                .disabled(ro)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if active {
-                        this.cancel_recording(cx);
-                    } else {
-                        this.start_recording(target, window, cx);
-                    }
-                }))
-        };
-        let type_group = controls::segmented(
-            "action-type",
-            &ACTION_TYPES,
-            Some(action_type),
-            ro,
-            cx,
-            |this, t, window, cx| this.set_action_type(t, window, cx),
-        );
-        let placeholder = if key_text.trim().is_empty() {
-            "Choose a key".to_string()
-        } else {
-            key_label(&key_text)
-        };
-        // Fixed-width wrappers: the select otherwise grows and pushes Record to the far right.
-        let key_row = h_flex()
-            .gap_2()
-            .child(
-                div().w(px(180.)).flex_none().child(
-                    Select::new(&key_select)
-                        .small()
-                        .placeholder(placeholder)
-                        .search_placeholder("Search keys")
-                        .accessibility_label("Shortcut key")
-                        .disabled(ro),
-                ),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .child(record_button("record-key", RecordTarget::Trigger, cx)),
+                    .child(Icon::new(IconName::ChevronDown).small().text_color(muted)),
             );
-
-        let action_fields =
-            match action_type {
-                ActionType::Launch => v_flex()
-                    .gap_3()
-                    .child(field(
-                        "Program, file or folder",
-                        h_flex()
-                            .gap_2()
-                            .child(Input::new(&path).small().flex_1().disabled(ro))
-                            .child(
-                                Button::new("browse-path")
-                                    .small()
-                                    .outline()
-                                    .icon(IconName::FolderOpen)
-                                    .label("Browse…")
-                                    .disabled(ro)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.browse(false, window, cx)
-                                    })),
-                            ),
-                        err(BField::Path),
-                        cx,
-                    ))
-                    .child(field(
-                        "Arguments",
-                        Input::new(&args).small().disabled(ro),
-                        None,
-                        cx,
-                    ))
-                    .child(field(
-                        "Working folder",
-                        h_flex()
-                            .gap_2()
-                            .child(Input::new(&cwd).small().flex_1().disabled(ro))
-                            .child(
-                                Button::new("browse-cwd")
-                                    .small()
-                                    .outline()
-                                    .icon(IconName::Folder)
-                                    .label("Browse…")
-                                    .disabled(ro)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.browse(true, window, cx)
-                                    })),
-                            ),
-                        None,
-                        cx,
-                    ))
-                    .child(hint_text(
-                        "%VARIABLES% are expanded when the shortcut runs.",
-                        cx,
-                    )),
-                ActionType::SendHotkey => v_flex()
-                    .gap_3()
-                    .child(field(
-                        "Key combination",
-                        h_flex()
-                            .gap_2()
-                            .child(Input::new(&keys).small().w(px(260.)).disabled(ro))
-                            .child(record_button("record-chord", RecordTarget::Chord, cx)),
-                        err(BField::Keys),
-                        cx,
-                    ))
-                    .child(hint_text(
-                        "Like ctrl+shift+esc, win+d or volume_mute. Up to 4 modifiers and one key.",
-                        cx,
-                    )),
-                ActionType::OpenUrl => v_flex()
-                    .gap_3()
-                    .child(field(
-                        "URL",
-                        Input::new(&url).small().disabled(ro),
-                        err(BField::Url),
-                        cx,
-                    ))
-                    .child(hint_text(
-                        "https:, mailto:, ms-settings: and any other registered scheme.",
-                        cx,
-                    )),
-            };
-
-        v_flex()
-            .px_4()
-            .py_4()
-            .gap_4()
-            .child(field(
-                "Name",
-                Input::new(&name).small().w(px(320.)).disabled(ro),
-                None,
-                cx,
-            ))
-            .child(field(
-                "Key (pressed with Hyper)",
-                key_row,
-                err(BField::Key),
-                cx,
-            ))
-            .when(recording == Some(RecordTarget::Trigger), |this| {
-                this.child(hint_text(
-                    "Press the key alone or with CapsLock. A key already used by another \
-                     shortcut may be taken by Kuality: choose it in the list instead.",
-                    cx,
-                ))
+        let weak = cx.entity().downgrade();
+        // The trigger fills what the hotkey button leaves.
+        let mut trigger_style = StyleRefinement {
+            flex_grow: Some(1.),
+            flex_shrink: Some(1.),
+            flex_basis: Some(relative(0.).into()),
+            ..Default::default()
+        };
+        trigger_style.min_size.width = Some(px(0.).into());
+        Popover::new(("action-picker", row.id()))
+            .anchor(Anchor::TopRight)
+            .open(open)
+            .trigger(trigger)
+            .trigger_style(trigger_style)
+            .on_open_change(move |open, window, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    if *open {
+                        this.open_picker(row, window, cx);
+                    } else {
+                        this.close_picker(cx);
+                    }
+                });
             })
-            .when(duplicate, |this| {
-                this.child(warning_text(
-                    "Only the first enabled shortcut with this key works.",
-                    cx,
-                ))
+            .content(move |_, _, _| match &view {
+                Some(view) => view.clone().into_any_element(),
+                None => div().into_any_element(),
             })
-            .child(field("Action", type_group, None, cx))
-            .child(action_fields)
-            .into_any_element()
     }
+}
+
+/// Why the core would skip this action, if it would (hand-edited values).
+fn action_problem(action: &Action) -> Option<String> {
+    let problem = match (model::kind_of(action), action) {
+        (_, Action::SendHotkey(h)) => model::validate_chord(&h.keys).err(),
+        (_, Action::OpenUrl(u)) => model::validate_url(&u.url).err().map(str::to_string),
+        (ActionKind::App, _) => None,
+        (_, Action::Launch(l)) => model::validate_path(&l.path).err().map(str::to_string),
+    };
+    problem.map(|p| format!("{p}: choose the action again."))
 }

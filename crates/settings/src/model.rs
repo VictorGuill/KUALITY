@@ -8,8 +8,8 @@ use std::time::SystemTime;
 
 use kuality_protocol::store;
 use kuality_protocol::{
-    BindingEntry, CONFIG_VERSION, Color, Config, Key, LaunchArgs, Length, WidgetEntry, parse_chord,
-    parse_key, quote, valid_url,
+    Action, BindingEntry, CONFIG_VERSION, Color, Config, Key, LaunchAction, LaunchArgs, Length,
+    OpenUrlAction, SendHotkeyAction, WidgetEntry, parse_chord, parse_key, quote, valid_url,
 };
 
 /// What the file on disk looks like.
@@ -211,6 +211,24 @@ pub fn validate_url(text: &str) -> Result<(), &'static str> {
     }
 }
 
+/// What the user typed as a website: `github.com` becomes `https://github.com`. Text that has a
+/// scheme (`mailto:…`, `ms-settings:…`) or does not look like a host name is kept as typed.
+pub fn normalize_url(text: &str) -> String {
+    let text = text.trim();
+    // `github.com:443/x` parses as a scheme with dots; real schemes have none.
+    let has_scheme = valid_url(text)
+        && !text
+            .split_once(':')
+            .is_some_and(|(head, _)| head.contains('.'));
+    let looks_like_host =
+        text.contains('.') && !text.starts_with('.') && !text.contains(char::is_whitespace);
+    if !has_scheme && looks_like_host {
+        format!("https://{text}")
+    } else {
+        text.to_string()
+    }
+}
+
 /// A `launch` path.
 pub fn validate_path(text: &str) -> Result<(), &'static str> {
     if text.trim().is_empty() {
@@ -357,6 +375,307 @@ pub fn unknown_type(v: &serde_json::Value) -> String {
         .and_then(|t| t.as_str())
         .unwrap_or("?")
         .to_string()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shortcut actions as the Shortcuts tab shows them: one label per action and the picker entry
+// that edits it. The config format is unchanged; these only read and build `Action`s.
+
+/// Prefix of a `launch` path that starts an app from the shell's Applications folder.
+pub const APPS_FOLDER_PREFIX: &str = r"shell:AppsFolder\";
+
+/// The app id (AppUserModelID or the folder's parsing name) of a `shell:AppsFolder\<id>` path.
+pub fn app_id(path: &str) -> Option<&str> {
+    let path = path.trim();
+    let head = path.get(..APPS_FOLDER_PREFIX.len())?;
+    if !head.eq_ignore_ascii_case(APPS_FOLDER_PREFIX) {
+        return None;
+    }
+    let id = path[APPS_FOLDER_PREFIX.len()..].trim();
+    (!id.is_empty()).then_some(id)
+}
+
+/// The `launch` path for an app of the Applications folder.
+pub fn app_path(id: &str) -> String {
+    format!("{APPS_FOLDER_PREFIX}{id}")
+}
+
+/// A readable name for an app id when the app is not (or not yet) in the app list:
+/// `Microsoft.WindowsCalculator_8wekyb3d8bbwe!App` → `WindowsCalculator`,
+/// `{GUID}\Microsoft Office\root\Office16\EXCEL.EXE` → `EXCEL`, `Org.App.Name` → `Name`.
+pub fn fallback_app_name(id: &str) -> String {
+    let id = id.trim();
+    if id.contains('\\') || id.contains('/') {
+        let file = id.rsplit(['\\', '/']).next().unwrap_or(id);
+        let stem = Path::new(file)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        return if stem.is_empty() { id.into() } else { stem };
+    }
+    // Store apps: `<Name>_<PublisherId>!<AppId>`.
+    let package = id.split('!').next().unwrap_or(id);
+    let name = package.split('_').next().unwrap_or(package);
+    let last = name.rsplit('.').next().unwrap_or(name);
+    if last.is_empty() {
+        id.into()
+    } else {
+        last.into()
+    }
+}
+
+/// What a shortcut's action is, as the Action button and the picker see it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionKind {
+    /// `launch` of `shell:AppsFolder\<id>` without arguments.
+    App,
+    /// `open_url`.
+    Website,
+    /// `send_hotkey`.
+    SendKeys,
+    /// `launch` of a document, folder or shortcut, without arguments.
+    OpenFile,
+    /// `launch` of a program, or of anything with arguments or a working folder.
+    RunProgram,
+}
+
+/// File extensions that are run rather than opened.
+const PROGRAM_EXTENSIONS: [&str; 4] = ["exe", "com", "bat", "cmd"];
+
+fn is_program(path: &str) -> bool {
+    Path::new(path.trim().trim_matches('"'))
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| PROGRAM_EXTENSIONS.iter().any(|p| e.eq_ignore_ascii_case(p)))
+}
+
+/// No arguments (empty list or blank raw string).
+pub fn args_empty(args: &LaunchArgs) -> bool {
+    match args {
+        LaunchArgs::List(list) => list.is_empty(),
+        LaunchArgs::Raw(raw) => raw.trim().is_empty(),
+    }
+}
+
+pub fn kind_of(action: &Action) -> ActionKind {
+    match action {
+        Action::SendHotkey(_) => ActionKind::SendKeys,
+        Action::OpenUrl(_) => ActionKind::Website,
+        Action::Launch(l) => {
+            let plain = args_empty(&l.args) && l.cwd.as_deref().is_none_or(|c| c.trim().is_empty());
+            if !plain {
+                ActionKind::RunProgram
+            } else if app_id(&l.path).is_some() {
+                ActionKind::App
+            } else if is_program(&l.path) {
+                ActionKind::RunProgram
+            } else {
+                ActionKind::OpenFile
+            }
+        }
+    }
+}
+
+/// How a key is written in labels: `Win`, `Right Ctrl`, `F5`, `Page Up`, `;`, `Volume Mute`.
+pub fn key_display(key: Key) -> String {
+    let named = |s: &str| s.to_string();
+    match key.0 {
+        0x30..=0x39 | 0x41..=0x5A => char::from(key.0 as u8).to_string(),
+        0x70..=0x87 => format!("F{}", key.0 - 0x70 + 1),
+        0x60..=0x69 => format!("Num {}", key.0 - 0x60),
+        0xA2 | 0x11 => named("Ctrl"),
+        0xA3 => named("Right Ctrl"),
+        0xA0 | 0x10 => named("Shift"),
+        0xA1 => named("Right Shift"),
+        0xA4 | 0x12 => named("Alt"),
+        0xA5 => named("Right Alt"),
+        0x5B => named("Win"),
+        0x5C => named("Right Win"),
+        0x1B => named("Esc"),
+        0x21 => named("Page Up"),
+        0x22 => named("Page Down"),
+        0x2C => named("Print Screen"),
+        0x91 => named("Scroll Lock"),
+        0x90 => named("Num Lock"),
+        0x14 => named("CapsLock"),
+        0x5D => named("Menu"),
+        0x6A => named("Num *"),
+        0x6B => named("Num +"),
+        0x6D => named("Num -"),
+        0x6E => named("Num ."),
+        0x6F => named("Num /"),
+        0xBA => named(";"),
+        0xBB => named("="),
+        0xBC => named(","),
+        0xBD => named("-"),
+        0xBE => named("."),
+        0xBF => named("/"),
+        0xC0 => named("`"),
+        0xDB => named("["),
+        0xDC => named("\\"),
+        0xDD => named("]"),
+        0xDE => named("'"),
+        0xB1 => named("Media Previous"),
+        _ => {
+            let name = key.name();
+            if name.starts_with("vk:") {
+                return name;
+            }
+            // `volume_mute` → `Volume Mute`, `oem_8` → `Oem 8`, `space` → `Space`.
+            name.split('_')
+                .map(capitalize)
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+    }
+}
+
+/// A `send_hotkey` chord for labels: `win+1` → `Win + 1`. Unparseable text is shown as typed.
+pub fn chord_label(keys: &str) -> String {
+    match parse_chord(keys) {
+        Ok(chord) => chord
+            .mods()
+            .iter()
+            .copied()
+            .chain(chord.key)
+            .map(key_display)
+            .collect::<Vec<_>>()
+            .join(" + "),
+        Err(_) => keys.trim().to_string(),
+    }
+}
+
+/// The Hotkey button text: `Hyper + 1`; `None` when no key is set yet.
+pub fn hotkey_label(key: &str) -> Option<String> {
+    if key.trim().is_empty() {
+        return None;
+    }
+    Some(match parse_key(key) {
+        Ok(k) => format!("Hyper + {}", key_display(k)),
+        Err(_) => format!("Hyper + {}", key.trim()),
+    })
+}
+
+/// A URL for labels: scheme, `www.` and a trailing `/` dropped for web addresses.
+pub fn url_label(url: &str) -> String {
+    let url = url.trim();
+    let lower = url.to_ascii_lowercase();
+    let rest = ["https://", "http://"]
+        .iter()
+        .find(|p| lower.starts_with(*p))
+        .map(|p| &url[p.len()..]);
+    match rest {
+        Some(rest) => {
+            let rest = rest.trim_end_matches('/');
+            let rest = if rest.len() > 4 && rest[..4].eq_ignore_ascii_case("www.") {
+                &rest[4..]
+            } else {
+                rest
+            };
+            if rest.is_empty() {
+                url.into()
+            } else {
+                rest.into()
+            }
+        }
+        None => url.into(),
+    }
+}
+
+/// Last component of a path (`C:\Windows\notepad.exe` → `notepad.exe`), or the path itself.
+fn file_label(path: &str) -> String {
+    let path = path.trim().trim_matches('"');
+    let trimmed = path.trim_end_matches(['\\', '/']);
+    match trimmed.rsplit(['\\', '/']).next() {
+        Some(name) if !name.is_empty() => name
+            .strip_suffix(".lnk")
+            .or_else(|| name.strip_suffix(".LNK"))
+            .unwrap_or(name)
+            .to_string(),
+        _ => path.to_string(),
+    }
+}
+
+/// The Action button text. `app_name` looks an app id up in the installed apps.
+pub fn action_label(action: &Action, app_name: impl Fn(&str) -> Option<String>) -> String {
+    match (kind_of(action), action) {
+        (ActionKind::App, Action::Launch(l)) => {
+            let id = app_id(&l.path).unwrap_or_default();
+            app_name(id).unwrap_or_else(|| fallback_app_name(id))
+        }
+        (_, Action::OpenUrl(u)) => format!("Open {}", url_label(&u.url)),
+        (_, Action::SendHotkey(h)) => format!("Send {}", chord_label(&h.keys)),
+        (ActionKind::RunProgram, Action::Launch(l)) => {
+            let name = match app_id(&l.path) {
+                Some(id) => app_name(id).unwrap_or_else(|| fallback_app_name(id)),
+                None => file_label(&l.path),
+            };
+            if args_empty(&l.args) {
+                format!("Run {name}")
+            } else {
+                format!("Run {name} …")
+            }
+        }
+        (_, Action::Launch(l)) => format!("Open {}", file_label(&l.path)),
+    }
+}
+
+/// A choice made in the action picker.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Choice {
+    /// An app of the Applications folder, by id.
+    App(String),
+    Website(String),
+    SendKeys(String),
+    OpenFile(String),
+    RunProgram {
+        path: String,
+        args: LaunchArgs,
+        cwd: Option<String>,
+    },
+}
+
+/// Builds the action for a picker choice. Unknown fields of `prev` survive when it has the same
+/// `type` (e.g. an app replaced by a program keeps the extra fields of the `launch` object).
+pub fn build_action(choice: Choice, prev: Option<&Action>) -> Action {
+    let launch_extra = || match prev {
+        Some(Action::Launch(l)) => l.extra.clone(),
+        _ => Default::default(),
+    };
+    match choice {
+        Choice::App(id) => Action::Launch(LaunchAction {
+            path: app_path(id.trim()),
+            args: LaunchArgs::List(Vec::new()),
+            cwd: None,
+            extra: launch_extra(),
+        }),
+        Choice::OpenFile(path) => Action::Launch(LaunchAction {
+            path: path.trim().to_string(),
+            args: LaunchArgs::List(Vec::new()),
+            cwd: None,
+            extra: launch_extra(),
+        }),
+        Choice::RunProgram { path, args, cwd } => Action::Launch(LaunchAction {
+            path: path.trim().to_string(),
+            args,
+            cwd: cwd.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()),
+            extra: launch_extra(),
+        }),
+        Choice::Website(url) => Action::OpenUrl(OpenUrlAction {
+            url: url.trim().to_string(),
+            extra: match prev {
+                Some(Action::OpenUrl(u)) => u.extra.clone(),
+                _ => Default::default(),
+            },
+        }),
+        Choice::SendKeys(keys) => Action::SendHotkey(SendHotkeyAction {
+            keys: keys.trim().to_string(),
+            extra: match prev {
+                Some(Action::SendHotkey(h)) => h.extra.clone(),
+                _ => Default::default(),
+            },
+        }),
+    }
 }
 
 fn capitalize(s: &str) -> String {
@@ -611,5 +930,244 @@ mod tests {
         assert!(duplicate_trigger(&b, 1));
         assert!(!duplicate_trigger(&b, 2));
         assert!(!duplicate_trigger(&b, 3));
+    }
+    fn launch(path: &str, args: LaunchArgs, cwd: Option<&str>) -> Action {
+        Action::Launch(LaunchAction {
+            path: path.into(),
+            args,
+            cwd: cwd.map(Into::into),
+            extra: Default::default(),
+        })
+    }
+
+    fn no_args() -> LaunchArgs {
+        LaunchArgs::List(Vec::new())
+    }
+
+    #[test]
+    fn apps_folder_paths() {
+        let id = "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App";
+        assert_eq!(app_path(id), format!(r"shell:AppsFolder\{id}"));
+        assert_eq!(app_id(&app_path(id)), Some(id));
+        assert_eq!(app_id(r" SHELL:appsfolder\Chrome "), Some("Chrome"));
+        assert_eq!(app_id(r"shell:AppsFolder\"), None);
+        assert_eq!(app_id(r"C:\Windows\notepad.exe"), None);
+        assert_eq!(app_id("shell:"), None);
+        // Multi-byte text around the prefix length must not panic.
+        assert_eq!(app_id("ññññññññññññññññ"), None);
+    }
+
+    #[test]
+    fn fallback_app_names() {
+        assert_eq!(
+            fallback_app_name("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"),
+            "WindowsCalculator"
+        );
+        assert_eq!(
+            fallback_app_name(
+                r"{6D809377-6AF0-444B-8957-A3773F02200E}\Microsoft Office\root\Office16\EXCEL.EXE"
+            ),
+            "EXCEL"
+        );
+        assert_eq!(fallback_app_name("Chrome"), "Chrome");
+        assert_eq!(fallback_app_name("Microsoft.Windows.Explorer"), "Explorer");
+        assert_eq!(fallback_app_name("Org.App."), "Org.App.");
+    }
+
+    #[test]
+    fn action_kinds() {
+        let app = app_path("Helium.ABC");
+        assert_eq!(kind_of(&launch(&app, no_args(), None)), ActionKind::App);
+        assert_eq!(
+            kind_of(&launch(&app, LaunchArgs::Raw("--x".into()), None)),
+            ActionKind::RunProgram
+        );
+        assert_eq!(
+            kind_of(&launch(r"C:\Windows\notepad.exe", no_args(), None)),
+            ActionKind::RunProgram
+        );
+        assert_eq!(
+            kind_of(&launch(r"C:\Tools\build.CMD", no_args(), None)),
+            ActionKind::RunProgram
+        );
+        assert_eq!(
+            kind_of(&launch(r"C:\Users\me\Documents", no_args(), None)),
+            ActionKind::OpenFile
+        );
+        assert_eq!(
+            kind_of(&launch(
+                r"C:\notes.txt",
+                LaunchArgs::Raw("  ".into()),
+                Some(" ")
+            )),
+            ActionKind::OpenFile
+        );
+        assert_eq!(
+            kind_of(&launch(r"C:\notes.txt", no_args(), Some(r"C:\"))),
+            ActionKind::RunProgram
+        );
+        let url = build_action(Choice::Website("https://a.b".into()), None);
+        assert_eq!(kind_of(&url), ActionKind::Website);
+        let keys = build_action(Choice::SendKeys("win+1".into()), None);
+        assert_eq!(kind_of(&keys), ActionKind::SendKeys);
+    }
+
+    #[test]
+    fn key_and_chord_labels() {
+        assert_eq!(chord_label("win+1"), "Win + 1");
+        assert_eq!(chord_label("ctrl+shift+esc"), "Ctrl + Shift + Esc");
+        assert_eq!(chord_label("rctrl + f5"), "Right Ctrl + F5");
+        assert_eq!(chord_label("volume_mute"), "Volume Mute");
+        assert_eq!(chord_label("win"), "Win");
+        assert_eq!(chord_label("ctrl+oem_plus"), "Ctrl + =");
+        assert_eq!(chord_label("alt+pageup"), "Alt + Page Up");
+        assert_eq!(
+            chord_label(" a+b "),
+            "a+b",
+            "unparseable text is shown as typed"
+        );
+        assert_eq!(hotkey_label("1").as_deref(), Some("Hyper + 1"));
+        assert_eq!(hotkey_label("G").as_deref(), Some("Hyper + G"));
+        assert_eq!(hotkey_label("space").as_deref(), Some("Hyper + Space"));
+        assert_eq!(hotkey_label("hyper").as_deref(), Some("Hyper + hyper"));
+        assert_eq!(hotkey_label(" "), None);
+        assert_eq!(key_display(Key(0xE8)), "vk:0xE8");
+        assert_eq!(key_display(Key(0xDF)), "Oem 8");
+    }
+
+    #[test]
+    fn url_labels() {
+        assert_eq!(url_label("https://github.com"), "github.com");
+        assert_eq!(url_label("https://www.github.com/"), "github.com");
+        assert_eq!(url_label("HTTP://example.org/a/b"), "example.org/a/b");
+        assert_eq!(url_label("mailto:me@x.y"), "mailto:me@x.y");
+        assert_eq!(url_label("ms-settings:display"), "ms-settings:display");
+        assert_eq!(url_label("https://"), "https://");
+    }
+
+    #[test]
+    fn typed_websites_get_https() {
+        assert_eq!(normalize_url(" github.com "), "https://github.com");
+        assert_eq!(
+            normalize_url("github.com:443/x"),
+            "https://github.com:443/x"
+        );
+        assert_eq!(normalize_url("http://a.b"), "http://a.b");
+        assert_eq!(normalize_url("mailto:me@x.y"), "mailto:me@x.y");
+        assert_eq!(normalize_url("ms-settings:display"), "ms-settings:display");
+        assert_eq!(normalize_url("not a url"), "not a url");
+        assert_eq!(normalize_url(".hidden"), ".hidden");
+    }
+
+    #[test]
+    fn action_labels() {
+        let names = |id: &str| (id == "Helium.ABC").then(|| "Helium".to_string());
+        let app = |id: &str| launch(&app_path(id), no_args(), None);
+        assert_eq!(action_label(&app("Helium.ABC"), names), "Helium");
+        assert_eq!(
+            action_label(&app("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"), names),
+            "WindowsCalculator",
+            "unknown apps fall back to a name derived from the id"
+        );
+        assert_eq!(
+            action_label(
+                &launch(
+                    &app_path("Helium.ABC"),
+                    LaunchArgs::Raw("--new".into()),
+                    None
+                ),
+                names
+            ),
+            "Run Helium …"
+        );
+        assert_eq!(
+            action_label(&launch(r"C:\Windows\notepad.exe", no_args(), None), names),
+            "Run notepad.exe"
+        );
+        assert_eq!(
+            action_label(
+                &launch(
+                    r"%WINDIR%\notepad.exe",
+                    LaunchArgs::List(vec!["a b.txt".into()]),
+                    None
+                ),
+                names
+            ),
+            "Run notepad.exe …"
+        );
+        assert_eq!(
+            action_label(&launch(r"C:\Users\me\Documents\", no_args(), None), names),
+            "Open Documents"
+        );
+        assert_eq!(
+            action_label(&launch(r"C:\Links\Excel.lnk", no_args(), None), names),
+            "Open Excel"
+        );
+        assert_eq!(
+            action_label(
+                &build_action(Choice::Website("https://github.com".into()), None),
+                names
+            ),
+            "Open github.com"
+        );
+        assert_eq!(
+            action_label(&build_action(Choice::SendKeys("win+1".into()), None), names),
+            "Send Win + 1"
+        );
+    }
+
+    #[test]
+    fn picker_choices_build_actions_and_keep_unknown_fields() {
+        let mut extra = serde_json::Map::new();
+        extra.insert("note".into(), json!(1));
+        let prev = Action::Launch(LaunchAction {
+            path: "x.exe".into(),
+            args: LaunchArgs::Raw("--a".into()),
+            cwd: Some(r"C:\".into()),
+            extra: extra.clone(),
+        });
+        let Action::Launch(l) = build_action(Choice::App(" Helium.ABC ".into()), Some(&prev))
+        else {
+            panic!("launch expected");
+        };
+        assert_eq!(l.path, r"shell:AppsFolder\Helium.ABC");
+        assert_eq!(l.args, no_args());
+        assert_eq!(l.cwd, None);
+        assert_eq!(l.extra, extra);
+        let run = build_action(
+            Choice::RunProgram {
+                path: r" C:\Windows\notepad.exe ".into(),
+                args: LaunchArgs::Raw("a.txt".into()),
+                cwd: Some("  ".into()),
+            },
+            None,
+        );
+        assert_eq!(
+            run,
+            launch(
+                r"C:\Windows\notepad.exe",
+                LaunchArgs::Raw("a.txt".into()),
+                None
+            )
+        );
+        assert_eq!(kind_of(&run), ActionKind::RunProgram);
+        let file = build_action(Choice::OpenFile(r"C:\a.txt".into()), None);
+        assert_eq!(kind_of(&file), ActionKind::OpenFile);
+        // Another type starts without the old unknown fields.
+        let Action::OpenUrl(u) = build_action(Choice::Website("https://a.b".into()), Some(&prev))
+        else {
+            panic!("open_url expected");
+        };
+        assert!(u.extra.is_empty());
+        let prev_keys = Action::SendHotkey(SendHotkeyAction {
+            keys: "win+d".into(),
+            extra: extra.clone(),
+        });
+        let Action::SendHotkey(h) =
+            build_action(Choice::SendKeys("win+1".into()), Some(&prev_keys))
+        else {
+            panic!("send_hotkey expected");
+        };
+        assert_eq!((h.keys.as_str(), &h.extra), ("win+1", &extra));
     }
 }
