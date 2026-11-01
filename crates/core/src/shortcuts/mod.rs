@@ -1,4 +1,5 @@
-//! Shortcuts: Hyper+key runs a configured action. See `docs/specs/shortcuts.md`.
+//! Shortcuts: a hotkey (Hyper+key or modifiers+key) runs a configured action. See
+//! `docs/specs/shortcuts.md`.
 //!
 //! [`compile`] turns the `shortcuts` config section into a lookup table for the keyboard thread
 //! (validated, ready to run). It runs on the main thread on every config load.
@@ -6,8 +7,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use kuality_protocol::{
-    Action, BindingEntry, Chord, Key, LaunchAction, LaunchArgs, OpenUrlAction, SendHotkeyAction,
-    Shortcuts, parse_chord, parse_key, valid_url,
+    Action, BindingEntry, Chord, Key, LaunchAction, LaunchArgs, Mods, OpenUrlAction,
+    SendHotkeyAction, Shortcuts, Trigger, TriggerError, parse_chord, parse_trigger, valid_url,
 };
 
 use kuality_protocol::quote;
@@ -27,7 +28,9 @@ pub struct CompiledBindings {
 /// One usable binding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledBinding {
-    pub key: Key,
+    pub trigger: Trigger,
+    /// The hotkey also reaches the app in front.
+    pub pass_through: bool,
     /// Position in `shortcuts.bindings` (for logs).
     pub source: usize,
     pub action: CompiledAction,
@@ -58,13 +61,44 @@ impl CompiledAction {
 }
 
 impl CompiledBindings {
-    /// Index of the binding triggered by `key`. Linear scan, no allocation (called from the
+    /// Index of the Hyper binding of `key`. Linear scan, no allocation (called from the
     /// keyboard hook).
-    pub fn find(&self, key: Key) -> Option<u16> {
+    pub fn find_hyper(&self, key: Key) -> Option<u16> {
+        self.find(Trigger::hyper(key))
+    }
+
+    /// Index of the binding for exactly `mods` + `key` (not Hyper). Same rules as above.
+    pub fn find_normal(&self, mods: Mods, key: Key) -> Option<u16> {
+        self.find(Trigger {
+            hyper: false,
+            mods,
+            key,
+        })
+    }
+
+    fn find(&self, trigger: Trigger) -> Option<u16> {
         self.entries
             .iter()
-            .position(|b| b.key == key)
+            .position(|b| b.trigger == trigger)
             .and_then(|i| u16::try_from(i).ok())
+    }
+
+    /// Whether binding `index` lets its hotkey reach the app too.
+    pub fn passes_through(&self, index: u16) -> bool {
+        self.entries
+            .get(usize::from(index))
+            .is_some_and(|b| b.pass_through)
+    }
+
+    /// At least one binding is a normal (non-Hyper) hotkey: the hook is needed even without
+    /// Hyperkey.
+    pub fn has_normal(&self) -> bool {
+        self.entries.iter().any(|b| !b.trigger.hyper)
+    }
+
+    /// At least one binding needs Hyperkey.
+    pub fn has_hyper(&self) -> bool {
+        self.entries.iter().any(|b| b.trigger.hyper)
     }
 }
 
@@ -72,9 +106,10 @@ impl CompiledBindings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
     InvalidEntry,
-    BadKey(kuality_protocol::KeyParseError),
+    BadTrigger(TriggerError),
     ModifierTrigger,
     CapsLockTrigger,
+    ReservedTrigger,
     EmptyPath,
     BadChord(kuality_protocol::KeyParseError),
     BadUrl,
@@ -88,15 +123,18 @@ impl std::fmt::Display for SkipReason {
             Self::InvalidEntry => {
                 f.write_str("not a valid binding (missing field or unknown action type)")
             }
-            Self::BadKey(e) => write!(f, "bad trigger key: {e}"),
+            Self::BadTrigger(e) => write!(f, "bad hotkey: {e}"),
             Self::ModifierTrigger => f.write_str("a modifier cannot be a trigger key"),
             Self::CapsLockTrigger => f.write_str("capslock cannot be a trigger key"),
+            Self::ReservedTrigger => {
+                f.write_str("Windows reserves this hotkey (Ctrl+Alt+Del, Win+L)")
+            }
             Self::EmptyPath => f.write_str("launch path is empty"),
             Self::BadChord(e) => write!(f, "bad send_hotkey keys: {e}"),
             Self::BadUrl => {
                 f.write_str("open_url needs a scheme (e.g. https:) and at most 2048 characters")
             }
-            Self::Duplicate => f.write_str("trigger key already used by an earlier binding"),
+            Self::Duplicate => f.write_str("hotkey already used by an earlier binding"),
             Self::TooMany => f.write_str("too many bindings"),
         }
     }
@@ -136,14 +174,15 @@ fn build(shortcuts: &Shortcuts, generation: u64) -> (CompiledBindings, Vec<(usiz
         if !binding.enabled {
             continue;
         }
-        let result = compile_one(&binding.key, &binding.action).and_then(|(key, action)| {
-            if out.entries.iter().any(|b| b.key == key) {
+        let result = compile_one(&binding.key, &binding.action).and_then(|(trigger, action)| {
+            if out.entries.iter().any(|b| b.trigger == trigger) {
                 Err(SkipReason::Duplicate)
             } else if out.entries.len() >= usize::from(u16::MAX) {
                 Err(SkipReason::TooMany)
             } else {
                 Ok(CompiledBinding {
-                    key,
+                    trigger,
+                    pass_through: binding.pass_through,
                     source: index,
                     action,
                 })
@@ -157,14 +196,13 @@ fn build(shortcuts: &Shortcuts, generation: u64) -> (CompiledBindings, Vec<(usiz
     (out, skipped)
 }
 
-fn compile_one(key: &str, action: &Action) -> Result<(Key, CompiledAction), SkipReason> {
-    let key = parse_key(key).map_err(SkipReason::BadKey)?;
-    if key == Key::CAPSLOCK {
-        return Err(SkipReason::CapsLockTrigger);
-    }
-    if key.is_modifier() {
-        return Err(SkipReason::ModifierTrigger);
-    }
+fn compile_one(key: &str, action: &Action) -> Result<(Trigger, CompiledAction), SkipReason> {
+    let trigger = parse_trigger(key).map_err(|e| match e {
+        TriggerError::CapsLock => SkipReason::CapsLockTrigger,
+        TriggerError::ModifierKey => SkipReason::ModifierTrigger,
+        TriggerError::Reserved => SkipReason::ReservedTrigger,
+        e => SkipReason::BadTrigger(e),
+    })?;
     let action = match action {
         Action::Launch(LaunchAction {
             path, args, cwd, ..
@@ -197,7 +235,7 @@ fn compile_one(key: &str, action: &Action) -> Result<(Key, CompiledAction), Skip
             CompiledAction::OpenUrl(url.to_string())
         }
     };
-    Ok((key, action))
+    Ok((trigger, action))
 }
 
 #[cfg(test)]
@@ -228,7 +266,8 @@ mod tests {
         assert!(skipped.is_empty(), "{skipped:?}");
         assert_eq!(c.generation, 7);
         assert_eq!(c.entries.len(), 3);
-        assert_eq!(c.entries[0].key, Key(0x31));
+        assert_eq!(c.entries[0].trigger, Trigger::hyper(Key(0x31)));
+        assert!(!c.entries[0].pass_through);
         assert_eq!(
             c.entries[0].action,
             CompiledAction::Launch {
@@ -241,13 +280,15 @@ mod tests {
             c.entries[1].action,
             CompiledAction::SendHotkey(parse_chord("ctrl+shift+esc").unwrap())
         );
-        assert_eq!(c.entries[2].key, Key(0x47));
+        assert_eq!(c.entries[2].trigger, Trigger::hyper(Key(0x47)));
         assert_eq!(
             c.entries[2].action,
             CompiledAction::OpenUrl("https://github.com".into())
         );
-        assert_eq!(c.find(Key(0x47)), Some(2));
-        assert_eq!(c.find(Key(0x48)), None);
+        assert_eq!(c.find_hyper(Key(0x47)), Some(2));
+        assert_eq!(c.find_hyper(Key(0x48)), None);
+        assert_eq!(c.find_normal(Mods::NONE, Key(0x47)), None);
+        assert!(c.has_hyper() && !c.has_normal());
     }
 
     #[test]
@@ -269,7 +310,8 @@ mod tests {
                 { "key": "a", "enabled": false, "action": url("https://disabled") },
                 { "key": "A", "action": url("https://first") },
                 { "key": " a ", "action": url("https://second") },
-                { "key": "vk:0x41", "action": url("https://third") }
+                { "key": "vk:0x41", "action": url("https://third") },
+                { "key": "hyper+a", "action": url("https://fourth") }
             ]),
         );
         let (c, skipped) = build(&s, 1);
@@ -281,8 +323,47 @@ mod tests {
         );
         assert_eq!(
             skipped,
-            vec![(2, SkipReason::Duplicate), (3, SkipReason::Duplicate)]
+            vec![
+                (2, SkipReason::Duplicate),
+                (3, SkipReason::Duplicate),
+                (4, SkipReason::Duplicate)
+            ]
         );
+    }
+
+    #[test]
+    fn normal_hotkeys_compile_with_their_modifiers() {
+        let s = shortcuts(
+            true,
+            json!([
+                { "key": "ctrl+t", "action": url("https://a") },
+                { "key": "win+e", "pass_through": true, "action": url("https://b") },
+                { "key": "alt+ctrl+k", "action": url("https://c") },
+                { "key": "rctrl+lalt+k", "action": url("https://dup") },
+                { "key": "t", "action": url("https://hyper-t") },
+                { "key": "ctrl+alt+del", "action": url("https://x") },
+                { "key": "win+l", "action": url("https://x") },
+                { "key": "hyper+ctrl+k", "action": url("https://x") }
+            ]),
+        );
+        let (c, skipped) = build(&s, 1);
+        assert_eq!(
+            skipped,
+            vec![
+                (3, SkipReason::Duplicate),
+                (5, SkipReason::ReservedTrigger),
+                (6, SkipReason::ReservedTrigger),
+                (7, SkipReason::BadTrigger(TriggerError::HyperWithModifiers)),
+            ]
+        );
+        let t = Key(0x54);
+        assert_eq!(c.find_normal(Mods::CTRL, t), Some(0));
+        assert_eq!(c.find_normal(Mods::CTRL | Mods::SHIFT, t), None);
+        assert_eq!(c.find_hyper(t), Some(3));
+        assert_eq!(c.find_normal(Mods::WIN, Key(0x45)), Some(1));
+        assert!(c.passes_through(1) && !c.passes_through(0));
+        assert_eq!(c.find_normal(Mods::CTRL | Mods::ALT, Key(0x4B)), Some(2));
+        assert!(c.has_normal() && c.has_hyper());
     }
 
     #[test]
@@ -310,7 +391,9 @@ mod tests {
             vec![
                 (
                     0,
-                    SkipReason::BadKey(kuality_protocol::KeyParseError::Unknown)
+                    SkipReason::BadTrigger(TriggerError::Key(
+                        kuality_protocol::KeyParseError::Unknown
+                    ))
                 ),
                 (1, SkipReason::ModifierTrigger),
                 (2, SkipReason::CapsLockTrigger),

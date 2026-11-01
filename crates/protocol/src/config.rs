@@ -80,13 +80,25 @@ pub enum LogLevel {
     Trace,
 }
 
-/// `hyperkey` section. Fields beyond `enabled` arrive in Phase 1.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// `hyperkey` section (see `docs/specs/hyperkey.md`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Hyperkey {
     pub enabled: bool,
+    /// Hyper is Ctrl+Shift+Alt+**Win** (default) or Ctrl+Shift+Alt.
+    pub include_win: bool,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+impl Default for Hyperkey {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            include_win: true,
+            extra: Extra::new(),
+        }
+    }
 }
 
 /// `shortcuts` section (see `docs/specs/shortcuts.md`).
@@ -110,16 +122,20 @@ pub enum BindingEntry {
     Invalid(Value),
 }
 
-/// Hyper+`key` runs `action`.
+/// The hotkey `key` runs `action`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Binding {
-    /// Trigger key name (see `keys::parse_key`). Validated when bindings are compiled.
+    /// Trigger chord (see `keys::parse_trigger`): `hyper+1`, `ctrl+t`; a bare key means Hyper +
+    /// key. Validated when bindings are compiled.
     pub key: String,
     /// Label for the settings UI; not used by the core.
     #[serde(default)]
     pub name: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// The hotkey also reaches the app in front (default: Kuality swallows it).
+    #[serde(default)]
+    pub pass_through: bool,
     pub action: Action,
     #[serde(flatten)]
     pub extra: Extra,
@@ -598,6 +614,7 @@ mod tests {
         assert!(!c.general.autostart);
         assert!(!c.general.run_elevated);
         assert!(!c.hyperkey.enabled);
+        assert!(c.hyperkey.include_win, "include_win defaults to true");
         assert!(!c.shortcuts.enabled);
         assert!(c.shortcuts.bindings.is_empty());
         assert!(!c.widgets.enabled);
@@ -616,6 +633,7 @@ mod tests {
         )
         .unwrap();
         assert!(c.hyperkey.enabled);
+        assert!(c.hyperkey.include_win, "missing include_win is true");
         assert_eq!(c.general.log_level, LogLevel::Debug);
         assert!(!c.general.autostart);
         assert!(c.widgets.hide_on_fullscreen);
@@ -640,6 +658,7 @@ mod tests {
         let mut expected = input;
         expected["general"]["log_level"] = json!("info");
         expected["general"]["run_elevated"] = json!(false);
+        expected["hyperkey"]["include_win"] = json!(true);
         assert_eq!(back, expected);
     }
 
@@ -648,7 +667,7 @@ mod tests {
         let expected = json!({
             "version": 1,
             "general": { "autostart": false, "run_elevated": false, "log_level": "info" },
-            "hyperkey": { "enabled": false },
+            "hyperkey": { "enabled": false, "include_win": true },
             "shortcuts": { "enabled": false, "bindings": [] },
             "widgets": { "enabled": false, "hide_on_fullscreen": true, "items": [] }
         });
@@ -701,6 +720,7 @@ mod tests {
         // Optional fields default.
         assert_eq!(b[1].name, "");
         assert!(b[1].enabled);
+        assert!(!b[1].pass_through, "pass_through defaults to false");
         assert_eq!(
             b[1].action,
             Action::SendHotkey(SendHotkeyAction {
@@ -715,6 +735,23 @@ mod tests {
                 extra: Extra::new()
             })
         );
+    }
+
+    #[test]
+    fn include_win_and_pass_through_are_read() {
+        let c = Config::from_json(
+            br#"{ "hyperkey": { "enabled": true, "include_win": false },
+                  "shortcuts": { "bindings": [
+                    { "key": "ctrl+t", "pass_through": true,
+                      "action": { "type": "open_url", "url": "https://a.b" } } ] } }"#,
+        )
+        .unwrap();
+        assert!(!c.hyperkey.include_win);
+        let BindingEntry::Valid(b) = &c.shortcuts.bindings[0] else {
+            panic!("invalid");
+        };
+        assert!(b.pass_through);
+        assert_eq!(b.key, "ctrl+t");
     }
 
     #[test]
@@ -778,14 +815,14 @@ mod tests {
         // Known optional fields are written with their defaults.
         assert_eq!(
             back["bindings"][6],
-            json!({ "key": "5", "name": "", "enabled": true, "note": "kept",
+            json!({ "key": "5", "name": "", "enabled": true, "pass_through": false, "note": "kept",
                     "action": { "type": "open_url", "url": "https://a.b" } })
         );
     }
 
     #[test]
     fn unknown_action_fields_survive_round_trip() {
-        let input = json!({ "key": "a", "name": "", "enabled": true, "action":
+        let input = json!({ "key": "a", "name": "", "enabled": true, "pass_through": false, "action":
             { "type": "launch", "path": "x", "args": [], "cwd": null, "elevated": true } });
         let e: BindingEntry = serde_json::from_value(input.clone()).unwrap();
         let BindingEntry::Valid(b) = &e else {
@@ -801,7 +838,8 @@ mod tests {
             json!({ "type": "send_hotkey", "keys": "win+d", "note": 1 }),
             json!({ "type": "open_url", "url": "https://a.b", "note": [2] }),
         ] {
-            let v = json!({ "key": "b", "name": "", "enabled": true, "action": action });
+            let v = json!({ "key": "b", "name": "", "enabled": true, "pass_through": false,
+                            "action": action });
             let e: BindingEntry = serde_json::from_value(v.clone()).unwrap();
             assert!(matches!(e, BindingEntry::Valid(_)));
             assert_eq!(serde_json::to_value(&e).unwrap(), v);

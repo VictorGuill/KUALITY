@@ -1,12 +1,12 @@
-//! Portable Hyperkey state machine (no OS types), see `docs/specs/hyperkey.md` and, for the
-//! binding lookup, `docs/specs/shortcuts.md`.
+//! Portable keyboard state machine (no OS types): Hyperkey, see `docs/specs/hyperkey.md`, and
+//! the shortcut lookup (Hyper and normal hotkeys), see `docs/specs/shortcuts.md`.
 //!
 //! The engine is called from the low-level keyboard hook callback, so nothing here allocates,
 //! locks, logs or panics on any input.
 
 use std::sync::Arc;
 
-use kuality_protocol::{Chord, Key};
+use kuality_protocol::{Chord, Key, Mods};
 
 use crate::shortcuts::CompiledBindings;
 
@@ -148,6 +148,24 @@ impl ModSet {
     pub fn is_empty(self) -> bool {
         self.0 == 0
     }
+
+    /// The generic modifiers of the sided keys in the set (`RCTRL` → `ctrl`).
+    pub fn generic(self) -> Mods {
+        let mut m = Mods::NONE;
+        for k in Key::SIDED_MODIFIERS {
+            if self.contains(k) {
+                m |= Mods::of(k);
+            }
+        }
+        m
+    }
+
+    /// Keys in the set, in [`Key::SIDED_MODIFIERS`] order.
+    pub fn keys(self) -> impl Iterator<Item = Key> {
+        Key::SIDED_MODIFIERS
+            .into_iter()
+            .filter(move |&k| self.contains(k))
+    }
 }
 
 /// Modifiers that make up Hyper, in press order.
@@ -179,9 +197,14 @@ impl KeySet {
     }
 }
 
-/// The Hyperkey state machine.
+/// The keyboard state machine.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Engine {
+    /// Hyperkey is on: CapsLock is Hyper. Off: CapsLock is a normal key (the hook may still run
+    /// for normal hotkeys).
+    hyper_enabled: bool,
+    /// Hyper includes Win (Ctrl+Shift+Alt+Win) or not (Ctrl+Shift+Alt).
+    include_win: bool,
     /// Hyper is active (CapsLock physically down).
     held: bool,
     /// Hyper modifiers we have injected down.
@@ -190,6 +213,8 @@ pub struct Engine {
     physical: ModSet,
     /// Bound keys whose press triggered a shortcut: their repeats and up are swallowed.
     consumed: KeySet,
+    /// Keys whose press triggered a pass-through shortcut: repeats pass without firing again.
+    passed: KeySet,
     /// Shortcut table (`None` until the first config is applied).
     bindings: Option<Arc<CompiledBindings>>,
 }
@@ -203,12 +228,29 @@ impl Default for Engine {
 impl Engine {
     pub const fn new() -> Self {
         Self {
+            hyper_enabled: true,
+            include_win: true,
             held: false,
             injected: ModSet(0),
             physical: ModSet(0),
             consumed: KeySet::EMPTY,
+            passed: KeySet::EMPTY,
             bindings: None,
         }
+    }
+
+    /// Hyperkey settings. Call [`Engine::force_release`] first if Hyper may be held.
+    pub fn set_hyper(&mut self, enabled: bool, include_win: bool) {
+        self.hyper_enabled = enabled;
+        self.include_win = include_win;
+    }
+
+    /// Modifiers Hyper presses, in press order.
+    fn hyper_press_order(&self) -> impl Iterator<Item = Key> + use<> {
+        let include_win = self.include_win;
+        HYPER_PRESS_ORDER
+            .into_iter()
+            .filter(move |&k| include_win || k != Key::LWIN)
     }
 
     /// Replaces the shortcut table and returns the previous one (so the caller decides where it
@@ -220,15 +262,40 @@ impl Engine {
         self.bindings.replace(bindings)
     }
 
-    /// Bound keys currently consumed (pressed, up not seen yet).
-    pub fn consumed(&self) -> KeySet {
-        self.consumed
+    /// Bound keys currently pressed (consumed, passed), up not seen yet.
+    pub fn pressed(&self) -> (KeySet, KeySet) {
+        (self.consumed, self.passed)
     }
 
-    /// Restores consumed keys after a hook reinstall (whose forced release cleared them), so
+    /// Restores pressed keys after a hook reinstall (whose forced release cleared them), so
     /// a config reload while a bound key is held still swallows its up.
-    pub fn restore_consumed(&mut self, keys: KeySet) {
-        self.consumed = keys;
+    pub fn restore_pressed(&mut self, (consumed, passed): (KeySet, KeySet)) {
+        self.consumed = consumed;
+        self.passed = passed;
+    }
+
+    /// Whether the hook should check for missed modifier ups before this event (see
+    /// [`Engine::drop_stale_modifiers`]): a key down while no Hyper modifier is injected and
+    /// some physical modifier is believed down.
+    pub fn wants_modifier_check(&self, ev: KeyEvent) -> bool {
+        ev.down
+            && ev.key.sided_modifier_index().is_none()
+            && self.injected.is_empty()
+            && !self.physical.is_empty()
+    }
+
+    /// Forgets physical modifiers the system reports up: their up never reached the hook
+    /// (hook not installed, elevated window in front). Never marks a key down.
+    pub fn drop_stale_modifiers(&mut self, system_down: ModSet) {
+        self.physical = ModSet(self.physical.0 & system_down.0);
+    }
+
+    /// Takes the physical modifier state from the system (on hook install, when nothing is
+    /// injected).
+    pub fn sync_physical(&mut self, system_down: ModSet) {
+        if self.injected.is_empty() {
+            self.physical = system_down;
+        }
     }
 
     /// Generation of the current shortcut table (0 if none).
@@ -245,7 +312,7 @@ impl Engine {
             self.physical.set(ev.key, ev.down);
         }
 
-        if ev.key == Key::CAPSLOCK {
+        if ev.key == Key::CAPSLOCK && self.hyper_enabled {
             return match (ev.down, self.held) {
                 // Rule 2: Hyper starts.
                 (true, false) => {
@@ -255,7 +322,7 @@ impl Engine {
                         v.synth.push(Synth::Down(Key::CAPSLOCK));
                         v.synth.push(Synth::Up(Key::CAPSLOCK));
                     }
-                    for k in HYPER_PRESS_ORDER {
+                    for k in self.hyper_press_order() {
                         v.synth.push(Synth::Down(k));
                         self.injected.set(k, true);
                     }
@@ -281,26 +348,40 @@ impl Engine {
             return Verdict::swallow();
         }
 
-        // Shortcuts (shortcuts.md): a consumed key stays swallowed until its up.
+        // Shortcuts (shortcuts.md): a consumed key stays swallowed until its up; a passed one
+        // passes without firing again.
         if self.consumed.contains(ev.key) {
             if !ev.down {
                 self.consumed.set(ev.key, false);
             }
             return Verdict::swallow();
         }
-        if ev.down
-            && self.held
-            && !is_modifier
-            && let Some(index) = self.bindings.as_ref().and_then(|b| b.find(ev.key))
-        {
-            self.consumed.set(ev.key, true);
-            let mut v = Verdict::swallow();
-            v.action = Some(index);
-            return v;
+        if self.passed.contains(ev.key) {
+            if !ev.down {
+                self.passed.set(ev.key, false);
+            }
+            return Verdict::pass();
         }
-        // Office letters: Explorer owns Hyper+letter for these and opens Office web pages; an
-        // unbound one is dropped (until its up) so Explorer never sees it.
-        if ev.down && self.held && OFFICE_LETTERS.contains(&ev.key) {
+        if ev.down && !is_modifier {
+            if self.held {
+                if let Some(index) = self.bindings.as_ref().and_then(|b| b.find_hyper(ev.key)) {
+                    return self.fire(ev.key, index, false);
+                }
+            } else if !self.physical.is_empty() {
+                let mods = self.physical.generic();
+                if let Some(index) = self
+                    .bindings
+                    .as_ref()
+                    .and_then(|b| b.find_normal(mods, ev.key))
+                {
+                    return self.fire(ev.key, index, true);
+                }
+            }
+        }
+        // Office letters: Explorer owns Ctrl+Shift+Alt+Win+letter for these and opens Office
+        // web pages; an unbound one is dropped (until its up) so Explorer never sees it. Without
+        // Win in Hyper, Explorer does not see the Office combination: nothing to drop.
+        if ev.down && self.held && self.include_win && OFFICE_LETTERS.contains(&ev.key) {
             self.consumed.set(ev.key, true);
             return Verdict::swallow();
         }
@@ -309,16 +390,51 @@ impl Engine {
         Verdict::pass()
     }
 
-    /// Events for a `send_hotkey` chord, in one batch: if Hyper is held, its injected modifiers
-    /// are released first (mask key, physically held ones kept) and pressed again after the
-    /// chord, so the target sees exactly the chord.
+    /// Shortcut `index` fires on `key`'s press. Swallowed unless the binding passes through;
+    /// a swallowed normal hotkey gets the mask key, so releasing its Win / Alt / Ctrl+Shift
+    /// opens no Start menu, menu bar or input-language switch.
+    fn fire(&mut self, key: Key, index: u16, normal: bool) -> Verdict {
+        let pass_through = self
+            .bindings
+            .as_ref()
+            .is_some_and(|b| b.passes_through(index));
+        let mut v = if pass_through {
+            self.passed.set(key, true);
+            Verdict::pass()
+        } else {
+            self.consumed.set(key, true);
+            let mut v = Verdict::swallow();
+            if normal {
+                v.synth.push(Synth::Down(Key::MASK));
+                v.synth.push(Synth::Up(Key::MASK));
+            }
+            v
+        };
+        v.action = Some(index);
+        v
+    }
+
+    /// Events for a `send_hotkey` chord, in one batch, so the target sees exactly the chord:
+    /// - Hyper held: its injected modifiers are released first (mask key, physically held ones
+    ///   kept) and pressed again after the chord.
+    /// - Otherwise the modifiers the user still holds (e.g. the Ctrl of a `ctrl+t` hotkey) are
+    ///   released first (mask key) and pressed again after the chord, followed by the mask key
+    ///   when Win or Alt is among them (their later release must not open Start / the menu bar).
     pub fn hotkey(&mut self, chord: &Chord) -> SynthBuf {
         let held = self.held;
+        let user_mods = if held { ModSet::EMPTY } else { self.physical };
         let mut out = if held {
             self.release_injected()
         } else {
             SynthBuf::new()
         };
+        if !user_mods.is_empty() {
+            out.push(Synth::Down(Key::MASK));
+            out.push(Synth::Up(Key::MASK));
+            for k in user_mods.keys() {
+                out.push(Synth::Up(k));
+            }
+        }
         for &m in chord.mods() {
             out.push(Synth::Down(m));
         }
@@ -330,9 +446,18 @@ impl Engine {
             out.push(Synth::Up(m));
         }
         if held {
-            for k in HYPER_PRESS_ORDER {
+            for k in self.hyper_press_order() {
                 out.push(Synth::Down(k));
                 self.injected.set(k, true);
+            }
+        }
+        if !user_mods.is_empty() {
+            for k in user_mods.keys() {
+                out.push(Synth::Down(k));
+            }
+            if user_mods.generic().contains(Mods::WIN) || user_mods.generic().contains(Mods::ALT) {
+                out.push(Synth::Down(Key::MASK));
+                out.push(Synth::Up(Key::MASK));
             }
         }
         out
@@ -342,6 +467,7 @@ impl Engine {
     /// Also forgets consumed keys (their up then passes through).
     pub fn force_release(&mut self) -> SynthBuf {
         self.consumed = KeySet::EMPTY;
+        self.passed = KeySet::EMPTY;
         if self.held || !self.injected.is_empty() {
             self.release()
         } else {
@@ -350,11 +476,13 @@ impl Engine {
     }
 
     /// Forgets all state without injecting anything (after unlock/resume). Keeps the shortcut
-    /// table.
+    /// table and the Hyperkey settings.
     pub fn reset(&mut self) {
         let bindings = self.bindings.take();
+        let (enabled, include_win) = (self.hyper_enabled, self.include_win);
         *self = Self::new();
         self.bindings = bindings;
+        self.set_hyper(enabled, include_win);
     }
 
     /// Whether Kuality currently holds injected modifiers down.
@@ -570,24 +698,217 @@ mod tests {
     }
 
     use crate::shortcuts::{CompiledAction, CompiledBinding};
+    use kuality_protocol::{Trigger, parse_trigger};
 
     const K1: Key = Key(0x31);
     const K2: Key = Key(0x32);
     const KK: Key = Key(0x4B);
 
     fn table(generation: u64, keys: &[Key]) -> Arc<CompiledBindings> {
+        let triggers: Vec<(Trigger, bool)> =
+            keys.iter().map(|&k| (Trigger::hyper(k), false)).collect();
+        table_of(generation, &triggers)
+    }
+
+    fn table_of(generation: u64, triggers: &[(Trigger, bool)]) -> Arc<CompiledBindings> {
         Arc::new(CompiledBindings {
             generation,
-            entries: keys
+            entries: triggers
                 .iter()
                 .enumerate()
-                .map(|(i, &key)| CompiledBinding {
-                    key,
+                .map(|(i, &(trigger, pass_through))| CompiledBinding {
+                    trigger,
+                    pass_through,
                     source: i,
                     action: CompiledAction::OpenUrl("https://example.com".into()),
                 })
                 .collect(),
         })
+    }
+
+    /// Engine with bindings given as config text (`"ctrl+t"`, `"hyper+1"`) and pass-through
+    /// flags.
+    fn engine_of(bindings: &[(&str, bool)]) -> Engine {
+        let triggers: Vec<(Trigger, bool)> = bindings
+            .iter()
+            .map(|&(s, p)| (parse_trigger(s).unwrap(), p))
+            .collect();
+        let mut e = Engine::new();
+        e.set_bindings(table_of(1, &triggers));
+        e
+    }
+
+    const T: Key = Key(0x54);
+    const E: Key = Key(0x45);
+    const MASKED: [Synth; 2] = [Down(Key::MASK), Up(Key::MASK)];
+
+    #[test]
+    fn normal_hotkey_fires_with_exact_modifiers_and_is_masked() {
+        let mut e = engine_of(&[("ctrl+t", false), ("win+e", false)]);
+        // Plain T: passes.
+        assert_eq!(e.on_event(down(T), false), Verdict::default());
+        assert_eq!(e.on_event(up(T), false), Verdict::default());
+        // Ctrl passes (it is not Hyper), Ctrl+T fires, swallowed, with the mask key.
+        assert_eq!(e.on_event(down(Key::RCTRL), false), Verdict::default());
+        let v = e.on_event(down(T), false);
+        assert!(v.swallow);
+        assert_eq!(v.action, Some(0));
+        assert_eq!(v.synth.as_slice(), MASKED);
+        // Repeat and up swallowed, no second action.
+        let v = e.on_event(down(T), false);
+        assert!(v.swallow && v.action.is_none() && v.synth.is_empty());
+        assert!(e.on_event(up(T), false).swallow);
+        // Ctrl+Shift+T is another hotkey: not bound.
+        e.on_event(down(Key::LSHIFT), false);
+        assert_eq!(e.on_event(down(T), false), Verdict::default());
+        e.on_event(up(T), false);
+        e.on_event(up(Key::LSHIFT), false);
+        e.on_event(up(Key::RCTRL), false);
+        // Win+E.
+        e.on_event(down(Key::LWIN), false);
+        let v = e.on_event(down(E), false);
+        assert!(v.swallow && v.action == Some(1) && v.synth.as_slice() == MASKED);
+        // The modifier up passes (the mask already went between Win down and up).
+        assert_eq!(e.on_event(up(Key::LWIN), false), Verdict::default());
+        assert!(e.on_event(up(E), false).swallow);
+    }
+
+    #[test]
+    fn pass_through_hotkey_fires_once_and_passes() {
+        let mut e = engine_of(&[("ctrl+t", true)]);
+        e.on_event(down(Key::LCTRL), false);
+        let v = e.on_event(down(T), false);
+        assert!(!v.swallow && v.synth.is_empty());
+        assert_eq!(v.action, Some(0));
+        for _ in 0..3 {
+            assert_eq!(e.on_event(down(T), false), Verdict::default());
+        }
+        assert_eq!(e.on_event(up(T), false), Verdict::default());
+        assert_eq!(e.on_event(down(T), false).action, Some(0));
+    }
+
+    #[test]
+    fn hyper_pass_through_lets_the_hyper_combo_through() {
+        let mut e = engine_of(&[("hyper+1", true)]);
+        e.on_event(down(Key::CAPSLOCK), false);
+        let v = e.on_event(down(K1), false);
+        assert!(!v.swallow && v.synth.is_empty() && v.action == Some(0));
+        assert_eq!(e.on_event(up(K1), false), Verdict::default());
+    }
+
+    #[test]
+    fn normal_hotkeys_do_not_fire_while_hyper_is_held() {
+        let mut e = engine_of(&[("ctrl+t", false), ("hyper+t", false)]);
+        e.on_event(down(Key::LCTRL), false);
+        e.on_event(down(Key::CAPSLOCK), false);
+        assert_eq!(e.on_event(down(T), false).action, Some(1));
+    }
+
+    #[test]
+    fn hyperkey_off_leaves_capslock_alone_but_normal_hotkeys_work() {
+        let mut e = engine_of(&[("ctrl+t", false), ("hyper+1", false)]);
+        e.set_hyper(false, true);
+        assert_eq!(e.on_event(down(Key::CAPSLOCK), false), Verdict::default());
+        assert_eq!(e.on_event(down(K1), false), Verdict::default());
+        assert_eq!(e.on_event(up(K1), false), Verdict::default());
+        assert_eq!(e.on_event(up(Key::CAPSLOCK), false), Verdict::default());
+        assert!(!e.on_event(down(Key::LCTRL), false).swallow);
+        assert_eq!(e.on_event(down(T), false).action, Some(0));
+    }
+
+    #[test]
+    fn stale_modifiers_are_dropped_and_synced() {
+        let mut e = engine_of(&[("alt+k", false)]);
+        e.on_event(down(Key::LALT), false);
+        // Its up never arrived (elevated window); the system says it is up.
+        assert!(e.wants_modifier_check(down(KK)));
+        assert!(!e.wants_modifier_check(down(Key::LSHIFT)));
+        assert!(!e.wants_modifier_check(up(KK)));
+        e.drop_stale_modifiers(ModSet::EMPTY);
+        assert!(!e.wants_modifier_check(down(KK)));
+        assert_eq!(e.on_event(down(KK), false), Verdict::default());
+        e.on_event(up(KK), false);
+        // A modifier held when the hook was installed.
+        let mut held = ModSet::EMPTY;
+        held.set(Key::RALT, true);
+        e.sync_physical(held);
+        assert_eq!(e.on_event(down(KK), false).action, Some(0));
+    }
+
+    #[test]
+    fn hyper_without_win() {
+        let mut e = engine_of(&[]);
+        e.set_hyper(true, false);
+        let v = e.on_event(down(Key::CAPSLOCK), false);
+        assert_eq!(
+            v.synth.as_slice(),
+            [Down(Key::LCTRL), Down(Key::LSHIFT), Down(Key::LALT)]
+        );
+        // Office letters pass: Explorer does not see Ctrl+Shift+Alt+letter as Office.
+        assert_eq!(e.on_event(down(T), false), Verdict::default());
+        assert_eq!(e.on_event(up(T), false), Verdict::default());
+        let v = e.on_event(up(Key::CAPSLOCK), false);
+        assert_eq!(
+            v.synth.as_slice(),
+            [
+                Down(Key::MASK),
+                Up(Key::MASK),
+                Up(Key::LALT),
+                Up(Key::LSHIFT),
+                Up(Key::LCTRL)
+            ]
+        );
+        // send_hotkey while held presses the three again.
+        e.on_event(down(Key::CAPSLOCK), false);
+        let chord = kuality_protocol::parse_chord("win+1").unwrap();
+        let buf = e.hotkey(&chord);
+        assert_eq!(
+            &buf.as_slice()[buf.len() - 3..],
+            [Down(Key::LCTRL), Down(Key::LSHIFT), Down(Key::LALT)]
+        );
+        // reset keeps the setting.
+        e.reset();
+        assert_eq!(e.on_event(down(Key::CAPSLOCK), false).synth.len(), 3);
+    }
+
+    #[test]
+    fn hotkey_from_a_normal_chord_releases_and_restores_the_users_modifiers() {
+        let mut e = engine_of(&[("ctrl+t", false)]);
+        e.on_event(down(Key::LCTRL), false);
+        e.on_event(down(T), false);
+        let chord = kuality_protocol::parse_chord("win+1").unwrap();
+        assert_eq!(
+            e.hotkey(&chord).as_slice(),
+            [
+                Down(Key::MASK),
+                Up(Key::MASK),
+                Up(Key::LCTRL),
+                Down(Key::LWIN),
+                Down(K1),
+                Up(K1),
+                Up(Key::LWIN),
+                Down(Key::LCTRL),
+            ]
+        );
+        assert!(!e.modifiers_down(), "user modifiers are not Kuality's");
+        // Win held by the user: mask after restoring it.
+        let mut e = engine_of(&[("win+e", false)]);
+        e.on_event(down(Key::RWIN), false);
+        e.on_event(down(E), false);
+        let chord = kuality_protocol::parse_chord("ctrl+c").unwrap();
+        let buf = e.hotkey(&chord);
+        assert_eq!(
+            &buf.as_slice()[buf.len() - 3..],
+            [Down(Key::RWIN), Down(Key::MASK), Up(Key::MASK)]
+        );
+        assert_eq!(buf.as_slice()[2], Up(Key::RWIN));
+        // Longest case still fits: 8 held modifiers + 5-key chord.
+        let mut e = engine_of(&[]);
+        for k in Key::SIDED_MODIFIERS {
+            e.on_event(down(k), false);
+        }
+        let chord = kuality_protocol::parse_chord("lctrl+rctrl+shift+alt+k").unwrap();
+        assert_eq!(e.hotkey(&chord).len(), 2 + 8 + 10 + 8 + 2);
     }
 
     fn engine_with(keys: &[Key]) -> Engine {

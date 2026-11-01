@@ -74,7 +74,7 @@ impl<W: DirWatcher> App<W> {
             o.apply(&app.config.widgets);
         }
         // Also cleans up after a crash when Hyperkey is now disabled.
-        reconcile_office_key(app.config.hyperkey.enabled);
+        reconcile_office_key(office_override_wanted(&app.config));
         app
     }
 
@@ -162,8 +162,8 @@ impl<W: DirWatcher> App<W> {
         logging::set_level(new.general.log_level);
         // On every reload: the keyboard thread reinstalls the hook, which is harmless.
         self.apply_keyboard(&new);
-        if new.hyperkey.enabled != self.config.hyperkey.enabled {
-            reconcile_office_key(new.hyperkey.enabled);
+        if office_override_wanted(&new) != office_override_wanted(&self.config) {
+            reconcile_office_key(office_override_wanted(&new));
         }
         // Only when the section changed: an Apply also brings back widgets hidden from the menu.
         if new.widgets != self.config.widgets
@@ -182,17 +182,23 @@ impl<W: DirWatcher> App<W> {
             return;
         };
         let compiled = shortcuts::compile(&config.shortcuts);
-        if config.shortcuts.enabled && !config.hyperkey.enabled {
-            log::warn!("shortcuts are enabled but need Hyperkey (hyperkey.enabled) to work");
+        if compiled.has_hyper() && !config.hyperkey.enabled {
+            log::warn!("Hyper shortcuts need Hyperkey (hyperkey.enabled) to work");
         }
         k.apply(&config.hyperkey, Arc::new(compiled));
     }
 }
 
-/// Disables the Office key while Hyperkey is enabled, restores it otherwise. Failures are only
+/// The Office key override is only needed when Hyper presses Ctrl+Shift+Alt+Win (the Office
+/// key combination); without Win, Hyper never produces it.
+fn office_override_wanted(config: &Config) -> bool {
+    config.hyperkey.enabled && config.hyperkey.include_win
+}
+
+/// Disables the Office key while Hyperkey (with Win) is enabled, restores it otherwise. Failures are only
 /// logged: they never stop Hyperkey.
-fn reconcile_office_key(hyperkey_enabled: bool) {
-    let (what, result) = if hyperkey_enabled {
+fn reconcile_office_key(wanted: bool) {
+    let (what, result) = if wanted {
         ("disabled", platform::office_key::apply())
     } else {
         ("restored", platform::office_key::restore())

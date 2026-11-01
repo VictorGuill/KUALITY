@@ -298,9 +298,281 @@ pub fn parse_chord(s: &str) -> Result<Chord, KeyParseError> {
     Ok(chord)
 }
 
+/// Side-agnostic modifier set of a shortcut [`Trigger`] (`ctrl` matches Left or Right Ctrl).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Mods(u8);
+
+impl Mods {
+    pub const NONE: Mods = Mods(0);
+    pub const CTRL: Mods = Mods(1);
+    pub const SHIFT: Mods = Mods(2);
+    pub const ALT: Mods = Mods(4);
+    pub const WIN: Mods = Mods(8);
+    /// In the order they are written and shown.
+    pub const ALL: [Mods; 4] = [Mods::CTRL, Mods::SHIFT, Mods::ALT, Mods::WIN];
+
+    /// The generic modifier of a (sided or generic) modifier key; `NONE` for other keys.
+    pub fn of(key: Key) -> Mods {
+        match key {
+            Key::CTRL | Key::LCTRL | Key::RCTRL => Mods::CTRL,
+            Key::SHIFT | Key::LSHIFT | Key::RSHIFT => Mods::SHIFT,
+            Key::ALT | Key::LALT | Key::RALT => Mods::ALT,
+            Key::LWIN | Key::RWIN => Mods::WIN,
+            _ => Mods::NONE,
+        }
+    }
+
+    pub fn bits(self) -> u8 {
+        self.0
+    }
+
+    pub fn contains(self, other: Mods) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Config name (`ctrl`, `shift`, `alt`, `win`) of a single modifier.
+    fn name(self) -> &'static str {
+        match self {
+            Mods::CTRL => "ctrl",
+            Mods::SHIFT => "shift",
+            Mods::ALT => "alt",
+            _ => "win",
+        }
+    }
+}
+
+impl std::ops::BitOr for Mods {
+    type Output = Mods;
+    fn bitor(self, rhs: Mods) -> Mods {
+        Mods(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for Mods {
+    fn bitor_assign(&mut self, rhs: Mods) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl fmt::Debug for Mods {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<&str> = Mods::ALL
+            .iter()
+            .filter(|&&m| self.contains(m))
+            .map(|m| m.name())
+            .collect();
+        write!(f, "Mods({})", names.join("+"))
+    }
+}
+
+/// What starts a shortcut: Hyper + key, or modifiers + key (see `docs/specs/shortcuts.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Trigger {
+    /// Hyper (CapsLock) + `key`; `mods` is then empty.
+    pub hyper: bool,
+    pub mods: Mods,
+    /// Never a modifier or CapsLock.
+    pub key: Key,
+}
+
+/// Why a trigger was rejected. Messages never repeat the input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerError {
+    Key(KeyParseError),
+    /// A token other than the last is not a modifier or `hyper`.
+    NotAModifier,
+    /// The same modifier twice (`ctrl+rctrl` counts: sides are ignored).
+    Duplicate,
+    /// The last token is a modifier.
+    ModifierKey,
+    /// CapsLock is the Hyper key itself.
+    CapsLock,
+    /// `hyper` plus another modifier (physical modifiers are ignored while Hyper is held).
+    HyperWithModifiers,
+    /// Windows keeps this combination (Ctrl+Alt+Del, Win+L).
+    Reserved,
+}
+
+impl fmt::Display for TriggerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Key(e) => write!(f, "{e}"),
+            Self::NotAModifier => f.write_str("only the last key may be a non-modifier"),
+            Self::Duplicate => f.write_str("the same modifier appears twice"),
+            Self::ModifierKey => f.write_str("a modifier cannot be the shortcut key"),
+            Self::CapsLock => f.write_str("capslock is the Hyper key itself"),
+            Self::HyperWithModifiers => {
+                f.write_str("hyper cannot be combined with other modifiers")
+            }
+            Self::Reserved => f.write_str("Windows reserves this combination"),
+        }
+    }
+}
+
+impl std::error::Error for TriggerError {}
+
+impl Trigger {
+    pub fn hyper(key: Key) -> Self {
+        Self {
+            hyper: true,
+            mods: Mods::NONE,
+            key,
+        }
+    }
+
+    /// Ctrl+Alt+Del (with any other modifiers) and Win+L: Windows handles them before any hook.
+    pub fn is_reserved(&self) -> bool {
+        const DELETE: Key = Key(0x2E);
+        const L: Key = Key(0x4C);
+        !self.hyper
+            && ((self.mods.contains(Mods::CTRL | Mods::ALT) && self.key == DELETE)
+                || (self.mods == Mods::WIN && self.key == L))
+    }
+
+    /// Canonical config text: `hyper+1`, `ctrl+alt+k` (modifiers in the order ctrl, shift,
+    /// alt, win).
+    pub fn to_config(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if self.hyper {
+            parts.push("hyper".into());
+        }
+        for m in Mods::ALL {
+            if self.mods.contains(m) {
+                parts.push(m.name().into());
+            }
+        }
+        parts.push(self.key.name());
+        parts.join("+")
+    }
+}
+
+/// Parses a shortcut trigger: `"hyper+1"`, `"ctrl+t"`, `"win+e"`, `"ctrl+alt+k"`. A bare key
+/// (`"1"`) means Hyper + that key (the Phase 2 format). Case-insensitive, spaces around tokens
+/// ignored, modifier sides ignored (`rctrl` = `ctrl`).
+pub fn parse_trigger(s: &str) -> Result<Trigger, TriggerError> {
+    let tokens: Vec<&str> = s.split('+').collect();
+    let (last, mods_tokens) = tokens
+        .split_last()
+        .expect("split yields at least one token");
+    let mut hyper = false;
+    let mut mods = Mods::NONE;
+    for token in mods_tokens {
+        if token.trim().eq_ignore_ascii_case("hyper") {
+            if hyper {
+                return Err(TriggerError::Duplicate);
+            }
+            hyper = true;
+            continue;
+        }
+        let key = parse_key(token).map_err(TriggerError::Key)?;
+        let m = Mods::of(key);
+        if m.is_empty() {
+            return Err(TriggerError::NotAModifier);
+        }
+        if mods.contains(m) {
+            return Err(TriggerError::Duplicate);
+        }
+        mods |= m;
+    }
+    let key = parse_key(last).map_err(TriggerError::Key)?;
+    if key == Key::CAPSLOCK {
+        return Err(TriggerError::CapsLock);
+    }
+    if key.is_modifier() {
+        return Err(TriggerError::ModifierKey);
+    }
+    if hyper && !mods.is_empty() {
+        return Err(TriggerError::HyperWithModifiers);
+    }
+    let trigger = Trigger {
+        hyper: hyper || mods.is_empty(),
+        mods,
+        key,
+    };
+    if trigger.is_reserved() {
+        return Err(TriggerError::Reserved);
+    }
+    Ok(trigger)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn trig(s: &str) -> Trigger {
+        parse_trigger(s).unwrap_or_else(|e| panic!("{s:?}: {e}"))
+    }
+
+    #[test]
+    fn bare_key_and_hyper_prefix_are_hyper() {
+        assert_eq!(trig("1"), Trigger::hyper(Key(0x31)));
+        assert_eq!(trig(" G "), Trigger::hyper(Key(0x47)));
+        assert_eq!(trig("hyper+1"), Trigger::hyper(Key(0x31)));
+        assert_eq!(trig(" HYPER + pageup"), Trigger::hyper(Key(0x21)));
+        assert_eq!(trig("1").to_config(), "hyper+1");
+    }
+
+    #[test]
+    fn normal_chords_ignore_sides_and_order() {
+        let t = trig("ctrl+t");
+        assert!(!t.hyper);
+        assert_eq!(t.mods, Mods::CTRL);
+        assert_eq!(t.key, Key(0x54));
+        assert_eq!(trig("win+e").mods, Mods::WIN);
+        assert_eq!(trig("alt+ctrl+k"), trig("ctrl+alt+k"));
+        assert_eq!(trig("rctrl+ralt+k"), trig("ctrl+alt+k"));
+        assert_eq!(
+            trig("Ctrl + Shift + Alt + Win + F13").to_config(),
+            "ctrl+shift+alt+win+f13"
+        );
+        assert_eq!(trig("alt+ctrl+k").to_config(), "ctrl+alt+k");
+        assert_eq!(trig("shift+oem_plus").to_config(), "shift+oem_plus");
+    }
+
+    #[test]
+    fn bad_triggers() {
+        use TriggerError::*;
+        assert_eq!(parse_trigger("ctrl"), Err(ModifierKey));
+        assert_eq!(parse_trigger("win"), Err(ModifierKey));
+        assert_eq!(parse_trigger("capslock"), Err(CapsLock));
+        assert_eq!(parse_trigger("ctrl+capslock"), Err(CapsLock));
+        assert_eq!(parse_trigger("a+b"), Err(NotAModifier));
+        assert_eq!(parse_trigger("ctrl+rctrl+k"), Err(Duplicate));
+        assert_eq!(parse_trigger("hyper+hyper+k"), Err(Duplicate));
+        assert_eq!(parse_trigger("hyper+ctrl+k"), Err(HyperWithModifiers));
+        assert_eq!(parse_trigger("ctrl+hyper+k"), Err(HyperWithModifiers));
+        assert_eq!(parse_trigger("hyper"), Err(Key(KeyParseError::Unknown)));
+        assert_eq!(parse_trigger(""), Err(Key(KeyParseError::Empty)));
+        assert_eq!(parse_trigger("ctrl+"), Err(Key(KeyParseError::Empty)));
+        assert_eq!(parse_trigger("+k"), Err(Key(KeyParseError::Empty)));
+    }
+
+    #[test]
+    fn reserved_combinations() {
+        use TriggerError::Reserved;
+        assert_eq!(parse_trigger("ctrl+alt+del"), Err(Reserved));
+        assert_eq!(parse_trigger("ctrl+alt+shift+delete"), Err(Reserved));
+        assert_eq!(parse_trigger("win+l"), Err(Reserved));
+        // Not reserved: other modifiers or Hyper.
+        assert!(parse_trigger("win+shift+l").is_ok());
+        assert!(parse_trigger("ctrl+del").is_ok());
+        assert!(parse_trigger("hyper+l").is_ok());
+        assert!(parse_trigger("l").is_ok());
+    }
+
+    #[test]
+    fn mods_of_keys() {
+        assert_eq!(Mods::of(Key::RCTRL), Mods::CTRL);
+        assert_eq!(Mods::of(Key::LSHIFT), Mods::SHIFT);
+        assert_eq!(Mods::of(Key::RALT), Mods::ALT);
+        assert_eq!(Mods::of(Key::RWIN), Mods::WIN);
+        assert_eq!(Mods::of(Key::CAPSLOCK), Mods::NONE);
+        assert_eq!(format!("{:?}", Mods::CTRL | Mods::WIN), "Mods(ctrl+win)");
+    }
 
     #[test]
     fn trigger_keys_exclude_modifiers_and_capslock() {

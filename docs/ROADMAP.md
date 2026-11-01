@@ -41,6 +41,7 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 - [x] Bindings Hyper+key from config
 - [x] Actions: `launch`, `send_hotkey`, `open_url`
 - [x] Bound shortcuts are consumed (not forwarded); unbound ones pass through as the Hyper combo
+- [x] *(2026-11-01, follow-up)* Any hotkey (`ctrl+t`, `win+e`…) besides Hyper+key, "Also send to the app" option, Hyperkey "Include Windows key" option; settings table with a Name column and the ✦ Hyper keycap
 
 **Done when:** Hyper+1 opens the configured program and Hyper+2 sends the configured hotkey.
 

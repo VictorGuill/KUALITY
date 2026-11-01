@@ -17,4 +17,6 @@ pub use config::{
     LaunchArgs, Length, Lenient, LogLevel, MAX_URL_LEN, OpenUrlAction, Origin, SendHotkeyAction,
     Shortcuts, TextAlign, TextWidget, WidgetEntry, WidgetItem, Widgets, valid_url,
 };
-pub use keys::{Chord, Key, KeyParseError, parse_chord, parse_key};
+pub use keys::{
+    Chord, Key, KeyParseError, Mods, Trigger, TriggerError, parse_chord, parse_key, parse_trigger,
+};

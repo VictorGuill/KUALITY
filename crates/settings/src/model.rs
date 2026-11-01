@@ -8,8 +8,9 @@ use std::time::SystemTime;
 
 use kuality_protocol::store;
 use kuality_protocol::{
-    Action, BindingEntry, CONFIG_VERSION, Color, Config, Key, LaunchAction, LaunchArgs, Length,
-    OpenUrlAction, SendHotkeyAction, WidgetEntry, parse_chord, parse_key, quote, valid_url,
+    Action, BindingEntry, CONFIG_VERSION, Color, Config, Key, KeyParseError, LaunchAction,
+    LaunchArgs, Length, Mods, OpenUrlAction, SendHotkeyAction, Trigger, TriggerError, WidgetEntry,
+    parse_chord, parse_trigger, quote, valid_url,
 };
 
 /// What the file on disk looks like.
@@ -177,19 +178,16 @@ fn stamp(path: &Path) -> Option<Stamp> {
 // ---------------------------------------------------------------------------------------------
 // Field validation. Every function returns the value to store or a short message for the UI.
 
-/// A shortcut trigger key name.
-pub fn validate_trigger(name: &str) -> Result<Key, &'static str> {
-    if name.trim().is_empty() {
-        return Err("Choose a key");
-    }
-    let key = parse_key(name).map_err(|_| "Unknown key name")?;
-    if key == Key::CAPSLOCK {
-        return Err("CapsLock is the Hyper key itself");
-    }
-    if !key.is_trigger() {
-        return Err("A modifier cannot be the shortcut key");
-    }
-    Ok(key)
+/// A shortcut hotkey (`hyper+1`, `ctrl+t`; a bare key is Hyper + key).
+pub fn validate_trigger(text: &str) -> Result<Trigger, &'static str> {
+    parse_trigger(text).map_err(|e| match e {
+        TriggerError::Key(KeyParseError::Empty) => "Choose a hotkey",
+        TriggerError::CapsLock => "CapsLock is the Hyper key itself",
+        TriggerError::ModifierKey => "A modifier cannot be the shortcut key",
+        TriggerError::HyperWithModifiers => "Hyper cannot be combined with Ctrl, Shift, Alt or Win",
+        TriggerError::Reserved => "Windows reserves this hotkey",
+        _ => "Unknown key name",
+    })
 }
 
 /// A `send_hotkey` chord.
@@ -353,11 +351,11 @@ pub fn duplicate_widget_id(items: &[WidgetEntry], index: usize) -> bool {
         .any(|(i, e)| i != index && id_of(e).as_deref() == Some(id.as_str()))
 }
 
-/// Another enabled binding uses the same trigger key as `bindings[index]` (core rule: the first
-/// enabled one wins).
+/// Another enabled binding uses the same hotkey as `bindings[index]` (core rule: the first
+/// enabled one wins). `"1"` and `"hyper+1"` are the same hotkey.
 pub fn duplicate_trigger(bindings: &[BindingEntry], index: usize) -> bool {
     let key_of = |e: &BindingEntry| match e {
-        BindingEntry::Valid(b) if b.enabled => parse_key(&b.key).ok(),
+        BindingEntry::Valid(b) if b.enabled => parse_trigger(&b.key).ok(),
         _ => None,
     };
     let Some(key) = bindings.get(index).and_then(key_of) else {
@@ -545,15 +543,54 @@ pub fn chord_label(keys: &str) -> String {
     }
 }
 
-/// The Hotkey button text: `Hyper + 1`; `None` when no key is set yet.
-pub fn hotkey_label(key: &str) -> Option<String> {
-    if key.trim().is_empty() {
+/// One keycap of a hotkey.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Keycap {
+    /// The Hyper key (drawn as a star).
+    Hyper,
+    Text(String),
+}
+
+/// The keycaps of a hotkey: `[Hyper] [1]`, `[Ctrl] [T]`. Text that is not a valid hotkey is
+/// one keycap with the raw text. `None` when no hotkey is set yet.
+pub fn hotkey_caps(text: &str) -> Option<Vec<Keycap>> {
+    if text.trim().is_empty() {
         return None;
     }
-    Some(match parse_key(key) {
-        Ok(k) => format!("Hyper + {}", key_display(k)),
-        Err(_) => format!("Hyper + {}", key.trim()),
+    Some(match parse_trigger(text) {
+        Ok(t) => {
+            let mut caps = Vec::new();
+            if t.hyper {
+                caps.push(Keycap::Hyper);
+            }
+            for (m, name) in Mods::ALL.into_iter().zip(["Ctrl", "Shift", "Alt", "Win"]) {
+                if t.mods.contains(m) {
+                    caps.push(Keycap::Text(name.into()));
+                }
+            }
+            caps.push(Keycap::Text(key_display(t.key)));
+            caps
+        }
+        Err(_) => vec![Keycap::Text(text.trim().to_string())],
     })
+}
+
+/// The hotkey as text (accessibility, tests): `Hyper + 1`, `Ctrl + Alt + K`; `None` when unset.
+pub fn hotkey_label(text: &str) -> Option<String> {
+    hotkey_caps(text).map(|caps| {
+        caps.into_iter()
+            .map(|c| match c {
+                Keycap::Hyper => "Hyper".to_string(),
+                Keycap::Text(t) => t,
+            })
+            .collect::<Vec<_>>()
+            .join(" + ")
+    })
+}
+
+/// The hotkey needs Hyperkey (a Hyper hotkey, bare keys included).
+pub fn is_hyper_hotkey(text: &str) -> bool {
+    parse_trigger(text).is_ok_and(|t| t.hyper)
 }
 
 /// A URL for labels: scheme, `www.` and a trailing `/` dropped for web addresses.
@@ -596,28 +633,42 @@ fn file_label(path: &str) -> String {
     }
 }
 
-/// The Action button text. `app_name` looks an app id up in the installed apps.
-pub fn action_label(action: &Action, app_name: impl Fn(&str) -> Option<String>) -> String {
+/// The action as a verb and its object: `("Open", "Helium")`, `("Open", "github.com")`,
+/// `("Send", "Win + 1")`, `("Run", "notepad.exe …")`. `app_name` looks an app id up in the
+/// installed apps.
+pub fn action_parts(
+    action: &Action,
+    app_name: impl Fn(&str) -> Option<String>,
+) -> (&'static str, String) {
     match (kind_of(action), action) {
         (ActionKind::App, Action::Launch(l)) => {
             let id = app_id(&l.path).unwrap_or_default();
-            app_name(id).unwrap_or_else(|| fallback_app_name(id))
+            (
+                "Open",
+                app_name(id).unwrap_or_else(|| fallback_app_name(id)),
+            )
         }
-        (_, Action::OpenUrl(u)) => format!("Open {}", url_label(&u.url)),
-        (_, Action::SendHotkey(h)) => format!("Send {}", chord_label(&h.keys)),
+        (_, Action::OpenUrl(u)) => ("Open", url_label(&u.url)),
+        (_, Action::SendHotkey(h)) => ("Send", chord_label(&h.keys)),
         (ActionKind::RunProgram, Action::Launch(l)) => {
             let name = match app_id(&l.path) {
                 Some(id) => app_name(id).unwrap_or_else(|| fallback_app_name(id)),
                 None => file_label(&l.path),
             };
             if args_empty(&l.args) {
-                format!("Run {name}")
+                ("Run", name)
             } else {
-                format!("Run {name} …")
+                ("Run", format!("{name} …"))
             }
         }
-        (_, Action::Launch(l)) => format!("Open {}", file_label(&l.path)),
+        (_, Action::Launch(l)) => ("Open", file_label(&l.path)),
     }
+}
+
+/// Grey placeholder of an empty Name field: the action with its verb (`Open Helium`).
+pub fn name_placeholder(action: &Action, app_name: impl Fn(&str) -> Option<String>) -> String {
+    let (verb, object) = action_parts(action, app_name);
+    format!("{verb} {object}")
 }
 
 /// A choice made in the action picker.
@@ -828,12 +879,20 @@ mod tests {
 
     #[test]
     fn trigger_validation() {
-        assert_eq!(validate_trigger("g"), Ok(Key(0x47)));
-        assert_eq!(validate_trigger(" F5 "), Ok(Key(0x74)));
-        assert!(validate_trigger("").is_err());
+        assert_eq!(validate_trigger("g"), Ok(Trigger::hyper(Key(0x47))));
+        assert_eq!(validate_trigger(" F5 "), Ok(Trigger::hyper(Key(0x74))));
+        assert_eq!(validate_trigger("hyper+g"), Ok(Trigger::hyper(Key(0x47))));
+        let t = validate_trigger("ctrl+t").unwrap();
+        assert!(!t.hyper && t.mods == Mods::CTRL);
+        assert_eq!(validate_trigger(""), Err("Choose a hotkey"));
         assert!(validate_trigger("capslock").is_err());
         assert!(validate_trigger("ctrl").is_err());
         assert!(validate_trigger("nope").is_err());
+        assert_eq!(
+            validate_trigger("win+l"),
+            Err("Windows reserves this hotkey")
+        );
+        assert!(validate_trigger("hyper+alt+k").is_err());
     }
 
     #[test]
@@ -910,6 +969,7 @@ mod tests {
             key: key.into(),
             name: String::new(),
             enabled,
+            pass_through: false,
             action: Action::OpenUrl(OpenUrlAction {
                 url: "https://a.b".into(),
                 extra: Default::default(),
@@ -922,14 +982,19 @@ mod tests {
     fn duplicate_triggers_count_enabled_bindings_and_aliases() {
         let b = vec![
             binding("g", true),
-            binding("G", true),
+            binding("hyper+G", true),
             binding("h", true),
             binding("h", false),
+            binding("ctrl+h", true),
+            binding("alt+rctrl+k", true),
+            binding("ctrl+alt+k", true),
         ];
         assert!(duplicate_trigger(&b, 0));
         assert!(duplicate_trigger(&b, 1));
         assert!(!duplicate_trigger(&b, 2));
         assert!(!duplicate_trigger(&b, 3));
+        assert!(!duplicate_trigger(&b, 4), "ctrl+h is not hyper+h");
+        assert!(duplicate_trigger(&b, 5) && duplicate_trigger(&b, 6));
     }
     fn launch(path: &str, args: LaunchArgs, cwd: Option<&str>) -> Action {
         Action::Launch(LaunchAction {
@@ -1027,10 +1092,22 @@ mod tests {
             "unparseable text is shown as typed"
         );
         assert_eq!(hotkey_label("1").as_deref(), Some("Hyper + 1"));
+        assert_eq!(hotkey_label("hyper+1").as_deref(), Some("Hyper + 1"));
         assert_eq!(hotkey_label("G").as_deref(), Some("Hyper + G"));
         assert_eq!(hotkey_label("space").as_deref(), Some("Hyper + Space"));
-        assert_eq!(hotkey_label("hyper").as_deref(), Some("Hyper + hyper"));
+        assert_eq!(
+            hotkey_label("alt+ctrl+k").as_deref(),
+            Some("Ctrl + Alt + K")
+        );
+        assert_eq!(hotkey_label("win+e").as_deref(), Some("Win + E"));
+        assert_eq!(hotkey_label("hyper").as_deref(), Some("hyper"));
         assert_eq!(hotkey_label(" "), None);
+        assert_eq!(
+            hotkey_caps("hyper+pageup"),
+            Some(vec![Keycap::Hyper, Keycap::Text("Page Up".into())])
+        );
+        assert!(is_hyper_hotkey("1") && is_hyper_hotkey("hyper+1"));
+        assert!(!is_hyper_hotkey("ctrl+1") && !is_hyper_hotkey("bad key"));
         assert_eq!(key_display(Key(0xE8)), "vk:0xE8");
         assert_eq!(key_display(Key(0xDF)), "Oem 8");
     }
@@ -1059,11 +1136,29 @@ mod tests {
         assert_eq!(normalize_url(".hidden"), ".hidden");
     }
 
+    /// The action in words as the Action button shows it: an app is just its name, the rest
+    /// `Open github.com`, `Send Win + 1`, `Run notepad.exe`.
+    fn action_label(action: &Action, app_name: impl Fn(&str) -> Option<String>) -> String {
+        let (verb, object) = action_parts(action, app_name);
+        if kind_of(action) == ActionKind::App {
+            object
+        } else {
+            format!("{verb} {object}")
+        }
+    }
+
     #[test]
     fn action_labels() {
         let names = |id: &str| (id == "Helium.ABC").then(|| "Helium".to_string());
         let app = |id: &str| launch(&app_path(id), no_args(), None);
         assert_eq!(action_label(&app("Helium.ABC"), names), "Helium");
+        assert_eq!(name_placeholder(&app("Helium.ABC"), names), "Open Helium");
+        assert_eq!(
+            action_parts(&app("Helium.ABC"), names),
+            ("Open", "Helium".to_string())
+        );
+        let keys = build_action(Choice::SendKeys("win+1".into()), None);
+        assert_eq!(name_placeholder(&keys, names), "Send Win + 1");
         assert_eq!(
             action_label(&app("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"), names),
             "WindowsCalculator",

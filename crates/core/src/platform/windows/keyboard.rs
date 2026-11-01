@@ -3,11 +3,12 @@
 //!
 //! One thread (`kuality-keyboard`) lives for the whole process. It owns a hidden top-level
 //! window (so it receives session, power and other broadcasts), the [`Engine`] and the hook.
-//! The hook itself is installed only while Hyperkey is active (enabled and not paused).
+//! The hook itself is installed only while needed and not paused: Hyperkey is enabled, or a
+//! shortcut uses a normal hotkey (`ctrl+t`, `win+e`…).
 //!
 //! The hook callback follows strict rules: no heap allocation, no locks, no logging, nothing
-//! that can block. It only runs the engine, calls `GetKeyState`, one `SendInput` and posts
-//! trace and action messages to its own window. The window procedure runs the shortcut:
+//! that can block. It only runs the engine, calls `GetKeyState` / `GetAsyncKeyState`, one
+//! `SendInput` and posts trace and action messages to its own window. The window procedure runs the shortcut:
 //! `send_hotkey` right here (it must coordinate with the injected Hyper modifiers), `launch`
 //! and `open_url` on the action worker.
 
@@ -46,7 +47,9 @@ use kuality_protocol::Key;
 use super::input::{self, KUALITY_TAG};
 use crate::actions::{ActionWorker, Job};
 use crate::hyperkey::KeyboardCommand;
-use crate::hyperkey::engine::{Engine, HYPER_RELEASE_ORDER, KeyEvent, Synth, SynthBuf, Transition};
+use crate::hyperkey::engine::{
+    Engine, HYPER_RELEASE_ORDER, KeyEvent, ModSet, Synth, SynthBuf, Transition,
+};
 use crate::platform::KeyboardBackend;
 use crate::shortcuts::{CompiledAction, CompiledBindings};
 
@@ -148,6 +151,7 @@ impl Drop for DoneGuard {
 struct Ctx {
     hwnd: HWND,
     rx: Receiver<KeyboardCommand>,
+    /// `hyperkey.enabled`.
     enabled: bool,
     paused: bool,
     hook: Option<HHOOK>,
@@ -290,8 +294,9 @@ fn with_ctx<R>(f: impl FnOnce(&mut Ctx) -> R) -> Option<R> {
 }
 
 impl Ctx {
+    /// The hook is needed: Hyperkey, or a normal hotkey, and not paused.
     fn active(&self) -> bool {
-        self.enabled && !self.paused
+        (self.enabled || self.bindings.has_normal()) && !self.paused
     }
 
     fn handle(&mut self, cmd: KeyboardCommand) -> bool {
@@ -303,12 +308,15 @@ impl Ctx {
                 // The previous table is dropped here, outside the hook callback.
                 let _previous = ENGINE.with_borrow_mut(|e| e.set_bindings(Arc::clone(&shortcuts)));
                 self.bindings = shortcuts;
+                let pressed = ENGINE.with_borrow(Engine::pressed);
+                // `update` releases a held Hyper with the modifiers it really injected, so the
+                // new settings may be set first.
                 self.enabled = hyperkey.enabled;
-                let consumed = ENGINE.with_borrow(Engine::consumed);
+                ENGINE.with_borrow_mut(|e| e.set_hyper(hyperkey.enabled, hyperkey.include_win));
                 self.update(true);
                 if self.hook.is_some() {
-                    // Apply does not forget consumed keys (shortcuts.md).
-                    ENGINE.with_borrow_mut(|e| e.restore_consumed(consumed));
+                    // Apply does not forget pressed keys (shortcuts.md).
+                    ENGINE.with_borrow_mut(|e| e.restore_pressed(pressed));
                 }
             }
             KeyboardCommand::SetPaused(paused) => {
@@ -340,15 +348,20 @@ impl Ctx {
         match (self.hook.is_some(), want) {
             (false, true) => {
                 self.install_hook();
-                caps_toggle_off();
-                log::info!("hyperkey active");
+                if self.enabled {
+                    caps_toggle_off();
+                }
+                log::info!(
+                    "keyboard hook on (hyperkey {})",
+                    if self.enabled { "on" } else { "off" }
+                );
             }
             (true, false) => {
                 release_all();
                 self.uninstall_hook();
                 log::info!(
-                    "hyperkey inactive ({})",
-                    if self.enabled { "paused" } else { "disabled" }
+                    "keyboard hook off ({})",
+                    if self.paused { "paused" } else { "not needed" }
                 );
             }
             (true, true) if reinstall => {
@@ -369,7 +382,11 @@ impl Ctx {
                 .and_then(|m| SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), Some(m.into()), 0))
         };
         match r {
-            Ok(h) => self.hook = Some(h),
+            Ok(h) => {
+                self.hook = Some(h);
+                // Modifiers held while the hook was off: their downs were never seen.
+                ENGINE.with_borrow_mut(|e| e.sync_physical(system_modifiers()));
+            }
             Err(e) => log::error!("cannot install keyboard hook: {e}"),
         }
     }
@@ -437,7 +454,9 @@ impl Ctx {
         if self.active() {
             self.uninstall_hook();
             self.install_hook();
-            caps_toggle_off();
+            if self.enabled {
+                caps_toggle_off();
+            }
         }
         log::debug!("{why}: state reset");
     }
@@ -483,6 +502,19 @@ fn caps_toggle_off() {
             log::info!("CapsLock was on; turned it off");
         }
     }
+}
+
+/// The sided modifiers the system reports down (physical, plus whatever other software
+/// injected). Allocation-free; also called inside the hook callback.
+fn system_modifiers() -> ModSet {
+    let mut set = ModSet::EMPTY;
+    for k in Key::SIDED_MODIFIERS {
+        // SAFETY: reads the async key state; no pointers.
+        if unsafe { GetAsyncKeyState(i32::from(k.0)) } < 0 {
+            set.set(k, true);
+        }
+    }
+    set
 }
 
 fn caps_toggled_on() -> bool {
@@ -622,6 +654,11 @@ unsafe fn on_key(wparam: WPARAM, lparam: LPARAM) -> bool {
 
     let result = ENGINE.with(|e| {
         let mut e = e.try_borrow_mut().ok()?;
+        if e.wants_modifier_check(ev) {
+            // A modifier up we never saw (hook off, elevated window in front) must not turn
+            // this key into a hotkey. The async state is only used to clear, never to set.
+            e.drop_stale_modifiers(system_modifiers());
+        }
         let caps_on = ev.key == Key::CAPSLOCK && down && !e.is_held() && caps_toggled_on();
         let verdict = e.on_event(ev, caps_on);
         Some((verdict, e.modifiers_down(), e.bindings_generation()))

@@ -1,8 +1,11 @@
-//! Shortcuts tab: the switch and a two-column table, one row per shortcut:
-//! `[enabled] | Hotkey (recorder button) | Action (button opening the picker) | delete`.
-//! A new shortcut is a draft row until it has both a hotkey and an action.
+//! Shortcuts tab: the switch and a table, one row per shortcut:
+//! `[enabled] | Name (optional input) | Hotkey (recorder button) | Action (button opening the
+//! picker) | more (… menu) | delete`. A new shortcut is a draft row until it has both a hotkey
+//! and an action.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
@@ -11,10 +14,11 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use kuality_protocol::{Action, Binding, BindingEntry, parse_key};
+use kuality_protocol::{Action, Binding, BindingEntry, parse_trigger};
 
 use super::controls::{
-    add_button, divider, hint_text, list_header, section, setting_row, warning_text,
+    add_button, divider, hint_text, hyper_keycap, keycaps, list_header, section, setting_row,
+    warning_text,
 };
 use super::picker::{ActionPicker, PickerEvent, kind_icon};
 use super::{RecordTarget, SettingsWindow};
@@ -52,6 +56,14 @@ pub(crate) struct Draft {
     action: Option<Action>,
 }
 
+/// The Name input of a saved row.
+pub(crate) struct NameField {
+    input: Entity<InputState>,
+    /// Current placeholder (the action in words), to update it only when it changes.
+    placeholder: String,
+    _sub: Subscription,
+}
+
 /// The action picker, open for one row.
 pub(crate) struct OpenPicker {
     pub row: Row,
@@ -59,8 +71,13 @@ pub(crate) struct OpenPicker {
     _sub: Subscription,
 }
 
-const HOTKEY_WIDTH: f32 = 168.;
-const SWITCH_WIDTH: f32 = 40.;
+const HOTKEY_WIDTH: f32 = 160.;
+const SWITCH_WIDTH: f32 = 52.;
+/// The … and delete buttons at the end of a row.
+const TAIL_WIDTH: f32 = 60.;
+/// Relative widths of the Name and Action columns.
+const NAME_GROW: f32 = 1.;
+const ACTION_GROW: f32 = 1.6;
 
 impl SettingsWindow {
     fn binding(&self, index: usize) -> Option<&Binding> {
@@ -225,6 +242,7 @@ impl SettingsWindow {
                 key,
                 name: String::new(),
                 enabled: true,
+                pass_through: false,
                 action,
                 extra: Default::default(),
             }));
@@ -285,7 +303,77 @@ impl SettingsWindow {
             self.close_picker(cx);
         }
         self.doc.config.shortcuts.bindings.remove(index);
+        // Indices after it moved.
+        self.name_fields.clear();
         self.changed(cx);
+    }
+
+    fn set_name(&mut self, index: usize, name: String, cx: &mut Context<Self>) {
+        if self.read_only() {
+            return;
+        }
+        if let Some(BindingEntry::Valid(b)) = self.doc.config.shortcuts.bindings.get_mut(index)
+            && b.name != name
+        {
+            b.name = name;
+            self.changed(cx);
+        }
+    }
+
+    fn set_pass_through(&mut self, index: usize, on: bool, cx: &mut Context<Self>) {
+        if self.read_only() {
+            return;
+        }
+        if let Some(BindingEntry::Valid(b)) = self.doc.config.shortcuts.bindings.get_mut(index)
+            && b.pass_through != on
+        {
+            b.pass_through = on;
+            self.changed(cx);
+        }
+    }
+
+    /// The Name input of row `index`, created on first use; its placeholder follows the action.
+    fn name_input(
+        &mut self,
+        index: usize,
+        name: &str,
+        placeholder: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        if let Some(f) = self.name_fields.get_mut(&index) {
+            if f.placeholder != placeholder {
+                f.input.update(cx, |s, cx| {
+                    s.set_placeholder(placeholder.clone(), window, cx)
+                });
+                f.placeholder = placeholder;
+            }
+            return f.input.clone();
+        }
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder.clone())
+                .default_value(name.to_string())
+        });
+        let sub = cx.subscribe_in(
+            &input,
+            window,
+            move |this, input, ev: &InputEvent, _, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    let value = input.read(cx).value().to_string();
+                    this.set_name(index, value, cx);
+                }
+            },
+        );
+        self.name_fields.insert(
+            index,
+            NameField {
+                input: input.clone(),
+                placeholder,
+                _sub: sub,
+            },
+        );
+        input
     }
 
     fn toggle_hotkey_recording(&mut self, row: Row, window: &mut Window, cx: &mut Context<Self>) {
@@ -301,12 +389,16 @@ impl SettingsWindow {
 
     pub(super) fn render_shortcuts(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let ro = self.read_only();
         let s = &self.doc.config.shortcuts;
-        let hyper_off = !self.doc.config.hyperkey.enabled;
+        // Only Hyper hotkeys need Hyperkey; a draft is still being set up.
+        let needs_hyper = s.bindings.iter().any(
+            |e| matches!(e, BindingEntry::Valid(b) if b.enabled && model::is_hyper_hotkey(&b.key)),
+        );
+        let hyper_off = !self.doc.config.hyperkey.enabled && needs_hyper;
         let enabled = Switch::new("shortcuts-enabled")
             .accessibility_label("Enable shortcuts")
             .checked(s.enabled)
@@ -322,22 +414,29 @@ impl SettingsWindow {
             rows.push(Row::Draft);
         }
         let has_draft = self.draft.is_some();
-        let table = (!rows.is_empty()).then(|| self.render_table(&rows, cx));
+        let table = (!rows.is_empty()).then(|| self.render_table(&rows, window, cx));
         v_flex()
             .gap_4()
-            .child(section(cx).child(setting_row(
-                "Enable shortcuts",
-                Some("Hold CapsLock (Hyper) and press a key to run an action.".into()),
-                enabled,
-                cx,
-            )))
+            .child(
+                section(cx).child(setting_row(
+                    "Enable shortcuts",
+                    Some(
+                        "Run an action with a hotkey: Hyper (CapsLock) + a key, or a combination \
+                     such as Ctrl+Alt+K."
+                            .into(),
+                    ),
+                    enabled,
+                    cx,
+                )),
+            )
             .when(hyper_off, |this| {
                 this.child(
                     h_flex()
                         .gap_3()
                         .items_center()
+                        .child(hyper_keycap())
                         .child(warning_text(
-                            "Shortcuts only work while Hyperkey is enabled.",
+                            "Hyper shortcuts only work while Hyperkey is enabled.",
                             cx,
                         ))
                         .child(
@@ -379,7 +478,12 @@ impl SettingsWindow {
             .children(table)
     }
 
-    fn render_table(&mut self, rows: &[Row], cx: &mut Context<Self>) -> AnyElement {
+    fn render_table(
+        &mut self,
+        rows: &[Row],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let header = h_flex()
             .px_4()
@@ -388,17 +492,27 @@ impl SettingsWindow {
             .text_xs()
             .font_medium()
             .text_color(muted)
-            .child(div().w(px(SWITCH_WIDTH)).flex_none())
-            .child(div().w(px(HOTKEY_WIDTH)).flex_none().child("Hotkey"))
-            .child(div().flex_1().child("Action"));
+            .child(div().w(px(SWITCH_WIDTH)).flex_none().child("Enabled"))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_3()
+                    .child(grow(div(), NAME_GROW).child("Name"))
+                    .child(div().w(px(HOTKEY_WIDTH)).flex_none().child("Hotkey"))
+                    .child(grow(div(), ACTION_GROW).child("Action")),
+            )
+            .child(div().w(px(TAIL_WIDTH)).flex_none());
         let mut table = section(cx).child(header);
         for &row in rows {
-            table = table.child(divider(cx)).child(self.render_row(row, cx));
+            table = table
+                .child(divider(cx))
+                .child(self.render_row(row, window, cx));
         }
         table.into_any_element()
     }
 
-    fn render_row(&mut self, row: Row, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&mut self, row: Row, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let ro = self.read_only();
         let id = row.id();
         let delete = Button::new(("delete-binding", id))
@@ -416,7 +530,7 @@ impl SettingsWindow {
                 Row::Saved(i) => this.confirm_delete_binding(i, window, cx),
                 Row::Draft => this.discard_draft(cx),
             }));
-        let (key, enabled, action) = match row {
+        let (key, name, enabled, pass_through, action) = match row {
             Row::Saved(i) => match &self.doc.config.shortcuts.bindings[i] {
                 BindingEntry::Invalid(_) => {
                     return h_flex()
@@ -430,16 +544,30 @@ impl SettingsWindow {
                                 .flex_1()
                                 .child(hint_text("Unrecognized shortcut (kept as is)", cx)),
                         )
-                        .child(delete)
+                        .child(
+                            h_flex()
+                                .w(px(TAIL_WIDTH))
+                                .flex_none()
+                                .justify_end()
+                                .child(delete),
+                        )
                         .into_any_element();
                 }
-                BindingEntry::Valid(b) => (b.key.clone(), b.enabled, Some(b.action.clone())),
+                BindingEntry::Valid(b) => (
+                    b.key.clone(),
+                    b.name.clone(),
+                    b.enabled,
+                    b.pass_through,
+                    Some(b.action.clone()),
+                ),
             },
             Row::Draft => {
                 let d = self.draft.as_ref();
                 (
                     d.map(|d| d.key.clone()).unwrap_or_default(),
+                    String::new(),
                     true,
+                    false,
                     d.and_then(|d| d.action.clone()),
                 )
             }
@@ -460,8 +588,31 @@ impl SettingsWindow {
                 .into_any_element(),
             Row::Draft => div().into_any_element(),
         };
+        let name_cell = match row {
+            Row::Saved(i) => {
+                let placeholder = match &action {
+                    Some(a) => {
+                        let catalog = self.catalog.read(cx);
+                        model::name_placeholder(a, |id| catalog.name_of(id))
+                    }
+                    None => "Name".into(),
+                };
+                let input = self.name_input(i, &name, placeholder, window, cx);
+                Input::new(&input).small().disabled(ro).into_any_element()
+            }
+            Row::Draft => div()
+                .h(px(32.))
+                .flex()
+                .items_center()
+                .child(hint_text("Name it later", cx))
+                .into_any_element(),
+        };
         let recording = self.recording_target() == Some(RecordTarget::Trigger(row));
         let messages = self.row_messages(row, &key, action.as_ref(), recording, cx);
+        let more = match row {
+            Row::Saved(i) => self.more_menu(i, pass_through, cx).into_any_element(),
+            Row::Draft => div().into_any_element(),
+        };
         h_flex()
             .px_4()
             .py_2()
@@ -486,13 +637,60 @@ impl SettingsWindow {
                             .gap_3()
                             .items_center()
                             .when(!enabled, |this| this.opacity(0.55))
+                            .child(grow(div(), NAME_GROW).child(name_cell))
                             .child(self.hotkey_button(row, &key, recording, cx))
                             .child(self.action_button(row, action.as_ref(), cx)),
                     )
                     .children(messages),
             )
-            .child(div().h(px(32.)).flex().items_center().child(delete))
+            .child(
+                h_flex()
+                    .w(px(TAIL_WIDTH))
+                    .h(px(32.))
+                    .flex_none()
+                    .justify_end()
+                    .items_center()
+                    .child(more)
+                    .child(delete),
+            )
             .into_any_element()
+    }
+
+    /// The row's … menu: "Also send to the app" (`pass_through`).
+    fn more_menu(&self, index: usize, pass_through: bool, cx: &mut Context<Self>) -> Popover {
+        let ro = self.read_only();
+        let weak = cx.entity().downgrade();
+        Popover::new(("binding-more", index))
+            .anchor(Anchor::TopRight)
+            .trigger(
+                Button::new(("binding-more-button", index))
+                    .small()
+                    .ghost()
+                    .icon(IconName::Ellipsis)
+                    .tooltip("More")
+                    .accessibility_label(format!("More options of shortcut {index}")),
+            )
+            .content(move |_, _, cx| {
+                let weak = weak.clone();
+                v_flex()
+                    .w(px(280.))
+                    .gap_1()
+                    .child(
+                        Checkbox::new(("pass-through", index))
+                            .label("Also send to the app")
+                            .checked(pass_through)
+                            .disabled(ro)
+                            .on_click(move |on: &bool, _, cx| {
+                                let _ = weak
+                                    .update(cx, |this, cx| this.set_pass_through(index, *on, cx));
+                            }),
+                    )
+                    .child(div().pl_6().child(hint_text(
+                        "Off: Kuality takes the hotkey, the app in front never gets it. \
+                         On: the action runs and the app gets the hotkey too.",
+                        cx,
+                    )))
+            })
     }
 
     /// Hints and warnings shown under a row.
@@ -506,25 +704,29 @@ impl SettingsWindow {
     ) -> Vec<Div> {
         let mut out = Vec::new();
         if recording {
+            if let Some((_, why)) = self
+                .record_message
+                .filter(|(t, _)| *t == RecordTarget::Trigger(row))
+            {
+                out.push(warning_text(why, cx));
+            }
             out.push(hint_text(
-                "Hold CapsLock and press a key (or just press the key). Esc cancels.",
+                "Hold CapsLock (Hyper) or Ctrl / Alt / Shift / Win and press a key. Esc cancels.",
                 cx,
             ));
         } else if !key.trim().is_empty() && model::validate_trigger(key).is_err() {
             out.push(warning_text(
-                "This key is not valid in config.json: record a new hotkey.",
+                "This hotkey is not valid in config.json: record a new one.",
                 cx,
             ));
         } else {
             let duplicate = match row {
                 Row::Saved(i) => model::duplicate_trigger(&self.doc.config.shortcuts.bindings, i),
-                Row::Draft => parse_key(key).is_ok_and(|k| {
-                    self.doc
-                        .config
-                        .shortcuts
-                        .bindings
-                        .iter()
-                        .any(|e| matches!(e, BindingEntry::Valid(b) if b.enabled && parse_key(&b.key) == Ok(k)))
+                Row::Draft => parse_trigger(key).is_ok_and(|t| {
+                    self.doc.config.shortcuts.bindings.iter().any(|e| {
+                        matches!(e, BindingEntry::Valid(b)
+                            if b.enabled && parse_trigger(&b.key) == Ok(t))
+                    })
                 }),
             };
             let enabled = match row {
@@ -540,6 +742,11 @@ impl SettingsWindow {
         }
         if let Some(problem) = action.and_then(action_problem) {
             out.push(warning_text(problem, cx));
+        }
+        if let Row::Saved(i) = row
+            && self.binding(i).is_some_and(|b| b.pass_through)
+        {
+            out.push(hint_text("The app in front also gets this hotkey.", cx));
         }
         if row == Row::Draft {
             out.push(hint_text(
@@ -557,24 +764,30 @@ impl SettingsWindow {
         recording: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let label = if recording {
-            "Press Hyper + a key…".to_string()
-        } else {
-            model::hotkey_label(key).unwrap_or_else(|| "Record hotkey".into())
-        };
-        div().w(px(HOTKEY_WIDTH)).flex_none().child(
-            Button::new(("hotkey", row.id()))
-                .w_full()
-                .when(recording, |b| b.primary())
-                .when(!recording, |b| b.outline())
+        let caps = (!recording).then(|| model::hotkey_caps(key)).flatten();
+        let button = Button::new(("hotkey", row.id()))
+            .w_full()
+            .when(recording, |b| b.primary())
+            .when(!recording, |b| b.outline())
+            .accessibility_label(format!("Hotkey of {}", row.name()))
+            .when_some(model::hotkey_label(key).filter(|_| !recording), |b, l| {
+                b.tooltip(l)
+            })
+            .disabled(self.read_only())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.toggle_hotkey_recording(row, window, cx)
+            }));
+        let button = match caps {
+            Some(caps) => button.child(keycaps(&caps, cx)),
+            None => button
                 .icon(Icon::new(gpui_kit::assets::IconName::Keyboard))
-                .label(label)
-                .accessibility_label(format!("Hotkey of {}", row.name()))
-                .disabled(self.read_only())
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.toggle_hotkey_recording(row, window, cx)
-                })),
-        )
+                .label(if recording {
+                    "Press a hotkey…"
+                } else {
+                    "Record hotkey"
+                }),
+        };
+        div().w(px(HOTKEY_WIDTH)).flex_none().child(button)
     }
 
     fn action_button(
@@ -585,10 +798,10 @@ impl SettingsWindow {
     ) -> impl IntoElement {
         let catalog = self.catalog.read(cx);
         let muted = cx.theme().muted_foreground;
-        let (label, icon) = match action {
-            None => ("Choose an action".to_string(), None),
+        let (verb, label, icon) = match action {
+            None => (None, "Choose an action".to_string(), None),
             Some(a) => {
-                let label = model::action_label(a, |id| catalog.name_of(id));
+                let (verb, label) = model::action_parts(a, |id| catalog.name_of(id));
                 let kind = model::kind_of(a);
                 let app_icon = match a {
                     Action::Launch(l) => model::app_id(&l.path)
@@ -603,7 +816,7 @@ impl SettingsWindow {
                         .text_color(muted)
                         .into_any_element(),
                 };
-                (label, Some(icon))
+                (Some(verb), label, Some(icon))
             }
         };
         let is_empty = action.is_none();
@@ -624,6 +837,9 @@ impl SettingsWindow {
                     .min_w_0()
                     .gap_2()
                     .items_center()
+                    .children(
+                        verb.map(|v| div().flex_none().text_color(muted).child(format!("{v}:"))),
+                    )
                     .children(icon)
                     .child(
                         div()
@@ -637,9 +853,9 @@ impl SettingsWindow {
                     .child(Icon::new(IconName::ChevronDown).small().text_color(muted)),
             );
         let weak = cx.entity().downgrade();
-        // The trigger fills what the hotkey button leaves.
+        // The trigger takes the Action column's share of the row.
         let mut trigger_style = StyleRefinement {
-            flex_grow: Some(1.),
+            flex_grow: Some(ACTION_GROW),
             flex_shrink: Some(1.),
             flex_basis: Some(relative(0.).into()),
             ..Default::default()
@@ -675,4 +891,12 @@ fn action_problem(action: &Action) -> Option<String> {
         (_, Action::Launch(l)) => model::validate_path(&l.path).err().map(str::to_string),
     };
     problem.map(|p| format!("{p}: choose the action again."))
+}
+
+/// `el` takes a `factor` share of the free width of its row (flex basis 0, may shrink).
+fn grow(el: Div, factor: f32) -> Div {
+    el.flex_basis(relative(0.))
+        .flex_grow(factor)
+        .flex_shrink_1()
+        .min_w_0()
 }

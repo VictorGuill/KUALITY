@@ -8,6 +8,7 @@ mod picker;
 mod shortcuts;
 mod widgets;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -155,6 +156,10 @@ pub struct SettingsWindow {
     pub(crate) widget_editor: Option<widgets::WidgetEditor>,
     pub(crate) draft: Option<shortcuts::Draft>,
     pub(crate) picker: Option<shortcuts::OpenPicker>,
+    /// Name inputs of the shortcut rows, by binding index (created on first render).
+    pub(crate) name_fields: HashMap<usize, shortcuts::NameField>,
+    /// Why the last recorded hotkey was refused (shown under that row while it records again).
+    pub(crate) record_message: Option<(RecordTarget, &'static str)>,
     /// Installed apps for the action picker (loaded in the background).
     pub(crate) catalog: Entity<Catalog>,
     recording: Option<ActiveRecording>,
@@ -254,6 +259,8 @@ impl SettingsWindow {
             widget_editor: None,
             draft: None,
             picker: None,
+            name_fields: HashMap::new(),
+            record_message: None,
             catalog,
             recording: None,
             _poll: poll,
@@ -350,6 +357,7 @@ impl SettingsWindow {
         }
         // Row indices may have changed.
         self.close_picker(cx);
+        self.name_fields.clear();
     }
 
     fn select_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
@@ -409,6 +417,7 @@ impl SettingsWindow {
     }
 
     pub(crate) fn cancel_recording(&mut self, cx: &mut Context<Self>) {
+        self.record_message = None;
         if let Some(rec) = self.recording.take() {
             if rec.target == RecordTarget::Chord {
                 self.picker_recording(false, cx);
@@ -428,8 +437,15 @@ impl SettingsWindow {
         let Some(rec) = self.recording.take() else {
             return;
         };
+        self.record_message = None;
         match outcome {
             Outcome::Recorded(text) => self.apply_recorded(rec.target, text, window, cx),
+            Outcome::Rejected(why) => {
+                // Say why and listen again, so the user just presses another hotkey.
+                drop(rec._recorder);
+                self.start_recording(rec.target, window, cx);
+                self.record_message = Some((rec.target, why));
+            }
             Outcome::Cancelled if rec.target == RecordTarget::Chord => {
                 self.picker_recording(false, cx)
             }
