@@ -93,9 +93,9 @@ Done before Phase 4 and scoped to the settings that already exist (Phases 0–3)
 - [x] One executable: the settings window runs as `kuality.exe --settings` *(2026-11-01, user decision)*
 - [x] Autostart toggle (`HKCU\...\Run`)
 - [x] "Run elevated" toggle (Task Scheduler, one UAC prompt)
-- [ ] Inno Setup installer (with elevated-autostart checkbox)
-- [ ] Portable zip
-- [ ] App icon, version info, release build profile (size-optimized)
+- [ ] Inno Setup installer (with elevated-autostart checkbox) *(script `installer/kuality.iss` written; not compiled yet: Inno Setup is not installed)*
+- [x] Portable zip (`scripts/package.ps1`)
+- [x] App icon, version info, release build profile (size-optimized) *(placeholder icon until the logo exists)*
 
 ## Phase 7 — Extensions
 

@@ -1,5 +1,7 @@
-Kuality {version} (portable)
-============================
+Kuality (portable)
+==================
+
+Version {version}.
 
 Lightweight Windows 11 utility: taskbar widgets, CapsLock Hyperkey and keyboard shortcuts.
 Everything is disabled until you turn it on.

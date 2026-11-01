@@ -14,12 +14,22 @@ Lightweight Windows 11 utility: taskbar widgets, CapsLock Hyperkey and keyboard 
 
 Everything is disabled by default; enable only what you need.
 
+## Install
+
+Kuality is a single `kuality.exe`:
+
+- **Installer** (`Kuality-<version>-setup.exe`): per-user install in `%LOCALAPPDATA%\Programs\Kuality`, no admin rights, Start menu entry, optional start with Windows (normal or as administrator).
+- **Portable** (`Kuality-<version>-portable.zip`): unzip anywhere and run `kuality.exe`; config and logs stay in that folder.
+
+Start with Windows is set in the settings window (General → Startup) or with `kuality.exe --startup <off|normal|elevated>`.
+
 ## Building
 
 Requirements: Windows 11, [Rust](https://rustup.rs) (MSVC toolchain), Visual Studio Build Tools with the C++ workload.
 
 ```powershell
-cargo build --release
+cargo build --release              # target\release\kuality.exe
+.\scripts\package.ps1 -Installer   # dist\: portable zip, and the installer if Inno Setup 6 is installed
 ```
 
 ## Running (dev mode)
