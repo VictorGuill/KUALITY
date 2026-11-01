@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -32,11 +32,11 @@ use ::windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, Unhook
 use ::windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_CAPITAL};
 use ::windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    EVENT_SYSTEM_DESKTOPSWITCH, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
-    PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND, PostMessageW, PostQuitMessage, PostThreadMessageW,
-    RegisterClassExW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CLOSE, WM_KEYDOWN, WM_KEYUP,
-    WM_POWERBROADCAST, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_WTSSESSION_CHANGE, WNDCLASSEXW,
+    EVENT_SYSTEM_DESKTOPSWITCH, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, KillTimer, LLKHF_INJECTED,
+    MSG, PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND, PostMessageW, PostQuitMessage, PostThreadMessageW,
+    RegisterClassExW, SetTimer, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CLOSE, WM_KEYDOWN, WM_KEYUP,
+    WM_POWERBROADCAST, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW,
     WS_EX_TOOLWINDOW, WS_POPUP, WTS_CONSOLE_CONNECT, WTS_CONSOLE_DISCONNECT, WTS_REMOTE_CONNECT,
     WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
 };
@@ -44,7 +44,7 @@ use ::windows::core::{PCWSTR, w};
 use kuality_protocol::Key;
 
 use super::input::{self, KUALITY_TAG};
-use crate::actions::{ActionWorker, Job};
+use crate::actions::{ActionWorker, Job, regrant_due};
 use crate::hyperkey::KeyboardCommand;
 use crate::hyperkey::engine::{Engine, HYPER_RELEASE_ORDER, KeyEvent, Synth, SynthBuf, Transition};
 use crate::platform::KeyboardBackend;
@@ -61,6 +61,11 @@ const TRACE_PANIC: usize = 3;
 /// Posted by the hook callback when a shortcut fires: `wparam` is the binding index in the
 /// table, `lparam` the table generation.
 const WM_APP_ACTION: u32 = WM_APP + 3;
+/// One-shot timer that renews the foreground grant after a Hyper release (see
+/// `actions::FOREGROUND_REGRANT_WINDOW`). The delay lets Windows process the injected release
+/// first, so the renewed grant is not cancelled by it.
+const REGRANT_TIMER: usize = 1;
+const REGRANT_DELAY_MS: u32 = 50;
 
 /// The keyboard thread's window, for the hook callback (read with one atomic load).
 static KEYBOARD_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -158,6 +163,8 @@ struct Ctx {
     /// Same table as the engine's (the engine is borrowed by the hook callback).
     bindings: Arc<CompiledBindings>,
     actions: Arc<ActionWorker>,
+    /// When the last `launch` / `open_url` was handed to the action worker.
+    last_shell_action: Option<Instant>,
 }
 
 fn thread_main(
@@ -218,6 +225,7 @@ fn thread_main(
         cleanup_pending: false,
         bindings: Arc::default(),
         actions,
+        last_shell_action: None,
     }));
     // SAFETY: no arguments.
     let thread_id = unsafe { GetCurrentThreadId() };
@@ -409,10 +417,23 @@ impl Ctx {
                     log::warn!("shortcut #{}: send_hotkey was not injected", binding.source);
                 }
             }
-            action => self.actions.submit(Job {
-                source: binding.source,
-                action: action.clone(),
-            }),
+            action => {
+                self.last_shell_action = Some(Instant::now());
+                self.actions.submit(Job {
+                    source: binding.source,
+                    action: action.clone(),
+                });
+            }
+        }
+    }
+
+    /// Hyper was released (its modifier ups were injected). If a launch or open_url just ran,
+    /// renew the foreground grant shortly after, so the app it started can still come to the
+    /// front.
+    fn after_hyper_up(&mut self) {
+        if regrant_due(self.last_shell_action, Instant::now()) {
+            // SAFETY: our own window; a timer with the same id is simply restarted.
+            unsafe { SetTimer(Some(self.hwnd), REGRANT_TIMER, REGRANT_DELAY_MS, None) };
         }
     }
 
@@ -521,10 +542,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_ctx(|c| c.run_shortcut(wparam.0, lparam.0 as u64));
             LRESULT(0)
         }
+        WM_TIMER if wparam.0 == REGRANT_TIMER => {
+            // SAFETY: our own window and timer id.
+            let _ = unsafe { KillTimer(Some(hwnd), REGRANT_TIMER) };
+            super::shell::regrant_foreground();
+            LRESULT(0)
+        }
         WM_APP_TRACE => {
             match wparam.0 {
                 TRACE_HYPER_DOWN => log::debug!("hyper down"),
-                TRACE_HYPER_UP => log::debug!("hyper up"),
+                TRACE_HYPER_UP => {
+                    log::debug!("hyper up");
+                    with_ctx(Ctx::after_hyper_up);
+                }
                 TRACE_PANIC => log::error!("keyboard hook panicked; modifiers released"),
                 _ => {}
             }

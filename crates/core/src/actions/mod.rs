@@ -8,7 +8,7 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Mutex, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::platform;
 use crate::shortcuts::CompiledAction;
@@ -150,5 +150,38 @@ fn run(job: &Job) {
         CompiledAction::SendHotkey(_) => {
             log::error!("shortcut #{i}: send_hotkey must run on the keyboard thread");
         }
+    }
+}
+
+/// How long after a `launch` / `open_url` the keyboard thread renews the foreground grant once
+/// Hyper is released. Releasing Hyper injects the modifier ups, which Windows counts as new
+/// input: it cancels the grant given before `ShellExecuteExW`, so an app whose first window
+/// appears after the release (Character Map needs ~250-400 ms) would open behind the current
+/// window. Long enough for slow starts, short enough not to hand out the foreground later on.
+pub const FOREGROUND_REGRANT_WINDOW: Duration = Duration::from_secs(3);
+
+/// Whether a Hyper release at `now` should renew the foreground grant, given when the last
+/// `launch` / `open_url` was dispatched.
+pub fn regrant_due(last_shell_action: Option<Instant>, now: Instant) -> bool {
+    last_shell_action.is_some_and(|t| now.saturating_duration_since(t) <= FOREGROUND_REGRANT_WINDOW)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regrant_only_shortly_after_a_shell_action() {
+        let t = Instant::now();
+        assert!(!regrant_due(None, t), "no launch yet");
+        assert!(regrant_due(Some(t), t));
+        assert!(regrant_due(Some(t), t + Duration::from_millis(150)));
+        assert!(regrant_due(Some(t), t + FOREGROUND_REGRANT_WINDOW));
+        assert!(!regrant_due(
+            Some(t),
+            t + FOREGROUND_REGRANT_WINDOW + Duration::from_millis(1)
+        ));
+        // A release recorded before the action (clock order) still counts as "just now".
+        assert!(regrant_due(Some(t + Duration::from_millis(5)), t));
     }
 }

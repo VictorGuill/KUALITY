@@ -152,3 +152,16 @@ fn shell_execute(file: &str, params: &str, dir: Option<&str>) -> io::Result<()> 
     // call.
     unsafe { ShellExecuteExW(&mut info) }.map_err(io::Error::other)
 }
+
+/// Renews the foreground grant after our injected Hyper release (see
+/// `actions::FOREGROUND_REGRANT_WINDOW`): the release counted as new input and cancelled the
+/// grant given before `ShellExecuteExW`. Same two steps as before the launch: claim the last
+/// input, then allow any process to take the foreground until the next input.
+pub fn regrant_foreground() {
+    let claimed = input::claim_last_input();
+    // SAFETY: no pointers.
+    match unsafe { AllowSetForegroundWindow(ASFW_ANY) } {
+        Ok(()) => log::debug!("foreground grant renewed after the Hyper release"),
+        Err(e) => log::debug!("foreground grant not renewed (input claimed: {claimed}): {e}"),
+    }
+}
