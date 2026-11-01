@@ -164,8 +164,8 @@ Log at `info`: `shortcut #<i> fired (<action type>)`. No key names in logs.
 - Thread `kuality-actions`, spawned on the first action, lives until quit. Loop: `receiver.recv()`; exits when the channel closes (shutdown drops the sender, main joins with 1 s timeout).
 - Thread init: `CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)`.
 - Before each `ShellExecuteExW`: `AllowSetForegroundWindow(ASFW_ANY)` so the launched app can take focus.
-- The injected Hyper release cancels that grant (it is new input). When Hyper is released within 3 s of a `launch` / `open_url`, the keyboard thread renews it 50 ms later (empty tagged mouse input + `AllowSetForegroundWindow(ASFW_ANY)`), for apps whose first window appears after the release.
-- **launch**: expand `%VAR%` in `path`, `params`, `cwd` with `ExpandEnvironmentStringsW`. `cwd` default: parent directory of `path` if `path` is an absolute filesystem path, else `%USERPROFILE%`. `SHELLEXECUTEINFOW { fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC, lpVerb: "open", lpFile: path, lpParameters: params (null if empty), lpDirectory: cwd, nShow: SW_SHOWNORMAL }`. This supports `.exe`, `.lnk`, documents, folders and `shell:AppsFolder\<AUMID>` (Store apps).
+- That grant ends at the next input, and releasing Hyper is input. So after a successful call the worker watches, for up to 3 s on a 50 ms thread timer (jobs keep running), for the first visible, unowned, non-tool top-level window of the started process (PID from `SEE_MASK_NOCLOSEPROCESS`), else of any process if it is new since the launch, and brings it forward (empty tagged mouse input + `SetForegroundWindow`) only while the foreground is still the window that was in front when the shortcut fired (noted when the job is queued). A newer launch replaces the watch.
+- **launch**: expand `%VAR%` in `path`, `params`, `cwd` with `ExpandEnvironmentStringsW`. `cwd` default: parent directory of `path` if `path` is an absolute filesystem path, else `%USERPROFILE%`. `SHELLEXECUTEINFOW { fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS, lpVerb: "open", lpFile: path, lpParameters: params (null if empty), lpDirectory: cwd, nShow: SW_SHOWNORMAL }`. This supports `.exe`, `.lnk`, documents, folders and `shell:AppsFolder\<AUMID>` (Store apps).
 - **open_url**: same call with `lpFile = url`, no parameters, no directory.
 - Failure → `error` log with the binding's action type, the path/URL (config data, not keystrokes) and `GetLastError`. No dialogs.
 - The worker never touches keyboard state.
@@ -181,7 +181,7 @@ Log at `info`: `shortcut #<i> fired (<action type>)`. No key names in logs.
 | `send_hotkey` while Hyper held | Hyper modifiers released (with mask) before the chord, re-pressed after if still held. |
 | `send_hotkey` of `ctrl+alt+del` | Windows ignores injected SAS; documented. |
 | Foreground app elevated, core not | `SendInput` is blocked by UIPI (silent); launch/open_url still work. Documented. |
-| Launched app does not come to the front | Windows foreground lock. Mitigations: empty tagged mouse input + `AllowSetForegroundWindow(ASFW_ANY)` before `ShellExecuteExW`, renewed after the Hyper release (see above). Report in manual test. |
+| Launched app does not come to the front | Windows foreground lock. Mitigations: empty tagged mouse input + `AllowSetForegroundWindow(ASFW_ANY)` before `ShellExecuteExW`, then the 3 s window watch (see above). An app that only reuses an existing window (new browser tab) is not raised by the watch. Report in manual test. |
 | Slow launch (network path, big app) | Runs on the worker; hook/keyboard thread never waits. Actions are executed in order. |
 | Explorer consumes Hyper+W/X/T/… | Bound keys are swallowed in the hook before Explorer sees them, so bound Office-letter shortcuts work. |
 | Core elevated (Phase 6) | Launched apps would inherit elevation. Out of scope here; Phase 6 must launch via the shell (unelevated). |

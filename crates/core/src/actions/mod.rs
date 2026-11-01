@@ -8,7 +8,7 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Mutex, PoisonError};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::platform;
 use crate::shortcuts::CompiledAction;
@@ -30,7 +30,7 @@ pub struct ActionWorker {
 
 #[derive(Debug, Default)]
 struct Inner {
-    tx: Option<Sender<Job>>,
+    tx: Option<Sender<Queued>>,
     thread: Option<Thread>,
     closed: bool,
 }
@@ -47,8 +47,11 @@ impl ActionWorker {
         Self::default()
     }
 
-    /// Queues a job, spawning the thread if needed. Never blocks on a running job.
+    /// Queues a job, spawning the thread if needed. Never blocks on a running job. Notes the
+    /// current foreground window, so a window the job opens is only brought forward if the user
+    /// is still there (see [`FOCUS_WAIT`]).
     pub fn submit(&self, job: Job) {
+        let before = platform::foreground_window();
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         if inner.closed {
             return;
@@ -65,7 +68,10 @@ impl ActionWorker {
                 }
             }
         }
-        let sent = inner.tx.as_ref().is_some_and(|tx| tx.send(job).is_ok())
+        let sent = inner
+            .tx
+            .as_ref()
+            .is_some_and(|tx| tx.send((job, before)).is_ok())
             && inner
                 .thread
                 .as_ref()
@@ -96,8 +102,10 @@ impl ActionWorker {
     }
 }
 
-fn spawn() -> std::io::Result<(Sender<Job>, Thread)> {
-    let (tx, rx) = mpsc::channel::<Job>();
+type Queued = (Job, platform::Foreground);
+
+fn spawn() -> std::io::Result<(Sender<Queued>, Thread)> {
+    let (tx, rx) = mpsc::channel::<Queued>();
     let (done_tx, done_rx) = mpsc::sync_channel(1);
     let (id_tx, id_rx) = mpsc::sync_channel(1);
     let handle = std::thread::Builder::new()
@@ -107,8 +115,8 @@ fn spawn() -> std::io::Result<(Sender<Job>, Thread)> {
             let _ = id_tx.send(platform::action_thread_init());
             log::debug!("action thread started");
             platform::action_thread_run(|| {
-                while let Ok(job) = rx.try_recv() {
-                    run(&job);
+                while let Ok((job, before)) = rx.try_recv() {
+                    run(&job, before);
                 }
             });
             log::debug!("action thread stopped");
@@ -134,16 +142,16 @@ impl Drop for DoneGuard {
     }
 }
 
-fn run(job: &Job) {
+fn run(job: &Job, before: platform::Foreground) {
     let i = job.source;
     match &job.action {
         CompiledAction::Launch { path, params, cwd } => {
-            if let Err(e) = platform::launch(path, params, cwd.as_deref()) {
+            if let Err(e) = platform::launch(path, params, cwd.as_deref(), before) {
                 log::error!("shortcut #{i}: launch of {path} failed: {e}");
             }
         }
         CompiledAction::OpenUrl(url) => {
-            if let Err(e) = platform::open_url(url) {
+            if let Err(e) = platform::open_url(url, before) {
                 log::error!("shortcut #{i}: open_url of {url} failed: {e}");
             }
         }
@@ -153,17 +161,36 @@ fn run(job: &Job) {
     }
 }
 
-/// How long after a `launch` / `open_url` the keyboard thread renews the foreground grant once
-/// Hyper is released. Releasing Hyper injects the modifier ups, which Windows counts as new
-/// input: it cancels the grant given before `ShellExecuteExW`, so an app whose first window
-/// appears after the release (Character Map needs ~250-400 ms) would open behind the current
-/// window. Long enough for slow starts, short enough not to hand out the foreground later on.
-pub const FOREGROUND_REGRANT_WINDOW: Duration = Duration::from_secs(3);
+/// How long the worker watches for the first window of what a `launch` / `open_url` started.
+/// The foreground grant given before `ShellExecuteExW` ends at the next input, and releasing
+/// Hyper is input: an app whose first window appears after the release (Character Map needs
+/// ~250-400 ms) opens behind the current window, so the worker brings it forward itself. Long
+/// enough for slow starts, short enough not to surprise the user later on.
+pub const FOCUS_WAIT: Duration = Duration::from_secs(3);
 
-/// Whether a Hyper release at `now` should renew the foreground grant, given when the last
-/// `launch` / `open_url` was dispatched.
-pub fn regrant_due(last_shell_action: Option<Instant>, now: Instant) -> bool {
-    last_shell_action.is_some_and(|t| now.saturating_duration_since(t) <= FOREGROUND_REGRANT_WINDOW)
+/// What the launch watcher does on one check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusStep {
+    /// Check again later.
+    Wait,
+    /// Bring the window that was found to the front.
+    Raise,
+    /// Stop watching.
+    Stop,
+}
+
+/// One check of the launch watcher, `elapsed` after the launch. Nothing is done once the
+/// foreground has changed: the app came forward on its own, or the user moved on.
+pub fn focus_step(elapsed: Duration, foreground_unchanged: bool, window_found: bool) -> FocusStep {
+    if !foreground_unchanged {
+        FocusStep::Stop
+    } else if window_found {
+        FocusStep::Raise
+    } else if elapsed >= FOCUS_WAIT {
+        FocusStep::Stop
+    } else {
+        FocusStep::Wait
+    }
 }
 
 #[cfg(test)]
@@ -171,17 +198,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn regrant_only_shortly_after_a_shell_action() {
-        let t = Instant::now();
-        assert!(!regrant_due(None, t), "no launch yet");
-        assert!(regrant_due(Some(t), t));
-        assert!(regrant_due(Some(t), t + Duration::from_millis(150)));
-        assert!(regrant_due(Some(t), t + FOREGROUND_REGRANT_WINDOW));
-        assert!(!regrant_due(
-            Some(t),
-            t + FOREGROUND_REGRANT_WINDOW + Duration::from_millis(1)
-        ));
-        // A release recorded before the action (clock order) still counts as "just now".
-        assert!(regrant_due(Some(t + Duration::from_millis(5)), t));
+    fn focus_watch_raises_only_while_the_foreground_is_unchanged() {
+        let early = Duration::from_millis(300);
+        assert_eq!(focus_step(early, true, false), FocusStep::Wait);
+        assert_eq!(focus_step(early, true, true), FocusStep::Raise);
+        assert_eq!(focus_step(early, false, true), FocusStep::Stop);
+        assert_eq!(focus_step(early, false, false), FocusStep::Stop);
+        assert_eq!(focus_step(FOCUS_WAIT, true, false), FocusStep::Stop);
+        // A window found right at the deadline is still raised.
+        assert_eq!(focus_step(FOCUS_WAIT, true, true), FocusStep::Raise);
     }
 }

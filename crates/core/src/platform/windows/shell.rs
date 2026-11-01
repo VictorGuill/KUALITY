@@ -3,15 +3,19 @@
 use std::io;
 use std::path::Path;
 
+use ::windows::Win32::Foundation::CloseHandle;
 use ::windows::Win32::System::Environment::ExpandEnvironmentStringsW;
+use ::windows::Win32::System::Threading::GetProcessId;
 use ::windows::Win32::UI::Shell::{
-    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW, ShellExecuteW,
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+    ShellExecuteExW, ShellExecuteW,
 };
 use ::windows::Win32::UI::WindowsAndMessaging::{
     ASFW_ANY, AllowSetForegroundWindow, SW_SHOWNORMAL,
 };
 use ::windows::core::{PCWSTR, w};
 
+use super::focus::{self, Foreground};
 use super::{input, wide};
 
 /// Opens `path` with its default program; falls back to Notepad if there is no association.
@@ -78,20 +82,21 @@ pub fn spawn_detached(exe: &Path, args: &[String]) -> io::Result<()> {
 
 /// Runs a `launch` action: `%VAR%` expanded in all parts, `cwd` defaults to the parent folder of
 /// an absolute `path`, else `%USERPROFILE%`. Supports programs, `.lnk`, documents, folders and
-/// `shell:AppsFolder\<AUMID>`.
-pub fn launch(path: &str, params: &str, cwd: Option<&str>) -> io::Result<()> {
+/// `shell:AppsFolder\<AUMID>`. `before`: the foreground window when the shortcut fired (see
+/// `focus`).
+pub fn launch(path: &str, params: &str, cwd: Option<&str>, before: Foreground) -> io::Result<()> {
     let path = expand_env(path)?;
     let params = expand_env(params)?;
     let cwd = match cwd {
         Some(c) => Some(expand_env(c)?),
         None => default_cwd(&path),
     };
-    shell_execute(&path, &params, cwd.as_deref())
+    shell_execute(&path, &params, cwd.as_deref(), before)
 }
 
 /// Runs an `open_url` action: opens the URI with its default handler.
-pub fn open_url(url: &str) -> io::Result<()> {
-    shell_execute(url, "", None)
+pub fn open_url(url: &str, before: Foreground) -> io::Result<()> {
+    shell_execute(url, "", None, before)
 }
 
 fn default_cwd(path: &str) -> Option<String> {
@@ -125,14 +130,19 @@ fn expand_env(s: &str) -> io::Result<String> {
     }
 }
 
-fn shell_execute(file: &str, params: &str, dir: Option<&str>) -> io::Result<()> {
+fn shell_execute(
+    file: &str,
+    params: &str,
+    dir: Option<&str>,
+    before: Foreground,
+) -> io::Result<()> {
     let file = wide(file);
     let params = (!params.is_empty()).then(|| wide(params));
     let dir = dir.map(wide);
     let as_ptr = |s: &Option<Vec<u16>>| s.as_ref().map_or(PCWSTR::null(), |v| PCWSTR(v.as_ptr()));
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
+        fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS,
         lpVerb: w!("open"),
         lpFile: PCWSTR(file.as_ptr()),
         lpParameters: as_ptr(&params),
@@ -148,20 +158,19 @@ fn shell_execute(file: &str, params: &str, dir: Option<&str>) -> io::Result<()> 
     if let Err(e) = unsafe { AllowSetForegroundWindow(ASFW_ANY) } {
         log::debug!("AllowSetForegroundWindow failed (input claimed: {claimed}): {e}");
     }
+    let windows = focus::before_launch();
     // SAFETY: `info` is initialized and its strings are NUL-terminated buffers that outlive the
     // call.
-    unsafe { ShellExecuteExW(&mut info) }.map_err(io::Error::other)
-}
-
-/// Renews the foreground grant after our injected Hyper release (see
-/// `actions::FOREGROUND_REGRANT_WINDOW`): the release counted as new input and cancelled the
-/// grant given before `ShellExecuteExW`. Same two steps as before the launch: claim the last
-/// input, then allow any process to take the foreground until the next input.
-pub fn regrant_foreground() {
-    let claimed = input::claim_last_input();
-    // SAFETY: no pointers.
-    match unsafe { AllowSetForegroundWindow(ASFW_ANY) } {
-        Ok(()) => log::debug!("foreground grant renewed after the Hyper release"),
-        Err(e) => log::debug!("foreground grant not renewed (input claimed: {claimed}): {e}"),
-    }
+    unsafe { ShellExecuteExW(&mut info) }.map_err(io::Error::other)?;
+    // No process handle for packaged apps, URLs handed to a running app, DDE…
+    let pid = (!info.hProcess.is_invalid()).then(|| {
+        // SAFETY: the handle ShellExecuteExW returned (SEE_MASK_NOCLOSEPROCESS); closed once.
+        unsafe {
+            let pid = GetProcessId(info.hProcess);
+            let _ = CloseHandle(info.hProcess);
+            pid
+        }
+    });
+    focus::after_launch(before, windows, pid.filter(|&p| p != 0));
+    Ok(())
 }
