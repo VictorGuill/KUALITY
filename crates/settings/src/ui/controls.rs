@@ -126,9 +126,14 @@ pub fn segmented<T: Copy + PartialEq + 'static>(
 }
 
 /// "Open config file": creates the file first if it does not exist yet.
-pub fn open_config_button(this: &SettingsWindow, _cx: &mut Context<SettingsWindow>) -> Button {
+/// `id` must be unique in the window: the banner and the General tab can both show one.
+pub fn open_config_button(
+    id: &'static str,
+    this: &SettingsWindow,
+    _cx: &mut Context<SettingsWindow>,
+) -> Button {
     let path = this.doc.path().to_path_buf();
-    Button::new("open-config")
+    Button::new(id)
         .small()
         .outline()
         .label("Open config file")

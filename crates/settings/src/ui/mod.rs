@@ -411,7 +411,11 @@ impl SettingsWindow {
                         )
                         .title("Editing paused"),
                     )
-                    .child(h_flex().child(controls::open_config_button(self, cx)))
+                    .child(h_flex().child(controls::open_config_button(
+                        "banner-open-config",
+                        self,
+                        cx,
+                    )))
                     .into_any_element(),
             ),
             _ if self.core_missing.is_some() => Some(

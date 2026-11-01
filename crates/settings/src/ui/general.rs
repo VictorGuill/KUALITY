@@ -62,7 +62,7 @@ impl SettingsWindow {
                             h_flex()
                                 .gap_2()
                                 .pt_1()
-                                .child(controls::open_config_button(self, cx))
+                                .child(controls::open_config_button("open-config", self, cx))
                                 .child(
                                     Button::new("open-folder")
                                         .small()
