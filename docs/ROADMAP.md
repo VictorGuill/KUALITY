@@ -87,7 +87,7 @@ Done before Phase 4 and scoped to the settings that already exist (Phases 0–3)
 - [ ] Appearance and Extensions tabs (Extensions with Phase 7)
 - [x] Autostart / Run elevated toggles in the General tab (with Phase 6)
 
-## Phase 6 — Startup & distribution
+## Phase 6 — Startup & distribution ✅
 
 - [x] Spec `docs/specs/distribution.md`
 - [x] One executable: the settings window runs as `kuality.exe --settings` *(2026-11-01, user decision)*
