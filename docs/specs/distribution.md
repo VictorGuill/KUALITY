@@ -13,7 +13,7 @@ optional start at logon, normal or elevated, an app icon and version info, and a
 |---|---|
 | `kuality.exe` | Core (tray, widgets, Hyperkey, shortcuts). Unchanged: second instance exits 0. |
 | `kuality.exe --settings [--core-pid <pid>]` | Settings window, a **separate process** of the same exe. Same rules as before: one window at a time, closes (after flushing saves) when the core exits, started alone it attaches to / starts the core. |
-| `kuality.exe --startup <off\|normal\|elevated>` | Sets the start-at-logon entry and exits (used by the installer and uninstaller; the settings window calls the same code). Exit code 0 = done, 1 = failed, 2 = UAC prompt cancelled. |
+| `kuality.exe --startup <off\|on\|normal\|elevated>` | Sets the start-at-logon entry and exits (used by the installer and uninstaller; the settings window calls the same code). `on` = `normal`, unless the entry is already elevated (kept). Exit code 0 = done, 1 = failed, 2 = UAC prompt cancelled. |
 | `kuality.exe --startup-task <create\|delete> --user <SID> [--name <name>]` | Internal: the elevated helper started through UAC. Only touches the scheduled task (`--name`: task folder, see "Test name"). |
 
 Unknown arguments are logged and ignored (the core starts). The core starts the settings window as
@@ -90,9 +90,14 @@ the exe, how to start with Windows, how to remove). With `-Installer` it also ru
 - Per user, no admin rights (`PrivilegesRequired=lowest`), to `%LOCALAPPDATA%\Programs\Kuality`; version read
   from the exe's version resource; setup icon `kuality.ico`, wizard images `wizard-*.bmp` (100 % / 200 %).
 - Start menu entry "Kuality" → `kuality.exe --settings` (opens the window and starts the core).
-- Tasks: "Start Kuality with Windows" and its child "Run as administrator at sign-in", both unticked (opt-in)
-  and not remembered between installs; ticked: after copying, `kuality.exe --startup normal|elevated` (the
-  elevated helper shows the UAC prompt); unticked: the current entry is left as it is.
+- Tasks *(user decision 2026-11-01)*: "Start Kuality with Windows" **ticked**, "Run as administrator at
+  sign-in" unticked, "Create a desktop shortcut" (standard `desktopicon` task) unticked. The two startup tasks
+  are siblings (Inno draws a ticked parent with an unticked child as half-ticked); "Run as administrator"
+  alone also starts Kuality with Windows, elevated.
+  Not remembered between installs. "Start with Windows" alone runs `kuality.exe --startup on` (keeps an
+  elevated entry chosen earlier in the window, so an upgrade never downgrades it or shows a UAC prompt);
+  with "Run as administrator", `--startup elevated` (the elevated helper shows the UAC prompt); unticked: the
+  current entry is left as it is. The desktop shortcut runs `--settings` and is removed by the uninstaller.
 - Before installing/upgrading and uninstalling: a running core is closed gracefully (`WM_CLOSE` to its
   `Kuality.Core` window, wait up to 5 s), which also closes the settings window.
 - Finish page: "Open Kuality" (runs `--settings`).

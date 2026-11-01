@@ -42,17 +42,21 @@ WizardStyle=modern
 ; Kuality is closed by the [Code] below first; Restart Manager is the fallback for files in use.
 CloseApplications=yes
 RestartApplications=no
-; Unticked startup tasks leave the current entry alone: an upgrade must not undo a choice made later
-; in the settings window, so previous selections are not reused.
+; Tasks start from their defaults on every install: an upgrade must not undo a startup choice made
+; later in the settings window (and "Start with Windows" keeps an elevated entry, see [Run]).
 UsePreviousTasks=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-; Opt-in like every Kuality feature. Unticked = leave the current startup entry as it is.
-Name: "autostart"; Description: "Start Kuality with Windows"; GroupDescription: "Startup:"; Flags: unchecked
-Name: "autostart\elevated"; Description: "Run as administrator at sign-in (Windows asks for permission once)"; GroupDescription: "Startup:"; Flags: unchecked
+; User decision 2026-11-01: "Start with Windows" ticked, "Run as administrator" and the desktop
+; shortcut unticked. Unticked startup tasks leave the current entry as it is. The two startup tasks
+; are siblings, not parent/child: Inno draws a ticked parent with an unticked child as half-ticked.
+; "Run as administrator" alone also starts Kuality with Windows (elevated).
+Name: "autostart"; Description: "Start Kuality with Windows"; GroupDescription: "Startup:"
+Name: "elevated"; Description: "Run as administrator at sign-in (Windows asks for permission once)"; GroupDescription: "Startup:"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; Flags: ignoreversion
@@ -61,10 +65,13 @@ Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreve
 [Icons]
 ; Opens the settings window (and starts Kuality if it is not running).
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; Parameters: "--settings"; Comment: "Kuality settings"
+; Removed by the uninstaller like every [Icons] entry.
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Parameters: "--settings"; Comment: "Kuality settings"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#AppExe}"; Parameters: "--startup normal"; StatusMsg: "Setting up start with Windows..."; Tasks: autostart and not autostart\elevated; Flags: runhidden waituntilterminated
-Filename: "{app}\{#AppExe}"; Parameters: "--startup elevated"; StatusMsg: "Setting up start as administrator..."; Tasks: autostart\elevated; Flags: runhidden waituntilterminated
+; `on` keeps an elevated entry made earlier (no downgrade, no UAC prompt on upgrades).
+Filename: "{app}\{#AppExe}"; Parameters: "--startup on"; StatusMsg: "Setting up start with Windows..."; Tasks: autostart and not elevated; Flags: runhidden waituntilterminated
+Filename: "{app}\{#AppExe}"; Parameters: "--startup elevated"; StatusMsg: "Setting up start as administrator..."; Tasks: elevated; Flags: runhidden waituntilterminated
 Filename: "{app}\{#AppExe}"; Parameters: "--settings"; Description: "Open Kuality"; Flags: postinstall nowait skipifsilent
 
 [UninstallRun]

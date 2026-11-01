@@ -18,10 +18,10 @@ Everything is disabled by default; enable only what you need.
 
 Kuality is a single `kuality.exe`:
 
-- **Installer** (`Kuality-<version>-setup.exe`): per-user install in `%LOCALAPPDATA%\Programs\Kuality`, no admin rights, Start menu entry, optional start with Windows (normal or as administrator).
+- **Installer** (`Kuality-<version>-setup.exe`): per-user install in `%LOCALAPPDATA%\Programs\Kuality`, no admin rights, Start menu entry, start with Windows (ticked by default; optionally as administrator), optional desktop shortcut.
 - **Portable** (`Kuality-<version>-portable.zip`): unzip anywhere and run `kuality.exe`; config and logs stay in that folder.
 
-Start with Windows is set in the settings window (General → Startup) or with `kuality.exe --startup <off|normal|elevated>`.
+Start with Windows is set in the settings window (General → Startup) or with `kuality.exe --startup <off|on|normal|elevated>`.
 
 ## Building
 
