@@ -30,6 +30,9 @@ MinVersion=10.0.22000
 OutputDir=..\dist
 OutputBaseFilename=Kuality-{#AppVersion}-setup
 SetupIconFile=..\assets\icon\kuality.ico
+; 100 % and 200 % versions; Inno Setup picks the one closest to the display scale.
+WizardImageFile=..\assets\icon\wizard-164x314.bmp,..\assets\icon\wizard-328x628.bmp
+WizardSmallImageFile=..\assets\icon\wizard-small-55.bmp,..\assets\icon\wizard-small-110.bmp
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
 LicenseFile=..\LICENSE

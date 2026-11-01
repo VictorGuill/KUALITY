@@ -6,9 +6,10 @@
 //!   one, so we do not embed our own (see `docs/DECISIONS.md`, "DPI manifest").
 //! - DLLs only the settings window (GPUI) uses are delay-loaded, so the always-running core does
 //!   not map them (see `docs/specs/distribution.md`).
-//! - Icon (resource 1, from `assets/icon/kuality.ico`) and version info are compiled from a
-//!   generated `.rc` with `embed-resource` (already in the tree through GPUI). Replacing the
-//!   `.ico` and rebuilding is enough to change the app icon.
+//! - Icons and version info are compiled from a generated `.rc` with `embed-resource` (already
+//!   in the tree through GPUI): resource 1 is the app icon (`assets/icon/kuality.ico`), 2 and 3
+//!   the monochrome tray icons (`tray-white.ico` for dark taskbars, `tray-black.ico` for light
+//!   ones). Replacing the files and rebuilding is enough to change them.
 
 use std::env;
 use std::fmt::Write as _;
@@ -47,11 +48,14 @@ fn main() {
 
 fn embed_icon_and_version() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let icon = manifest_dir.join("../../assets/icon/kuality.ico");
-    println!("cargo:rerun-if-changed={}", icon.display());
-    let icon = icon
-        .canonicalize()
-        .unwrap_or_else(|e| panic!("cannot find {}: {e}", icon.display()));
+    let icons = ICONS.map(|(id, file)| {
+        let path = manifest_dir.join("../../assets/icon").join(file);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let path = path
+            .canonicalize()
+            .unwrap_or_else(|e| panic!("cannot find {}: {e}", path.display()));
+        (id, path.to_string_lossy().into_owned())
+    });
 
     let version = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
     let part = |name: &str| -> u16 {
@@ -67,7 +71,7 @@ fn embed_icon_and_version() {
         0,
     ];
 
-    let rc = rc_source(&icon.to_string_lossy(), &version, numbers);
+    let rc = rc_source(&icons, &version, numbers);
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("kuality.rc");
     std::fs::write(&out, rc).expect("write kuality.rc");
     embed_resource::compile(&out, embed_resource::NONE)
@@ -75,11 +79,17 @@ fn embed_icon_and_version() {
         .expect("compile kuality.rc");
 }
 
-/// Resource script: icon 1 (Explorer, taskbar, GPUI window, tray) and `VS_VERSION_INFO`.
-/// Numeric constants instead of `winver.h`, so no SDK include path is needed.
-fn rc_source(icon_path: &str, version: &str, numbers: [u16; 4]) -> String {
-    // `canonicalize` gives a `\\?\` path; `.rc` strings use C escapes, so use forward slashes.
-    let icon_path = icon_path.trim_start_matches(r"\\?\").replace('\\', "/");
+/// Icon resources: id and file in `assets/icon/`. Id 1 is also what Explorer shows for the exe
+/// and what GPUI loads for its window; the tray picks 2 or 3 (see `platform/windows/tray.rs`).
+const ICONS: [(u16, &str); 3] = [
+    (1, "kuality.ico"),
+    (2, "tray-white.ico"),
+    (3, "tray-black.ico"),
+];
+
+/// Resource script: the icons and `VS_VERSION_INFO`. Numeric constants instead of `winver.h`,
+/// so no SDK include path is needed.
+fn rc_source(icons: &[(u16, String)], version: &str, numbers: [u16; 4]) -> String {
     let [a, b, c, d] = numbers;
     let strings = [
         ("CompanyName", "Kuality"),
@@ -92,7 +102,11 @@ fn rc_source(icon_path: &str, version: &str, numbers: [u16; 4]) -> String {
         ("ProductVersion", version),
     ];
     let mut rc = String::new();
-    let _ = writeln!(rc, "1 ICON \"{icon_path}\"");
+    for (id, path) in icons {
+        // `canonicalize` gives a `\\?\` path; `.rc` strings use C escapes: forward slashes.
+        let path = path.trim_start_matches(r"\\?\").replace('\\', "/");
+        let _ = writeln!(rc, "{id} ICON \"{path}\"");
+    }
     let _ = writeln!(rc, "1 VERSIONINFO");
     let _ = writeln!(rc, "FILEVERSION {a},{b},{c},{d}");
     let _ = writeln!(rc, "PRODUCTVERSION {a},{b},{c},{d}");
