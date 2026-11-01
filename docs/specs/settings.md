@@ -60,34 +60,50 @@ A `Lenient::Invalid` value read from the file is shown as its raw JSON text with
 
 ### Shortcuts
 
+*(Redesigned 2026-11-01, Raycast-style: press the hotkey, then pick what it does. Replaces the expandable card editor.)*
+
 | Field | Control | Notes |
 |---|---|---|
 | `shortcuts.enabled` | Switch "Enable shortcuts" | If Hyperkey is off: callout "Shortcuts only work while Hyperkey is enabled" + button **Enable Hyperkey** |
-| `shortcuts.bindings` | List; button **Add shortcut** | — |
+| `shortcuts.bindings` | Two-column table; button **Add shortcut** | — |
 
-List row: enabled switch, `Hyper + <KEY>` badge (or `No key`), name (or action summary), action summary (`Launch notepad.exe`, `Send ctrl+shift+esc`, `Open https://…`), chevron, delete (confirm dialog). `BindingEntry::Invalid` entries show as `Unrecognized shortcut (kept as is)` with only Delete.
+The table has one row per binding, in file order:
 
-**Add shortcut** creates a *draft* row (expanded). A draft is written to the file only once it is valid (key + required action field); until then it lives in the window only and is lost on close (hint shown on the row).
+```
+ [on] | Hotkey          | Action                         | delete
+ [on] | [ Hyper + 1 ]   | [ (icon) Helium            v ] |
+ [on] | [ Hyper + 3 ]   | [ (kbd)  Send Win + 1      v ] |
+```
 
-Binding editor:
+- **Enabled switch** (`enabled`). A disabled row is dimmed.
+- **Hotkey button** (`key`): shows `Hyper + <Key>` (keys as people write them: `Hyper + 1`, `Hyper + Page Up`, `Hyper + ;`). Click → `Press Hyper + a key…`; hold CapsLock and press a key (the key alone works too). Esc, a click, focus loss or 10 s cancel (see "Key capture"). A key that is not valid in the file shows its raw text plus a warning; another enabled binding with the same key → warning "Another shortcut uses this hotkey: only the first one works" (still saved, core rule).
+- **Action button** (`action`): icon + label, opens the **action picker**. Labels: an app → its Start-menu name (and icon); `open_url` → `Open github.com` (scheme, `www.` and trailing `/` dropped for web addresses); `send_hotkey` → `Send Win + 1`; `launch` of a document, folder or shortcut → `Open <file name>`; `launch` of a program, or with arguments or a working folder → `Run <name>` (`Run notepad.exe …` with arguments). A value the core would skip (empty path, bad chord, URL without scheme) shows a warning under the row.
+- **Delete** (confirm dialog). `BindingEntry::Invalid` entries show as `Unrecognized shortcut (kept as is)` with only Delete.
+- `name` is not shown; existing values are kept in the file. New bindings get `name: ""`.
 
-| Field | Control | Validation |
-|---|---|---|
-| `name` | Text input | any |
-| `key` | **Record** button + searchable Select of key names (canonical names from `keys.rs`) | `parse_key` ok, not a modifier, not `capslock`. Another enabled binding with the same key → warning "Only the first enabled shortcut with this key works" (saved, core rule) |
-| `enabled` | Switch | — |
-| `action.type` | Segmented control: Launch / Send hotkey / Open URL | Switching type starts the new action with empty fields (old action fields are dropped once the new one is valid) |
-| launch `path` | Text input + **Browse…** (native file dialog) | non-empty |
-| launch `args` | Text input "Arguments" (one command line) | any. An existing list is shown joined with Windows quoting (`join_args`) and stays a list until edited; an edit is saved as a raw string (same command line for the core) |
-| launch `cwd` | Text input + **Browse…** (folder dialog) | empty → `null` |
-| send_hotkey `keys` | Text input + **Record** button | `parse_chord` ok |
-| open_url `url` | Text input | scheme + ≤ 2048 chars (same rule as the core) |
+**Add shortcut** appends a *draft* row with its Hotkey button already recording; once a key is recorded the picker opens. The draft is written once it has both a valid key and an action, and is lost on close or with its delete button (hint shown on the row). Only one draft at a time.
+
+#### Action picker
+
+A popover under the Action button (Esc on the list closes it, a click outside too):
+
+- **Search box** (focused): filters as you type. Every word must appear in the name; names starting with the text come first, then names with a word starting with it. Up/Down move the selection, Enter picks it.
+- **Applications**: every item of the shell's Applications folder (`shell:AppsFolder`, the Start menu's "All apps": desktop and Store apps) with its icon, by name. Picking one saves `{"type": "launch", "path": "shell:AppsFolder\\<id>", "args": [], "cwd": null}`, where `<id>` is the item's parsing name (an AppUserModelID such as `Helium.FCBY…` or `Microsoft.WindowsCalculator_8wekyb3d8bbwe!App`, or a known-folder path such as `{1AC14E77-…}\charmap.exe`). The core already launches these through `ShellExecuteExW`. An id that is no longer installed shows a name derived from it.
+- **Other actions**, pinned under the list, each opening a small page (back arrow or Esc returns to the list; **Save** or Enter applies):
+  - *Open website…*: address field; `github.com` becomes `https://github.com`; must pass the core's URL rule.
+  - *Send keys…*: **Record keys** button (chord recorder) plus a text field (`win+1`, `ctrl+shift+esc`, `volume_mute`), with a live `Sends Win + 1` preview; must pass `parse_chord`.
+  - *Open file or folder…*: path field + **Choose file…** / **Choose folder…**; saved as `launch` without arguments.
+  - *Run program…*: program field + **Browse…**; an **Advanced** disclosure holds *Arguments* (one command line) and *Working folder*. An existing argument list is shown joined with Windows quoting (`join_args`) and stays a list unless edited; an edit is saved as a raw string; empty folder → `null`.
+- Opening the picker on an existing binding starts where it is edited: the list (current app checked) for an app, else the matching page, filled in.
+- Unknown fields inside `action` are kept when the new action has the same `type` (e.g. app → program keeps the `launch` object's extras); a different `type` starts clean.
+
+The app list is read once per window on thread `kuality-settings-apps` (COM STA: `SHGetKnownFolderItem(FOLDERID_AppsFolder)` → `BHID_EnumItems`, display name + `SIGDN_PARENTRELATIVEPARSING`), names first, then 32 px icons (`IShellItemImageFactory::GetImage`, `SIIGBF_ICONONLY`, premultiplied BGRA → straight), kept in memory while the window is open. The window opens at once; until the list arrives the picker says "Loading apps…" and rows show names derived from the ids.
 
 ### Key capture (Record buttons)
 
-- Clicking **Record** shows `Press a key… (Esc to cancel)` on the button. Recording stops on: a recorded result, Esc (no modifier held), a click anywhere, the window losing focus, or 10 s.
+- Clicking a Hotkey button or **Record keys** starts recording; the button says so (`Press Hyper + a key…` / `Press the keys… (Esc to cancel)`). Recording stops on: a recorded result, Esc (no modifier held), a click anywhere, the window losing focus, or 10 s.
 - Capture uses a `WH_KEYBOARD_LL` hook in the settings process, installed only while recording, on a dedicated thread `kuality-settings-recorder` with its own message loop. The callback only reads the event, pushes it into a channel and returns. It ignores injected events (`LLKHF_INJECTED`). While recording, and only while the settings window is the foreground window, it **swallows** the keys (so Win+D, Ctrl+Shift+Esc… do not act); every key whose down was swallowed also has its up swallowed, even after recording ends (the hook stays until those keys are up).
-- Why a hook: GPUI key events lose the virtual-key code (layout-dependent names) and never see system combos. And the hook works with **Hyperkey active**: our hook is installed after the core's, so it runs first and sees the raw CapsLock before the core turns it into Hyper modifiers; swallowing means the core does not inject modifiers or fire a bound shortcut. If the core's hook happens to run first (it reinstalls on resume/unlock), injected Hyper modifiers are ignored and a key already bound may be consumed by the core; the dropdown and text fields remain as fallback.
+- Why a hook: GPUI key events lose the virtual-key code (layout-dependent names) and never see system combos. And the hook works with **Hyperkey active**: our hook is installed after the core's, so it runs first and sees the raw CapsLock before the core turns it into Hyper modifiers; swallowing means the core does not inject modifiers or fire a bound shortcut. If the core's hook happens to run first (it reinstalls on resume/unlock), injected Hyper modifiers are ignored and a key already bound may be consumed by the core; the chord field stays as fallback for Send keys, and a hotkey can be edited in `config.json`.
 - **Trigger key** recorder: the first key down that is not a modifier and not CapsLock → `Key(vk).name()` (unnamed codes become `vk:0xNN`). Modifiers and CapsLock are ignored, so pressing either `G` or `CapsLock+G` records `g`.
 - **Chord** recorder: modifiers pressed (in order, max 4) then a non-modifier key down → chord. Left modifiers are written as `ctrl` / `shift` / `alt` / `win`, right ones as `rctrl` / `rshift` / `ralt` / `rwin`. If all modifiers are released without another key, the chord is the modifiers alone (e.g. `win`). CapsLock is ignored (type `capslock` by hand if wanted).
 
@@ -124,9 +140,10 @@ crates/protocol/src/store.rs      write_atomic(path, bytes)
 crates/protocol/src/quote.rs      join_args (moved from core/actions/quote.rs)
 crates/protocol/src/config.rs     Action newtype variants + extra; valid_url(); Key::is_trigger() in keys.rs
 crates/settings/src/main.rs       single instance, data dir, GPUI app + window
-crates/settings/src/model.rs      document state: Config, disk bytes, validation, debounced save, reload (unit-tested, no GPUI)
-crates/settings/src/ui/           sidebar + one view per tab, list/editor components
-crates/settings/src/platform/     Windows: known folder, mutex + activate, core-running check, key recorder hook
+crates/settings/src/model.rs      document state: Config, disk bytes, validation, debounced save, reload; action labels and picker choices <-> Action (unit-tested, no GPUI)
+crates/settings/src/apps.rs       installed apps for the picker: list order, search, icon pixels, catalog (pure parts unit-tested)
+crates/settings/src/ui/           sidebar + one view per tab, list/editor components; ui/picker.rs = the action picker
+crates/settings/src/platform.rs   Windows: known folder, mutex + activate, core-running check, key recorder hook, Applications folder + icons
 crates/core/src/app.rs            OpenSettings launches the exe, fallback to the editor
 ```
 
@@ -137,7 +154,8 @@ crates/core/src/app.rs            OpenSettings launches the exe, fallback to the
 ### Dependencies
 
 - `gpui-kit = "=0.8.1"` (crates.io, default features `component` + `assets`): the umbrella crate of gpui-component; it pins `gpui-pre = 0.3.10` (published GPUI snapshot), `gpui-component 0.8.1`, `gpui-base`, and the Lucide icon assets. Exact pin because GPUI APIs change between releases. Settings crate only; the core gains no dependency.
-- `windows` (workspace 0.62) in the settings crate: mutex, window lookup, LL hook, known folder.
+- `windows` (workspace 0.62) in the settings crate: mutex, window lookup, LL hook, known folder, Applications folder and icons (`Win32_Graphics_Gdi`, `Win32_UI_Shell_Common`).
+- `image = 0.25` (no default features; already in GPUI's tree): the pixel buffer GPUI's `RenderImage` wraps, for app icons.
 - `log` (workspace) with a tiny stderr logger in debug builds.
 
 Build check (2026-10-31, throwaway crate outside the repo, rustc 1.99.1 stable-x86_64-pc-windows-msvc): `gpui-kit =0.8.1` hello window with Switch, Input and Button built in release with no patches or extra tools (2 min 41 s cold), exe 24 MB; it opened its window, ~100 MB working set while open. This weight is acceptable only because the settings process lives just while its window is open; the core is untouched.
