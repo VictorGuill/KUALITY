@@ -64,6 +64,7 @@ Current `core` modules (Phases 0–3):
 | `lib.rs` | `run(args)`: single instance (or focus the open window), data dir, link to the core (`--core-pid`, running core, or start it), stderr logger in debug builds |
 | `model.rs` | `Document`: load / save / poll of `config.json`, read-only on invalid file; field validation helpers (unit-tested, no UI) |
 | `recorder.rs` | Portable key-recording state machine (trigger key or chord, swallowed keys) |
+| `startup/` | Start at logon (`docs/specs/distribution.md`): portable plan / task XML / arguments (`mod.rs`, unit-tested) and the Win32 side (`windows.rs`: HKCU Run value, Task Scheduler COM, UAC helper). Also behind `kuality.exe --startup` / `--startup-task` |
 | `platform.rs` | Windows: known folder, `Local\Kuality.Settings` mutex + focus existing window, core-running check, `CoreProcess` (open / find / start / watch the core), recorder hook thread |
 | `ui/mod.rs` | `SettingsWindow` view: tabs, debounced save, disk poll, recording, banner and status bar |
 | `ui/{general,widgets,hyperkey,shortcuts}.rs` | One tab each; widgets and shortcuts have list rows with an inline editor |
@@ -89,7 +90,7 @@ Draft shape (will be refined per phase):
 ```json
 {
   "version": 1,
-  "general": { "autostart": false, "run_elevated": false },
+  "general": { "log_level": "info" },
   "hyperkey": { "enabled": false, "include_win": true },
   "shortcuts": {
     "enabled": false,

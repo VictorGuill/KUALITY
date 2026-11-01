@@ -85,12 +85,14 @@ Done before Phase 4 and scoped to the settings that already exist (Phases 0–3)
 - [ ] Named pipe IPC with the core (live commands, state the file cannot carry)
 - [ ] Drag-to-place mode for widgets
 - [ ] Appearance and Extensions tabs (Extensions with Phase 7)
-- [ ] Autostart / Run elevated toggles in the General tab (with Phase 6)
+- [x] Autostart / Run elevated toggles in the General tab (with Phase 6)
 
 ## Phase 6 — Startup & distribution
 
-- [ ] Autostart toggle (`HKCU\...\Run`)
-- [ ] "Run elevated" toggle (Task Scheduler, one UAC prompt)
+- [x] Spec `docs/specs/distribution.md`
+- [x] One executable: the settings window runs as `kuality.exe --settings` *(2026-11-01, user decision)*
+- [x] Autostart toggle (`HKCU\...\Run`)
+- [x] "Run elevated" toggle (Task Scheduler, one UAC prompt)
 - [ ] Inno Setup installer (with elevated-autostart checkbox)
 - [ ] Portable zip
 - [ ] App icon, version info, release build profile (size-optimized)

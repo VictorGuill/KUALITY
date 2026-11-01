@@ -58,10 +58,8 @@ impl Config {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct General {
-    /// Start with Windows (`HKCU\...\Run`). Phase 6.
-    pub autostart: bool,
-    /// Start elevated through a Task Scheduler task. Phase 6.
-    pub run_elevated: bool,
+    // Start at logon is not stored here: the Run value / scheduled task itself is the source of
+    // truth (`docs/specs/distribution.md`). Old `autostart` / `run_elevated` keys stay in `extra`.
     /// Minimum level written to the log file.
     pub log_level: LogLevel,
     #[serde(flatten)]
@@ -611,8 +609,6 @@ mod tests {
     fn defaults_are_all_disabled() {
         let c = Config::default();
         assert_eq!(c.version, CONFIG_VERSION);
-        assert!(!c.general.autostart);
-        assert!(!c.general.run_elevated);
         assert!(!c.hyperkey.enabled);
         assert!(c.hyperkey.include_win, "include_win defaults to true");
         assert!(!c.shortcuts.enabled);
@@ -635,7 +631,6 @@ mod tests {
         assert!(c.hyperkey.enabled);
         assert!(c.hyperkey.include_win, "missing include_win is true");
         assert_eq!(c.general.log_level, LogLevel::Debug);
-        assert!(!c.general.autostart);
         assert!(c.widgets.hide_on_fullscreen);
         assert_eq!(c.version, CONFIG_VERSION);
     }
@@ -653,11 +648,12 @@ mod tests {
         let c: Config = serde_json::from_value(input.clone()).unwrap();
         assert_eq!(c.extra["future_section"], json!({ "a": 1 }));
         assert_eq!(c.general.extra["theme"], json!("dark"));
+        // Phase 0 placeholder, now an unknown key: kept as is.
+        assert_eq!(c.general.extra["autostart"], json!(true));
         let back = serde_json::to_value(&c).unwrap();
         // Known fields missing from the input are written with their defaults.
         let mut expected = input;
         expected["general"]["log_level"] = json!("info");
-        expected["general"]["run_elevated"] = json!(false);
         expected["hyperkey"]["include_win"] = json!(true);
         assert_eq!(back, expected);
     }
@@ -666,7 +662,7 @@ mod tests {
     fn serialized_defaults_match_documented_json() {
         let expected = json!({
             "version": 1,
-            "general": { "autostart": false, "run_elevated": false, "log_level": "info" },
+            "general": { "log_level": "info" },
             "hyperkey": { "enabled": false, "include_win": true },
             "shortcuts": { "enabled": false, "bindings": [] },
             "widgets": { "enabled": false, "hide_on_fullscreen": true, "items": [] }

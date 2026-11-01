@@ -22,3 +22,12 @@ missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "warn"
+
+# Size-optimized release build (docs/specs/distribution.md). `panic` stays "unwind": the keyboard
+# hook uses `catch_unwind` to release the Hyper modifiers and keep running after a panic.
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = true
+debug = false

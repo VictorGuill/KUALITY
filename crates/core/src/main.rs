@@ -35,14 +35,20 @@ const INSTANCE_MUTEX: &str = r"Local\Kuality.Core";
 /// Changes to the config dir are grouped until it has been quiet for this long.
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
 
-/// First argument that runs the settings window instead of the core.
+/// First arguments that run something else than the core (`docs/specs/distribution.md`).
 const SETTINGS_ARG: &str = "--settings";
+const STARTUP_ARG: &str = "--startup";
+const STARTUP_TASK_ARG: &str = "--startup-task";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         // Own process: the core never loads GPUI, and the window's memory is freed when it closes.
         Some(SETTINGS_ARG) => kuality_settings::run(&args[1..]),
+        // Start at logon: `--startup <off|normal|elevated>` (installer, scripts) and the
+        // elevated helper it starts through UAC.
+        Some(STARTUP_ARG) => kuality_settings::startup::cli(&args[1..]),
+        Some(STARTUP_TASK_ARG) => kuality_settings::startup::task_cli(&args[1..]),
         _ => run_core(&args),
     }
 }

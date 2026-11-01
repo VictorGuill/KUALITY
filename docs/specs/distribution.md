@@ -14,7 +14,7 @@ optional start at logon, normal or elevated, an app icon and version info, and a
 | `kuality.exe` | Core (tray, widgets, Hyperkey, shortcuts). Unchanged: second instance exits 0. |
 | `kuality.exe --settings [--core-pid <pid>]` | Settings window, a **separate process** of the same exe. Same rules as before: one window at a time, closes (after flushing saves) when the core exits, started alone it attaches to / starts the core. |
 | `kuality.exe --startup <off\|normal\|elevated>` | Sets the start-at-logon entry and exits (used by the installer and uninstaller; the settings window calls the same code). Exit code 0 = done, 1 = failed, 2 = UAC prompt cancelled. |
-| `kuality.exe --startup-task <create\|delete> --user <SID>` | Internal: the elevated helper started through UAC. Only touches the scheduled task. |
+| `kuality.exe --startup-task <create\|delete> --user <SID> [--name <name>]` | Internal: the elevated helper started through UAC. Only touches the scheduled task (`--name`: task folder, see "Test name"). |
 
 Unknown arguments are logged and ignored (the core starts). The core starts the settings window as
 `kuality.exe --settings --core-pid <pid>` from `current_exe()`; the "open `config.json`" fallback stays.
@@ -41,6 +41,8 @@ New section "Startup" with two switches:
 - While a change runs, both switches are disabled; a cancelled UAC prompt leaves things unchanged (no error);
   a failure shows a short error under the section.
 - The elevated core is a normal core: settings window opened from it is elevated too.
+- **Test name** (debug builds only): the environment variable `KUALITY_STARTUP_NAME` replaces the Run value name
+  and the task folder, so manual tests never touch the real entry.
 
 ### Scheduled task
 
@@ -86,8 +88,9 @@ the exe, how to start with Windows, how to remove). With `-Installer` it also ru
 - Per user, no admin rights (`PrivilegesRequired=lowest`), to `%LOCALAPPDATA%\Programs\Kuality`; version read
   from the exe's version resource.
 - Start menu entry "Kuality" → `kuality.exe --settings` (opens the window and starts the core).
-- Tasks: "Start Kuality with Windows" (checked) and its child "Run as administrator at logon" (unchecked);
-  after copying, `kuality.exe --startup normal|elevated` (the elevated helper shows the UAC prompt).
+- Tasks: "Start Kuality with Windows" and its child "Run as administrator at sign-in", both unticked (opt-in)
+  and not remembered between installs; ticked: after copying, `kuality.exe --startup normal|elevated` (the
+  elevated helper shows the UAC prompt); unticked: the current entry is left as it is.
 - Before installing/upgrading and uninstalling: a running core is closed gracefully (`WM_CLOSE` to its
   `Kuality.Core` window, wait up to 5 s), which also closes the settings window.
 - Finish page: "Open Kuality" (runs `--settings`).

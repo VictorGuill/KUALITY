@@ -163,6 +163,8 @@ pub struct SettingsWindow {
     /// Installed apps for the action picker (loaded in the background).
     pub(crate) catalog: Entity<Catalog>,
     recording: Option<ActiveRecording>,
+    /// Start-at-logon switches (General tab).
+    pub(crate) startup: general::StartupView,
     _poll: Task<()>,
     _subs: Vec<Subscription>,
 }
@@ -249,6 +251,7 @@ impl SettingsWindow {
             }
             true
         });
+        cx.defer_in(window, |this, _, cx| this.load_startup(cx));
         Self {
             doc,
             tab: Tab::General,
@@ -263,6 +266,7 @@ impl SettingsWindow {
             record_message: None,
             catalog,
             recording: None,
+            startup: general::StartupView::default(),
             _poll: poll,
             _subs: subs,
         }

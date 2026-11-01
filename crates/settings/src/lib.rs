@@ -3,12 +3,14 @@
 //!
 //! Library part of the single `kuality.exe`: the binary runs [`run`] for
 //! `kuality.exe --settings`, in its own process, so the core never loads GPUI
-//! (`docs/specs/distribution.md`).
+//! (`docs/specs/distribution.md`). [`startup`] holds the start-at-logon entry (Run value or
+//! elevated scheduled task), shared by the window and the `--startup` command line.
 
 mod apps;
 mod model;
 mod platform;
 mod recorder;
+pub mod startup;
 mod ui;
 
 use std::process::ExitCode;
