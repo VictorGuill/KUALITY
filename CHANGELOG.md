@@ -2,6 +2,25 @@
 
 All notable changes to Kuality. Versions follow [Semantic Versioning](https://semver.org); each `## [x.y.z]` section becomes the notes of the GitHub Release tagged `vx.y.z` (keep one line per paragraph or bullet: release notes keep line breaks).
 
+## [1.0.0-beta.3] - 2026-11-09
+
+### Changed
+
+- **New look for the Settings window** — rounder corners, more space between items, the Windows 11 font (Segoe UI Variable), the page shown as a rounded panel next to the sidebar, filled buttons and smoother option selectors. Follows the Windows light/dark mode as before.
+- **The title bar matches the window** — it uses the window's background color, so the whole window looks like one piece (snap layouts and the window buttons work as before).
+- **New text widgets start turned off** — adding one no longer shows a placeholder on the taskbar right away; turn it on from its switch when it is ready.
+
+### Upgrading
+
+Kuality 1.0.0-beta.2 shows a notification: click it (or tray → **Install update**). From 1.0.0-beta.1, install this version once by hand.
+
+### Downloads
+
+- `Kuality-1.0.0-beta.3-setup.exe` — installer (per user, no admin rights needed).
+- `Kuality-1.0.0-beta.3-portable.zip` — unzip anywhere and run `kuality.exe`.
+
+The files are not code-signed yet: Windows SmartScreen may show "Windows protected your PC". Click **More info → Run anyway**. Checksums are in `SHA256SUMS.txt`.
+
 ## [1.0.0-beta.2] - 2026-11-09
 
 ### New
