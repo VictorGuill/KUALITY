@@ -13,6 +13,7 @@ use crate::config_store::changed_sections;
 use crate::hyperkey::KeyboardController;
 use crate::overlay::OverlayController;
 use crate::platform::{self, DirWatcher, Event};
+use crate::updates::Updates;
 use crate::{logging, shortcuts};
 
 /// How long quit waits for a running `launch`/`open_url` action.
@@ -33,12 +34,14 @@ pub struct App<W: DirWatcher> {
     keyboard: Option<KeyboardController>,
     actions: Arc<ActionWorker>,
     overlay: Option<OverlayController>,
+    updates: Option<Updates>,
     /// Tray "Pause" (runtime only, keyboard features only).
     paused: bool,
 }
 
 impl<W: DirWatcher> App<W> {
     /// Applies the initial config to the subsystems.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Config,
         config_path: PathBuf,
@@ -47,6 +50,7 @@ impl<W: DirWatcher> App<W> {
         keyboard: Option<KeyboardController>,
         actions: Arc<ActionWorker>,
         overlay: Option<OverlayController>,
+        updates: Option<Updates>,
     ) -> Self {
         let app = Self {
             config,
@@ -56,6 +60,7 @@ impl<W: DirWatcher> App<W> {
             keyboard,
             actions,
             overlay,
+            updates,
             paused: false,
         };
         app.apply_keyboard(&app.config);
@@ -101,6 +106,9 @@ impl<W: DirWatcher> App<W> {
                 while let Ok(new) = self.reloads.try_recv() {
                     self.apply_config(*new);
                 }
+                if let Some(u) = &mut self.updates {
+                    u.poll();
+                }
                 ControlFlow::Continue(())
             }
             Event::OpenSettings => {
@@ -119,8 +127,23 @@ impl<W: DirWatcher> App<W> {
                 platform::set_tray_paused(self.paused);
                 ControlFlow::Continue(())
             }
+            Event::CheckUpdates => {
+                if let Some(u) = &self.updates {
+                    u.check_now();
+                }
+                ControlFlow::Continue(())
+            }
+            Event::InstallUpdate => {
+                if let Some(u) = &mut self.updates {
+                    u.install();
+                }
+                ControlFlow::Continue(())
+            }
             Event::Quit => {
                 log::info!("quitting");
+                if let Some(u) = &self.updates {
+                    u.shutdown();
+                }
                 if let Some(mut o) = self.overlay.take() {
                     o.shutdown();
                 }
@@ -163,6 +186,11 @@ impl<W: DirWatcher> App<W> {
             && let Some(o) = &self.overlay
         {
             o.apply(&new.widgets);
+        }
+        if new.updates.check != self.config.updates.check
+            && let Some(u) = &self.updates
+        {
+            u.set_enabled(new.updates.check);
         }
         self.config = new;
     }

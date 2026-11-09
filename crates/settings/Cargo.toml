@@ -11,6 +11,8 @@ path = "src/lib.rs"
 
 [dependencies]
 kuality-protocol.workspace = true
+# General → Updates: check, download and start the installer (`docs/specs/updates.md`).
+kuality-update.workspace = true
 log.workspace = true
 serde_json.workspace = true
 # GPUI + gpui-component (gpui-kit pins the matching GPUI release). Exact pin: GPUI APIs change

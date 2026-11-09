@@ -165,6 +165,8 @@ pub struct SettingsWindow {
     recording: Option<ActiveRecording>,
     /// Start-at-logon switches (General tab).
     pub(crate) startup: general::StartupView,
+    /// Update check and install (General tab).
+    pub(crate) updates: general::UpdatesView,
     _poll: Task<()>,
     _subs: Vec<Subscription>,
 }
@@ -251,7 +253,10 @@ impl SettingsWindow {
             }
             true
         });
-        cx.defer_in(window, |this, _, cx| this.load_startup(cx));
+        cx.defer_in(window, |this, _, cx| {
+            this.load_startup(cx);
+            this.check_updates(cx);
+        });
         Self {
             doc,
             tab: Tab::General,
@@ -267,6 +272,7 @@ impl SettingsWindow {
             catalog,
             recording: None,
             startup: general::StartupView::default(),
+            updates: general::UpdatesView::default(),
             _poll: poll,
             _subs: subs,
         }

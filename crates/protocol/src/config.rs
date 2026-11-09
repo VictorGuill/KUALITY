@@ -2,7 +2,7 @@
 //!
 //! Rules (see `docs/specs/skeleton.md`):
 //! - Every struct uses `#[serde(default)]`: missing fields fall back to defaults, `{}` is valid.
-//! - Every feature is disabled by default.
+//! - Every feature is disabled by default (exception: `updates.check`, see `Updates`).
 //! - Unknown fields are kept in a flattened `extra` map so a load → save round trip preserves them.
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,7 @@ pub struct Config {
     pub hyperkey: Hyperkey,
     pub shortcuts: Shortcuts,
     pub widgets: Widgets,
+    pub updates: Updates,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -35,6 +36,7 @@ impl Default for Config {
             hyperkey: Hyperkey::default(),
             shortcuts: Shortcuts::default(),
             widgets: Widgets::default(),
+            updates: Updates::default(),
             extra: Extra::new(),
         }
     }
@@ -64,6 +66,26 @@ pub struct General {
     pub log_level: LogLevel,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// `updates` section (see `docs/specs/updates.md`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Updates {
+    /// Check GitHub for a newer release (at start, then every few hours). The one feature that
+    /// is **on** by default (user decision 2026-11-09): installing still needs a click.
+    pub check: bool,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self {
+            check: true,
+            extra: Extra::new(),
+        }
+    }
 }
 
 /// Log verbosity, lowercase in JSON.
@@ -683,6 +705,7 @@ mod tests {
         let mut expected = input;
         expected["general"]["log_level"] = json!("info");
         expected["hyperkey"]["modifiers"] = json!("none");
+        expected["updates"] = json!({ "check": true });
         assert_eq!(back, expected);
     }
 
@@ -693,7 +716,8 @@ mod tests {
             "general": { "log_level": "info" },
             "hyperkey": { "enabled": false, "modifiers": "none" },
             "shortcuts": { "enabled": false, "bindings": [] },
-            "widgets": { "enabled": false, "hide_on_fullscreen": true, "items": [] }
+            "widgets": { "enabled": false, "hide_on_fullscreen": true, "items": [] },
+            "updates": { "check": true }
         });
         assert_eq!(serde_json::to_value(Config::default()).unwrap(), expected);
     }

@@ -26,7 +26,7 @@ pub use keyboard::Keyboard;
 pub use overlay::Overlay;
 pub use shell::{launch, open_url, open_with_default_app, spawn_detached};
 pub use time::local_time_now;
-pub use tray::{Tray, set_tray_paused};
+pub use tray::{Tray, set_tray_paused, set_tray_update, show_notification};
 pub use watcher::Watcher;
 
 use ::windows::Win32::System::Com::{

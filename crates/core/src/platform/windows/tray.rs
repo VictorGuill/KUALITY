@@ -9,6 +9,9 @@
 //! re-entrancy (e.g. while `TrackPopupMenu` runs its own modal loop).
 //!
 //! The icon is the app icon (resource 1, the same tile as the exe and the settings window).
+//!
+//! Notifications (update available…) are the icon's balloon, shown by Windows 11 as a toast;
+//! a click on it runs the event given with it (`NIN_BALLOONUSERCLICK`).
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -25,8 +28,9 @@ use ::windows::Win32::System::Console::{
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
 use ::windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
-    NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_NONE, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY, NIM_SETVERSION, NIN_BALLOONUSERCLICK, NIN_SELECT, NOTIFYICON_VERSION_4,
+    NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use ::windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
@@ -54,6 +58,8 @@ const NIN_KEYSELECT: u32 = NIN_SELECT | 1;
 const MENU_SETTINGS: usize = 1;
 const MENU_QUIT: usize = 2;
 const MENU_PAUSE: usize = 3;
+/// "Install update <version>" or "Check for updates".
+const MENU_UPDATE: usize = 4;
 
 /// The hidden window, for the console Ctrl+C handler (runs on another thread).
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -69,6 +75,46 @@ thread_local! {
     static PAUSED: Cell<bool> = const { Cell::new(false) };
     /// The icon given to the shell, owned by us (destroyed when replaced).
     static ICON: Cell<Option<HICON>> = const { Cell::new(None) };
+    /// Version offered by the "Install update" menu item, if any.
+    static UPDATE: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// What a click on the last notification does.
+    static BALLOON_CLICK: Cell<Option<Event>> = const { Cell::new(None) };
+}
+
+/// Shows "Install update <version>" in the menu instead of "Check for updates" (`None`: no
+/// update known). Call on the tray thread.
+pub fn set_tray_update(version: Option<&str>) {
+    UPDATE.with_borrow_mut(|u| *u = version.map(str::to_owned));
+}
+
+/// Shows a notification from the tray icon (a toast on Windows 11); a click on it queues
+/// `on_click`. Replaces the previous one. Call on the tray thread.
+pub fn show_notification(title: &str, text: &str, on_click: Option<Event>) {
+    BALLOON_CLICK.set(on_click);
+    let hwnd = MAIN_HWND.load(Ordering::Relaxed);
+    if hwnd == 0 {
+        return;
+    }
+    let mut nid = icon_data(HWND(hwnd as *mut _));
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_NONE;
+    copy_wide(&mut nid.szInfoTitle, title);
+    copy_wide(&mut nid.szInfo, text);
+    // SAFETY: `nid` identifies our icon and is alive for the call.
+    if !unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) }.as_bool() {
+        log::warn!("cannot show the notification \"{title}\"");
+    }
+}
+
+/// Copies `s` into a fixed UTF-16 buffer, truncated, NUL-terminated.
+fn copy_wide(dst: &mut [u16], s: &str) {
+    let max = dst.len() - 1;
+    let mut n = 0;
+    for (slot, c) in dst.iter_mut().zip(s.encode_utf16().take(max)) {
+        *slot = c;
+        n += 1;
+    }
+    dst[n] = 0;
 }
 
 /// Updates the Pause check mark and the tooltip (`<tooltip> (paused)`). Call on the tray thread.
@@ -317,6 +363,12 @@ fn show_menu(hwnd: HWND, x: i32, y: i32) -> Option<Event> {
         };
         let _ = AppendMenuW(menu, MF_STRING | check, MENU_PAUSE, w!("Pause"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let update = UPDATE.with_borrow(|u| match u {
+            Some(v) => super::wide(format!("Install update {v}")),
+            None => super::wide("Check for updates"),
+        });
+        let _ = AppendMenuW(menu, MF_STRING, MENU_UPDATE, PCWSTR(update.as_ptr()));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit"));
         // Needed so the menu closes when the user clicks elsewhere.
         let _ = SetForegroundWindow(hwnd);
@@ -334,6 +386,8 @@ fn show_menu(hwnd: HWND, x: i32, y: i32) -> Option<Event> {
         match cmd.0 as usize {
             MENU_SETTINGS => Some(Event::OpenSettings),
             MENU_PAUSE => Some(Event::TogglePause),
+            MENU_UPDATE if UPDATE.with_borrow(Option::is_some) => Some(Event::InstallUpdate),
+            MENU_UPDATE => Some(Event::CheckUpdates),
             MENU_QUIT => Some(Event::Quit),
             _ => None,
         }
@@ -377,6 +431,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     push(Event::OpenSettings);
                     // Explorer *sends* this callback, so it runs inside GetMessageW and no
                     // DispatchMessageW follows: post a no-op so the loop delivers the event now.
+                    // SAFETY: posting to our own window.
+                    let _ = unsafe { PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0)) };
+                }
+            } else if event == NIN_BALLOONUSERCLICK {
+                if let Some(action) = BALLOON_CLICK.get() {
+                    push(action);
+                    // Sent like NIN_SELECT: post a no-op so the loop delivers the event now.
                     // SAFETY: posting to our own window.
                     let _ = unsafe { PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0)) };
                 }

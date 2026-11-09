@@ -33,13 +33,13 @@ Written in Rust. A few MB of RAM, ~0% CPU when idle. Everything is off until you
 | ✅ | **Settings window** | A clean, Raycast-style window. Every change is saved and applied instantly. |
 | ✅ | **Start with Windows** | Optionally as administrator, so Hyperkey and shortcuts also work over elevated apps. |
 | 🚧 | **Media widget** | Cover art, title and controls for whatever is playing. *Next up.* |
-| 🚧 | **Automatic updates** | Get notified when a new version is out and install it in one click. |
+| ✅ | **Automatic updates** | Get notified when a new version is out and install it in one click (checksum-verified). Can be turned off. |
 | 🗓️ | **Extensions** | Widgets and actions written in any language (fan speeds, app control…). |
 
 ### Why Kuality?
 
 - **Lightweight first** — native Win32 + Direct2D, no Electron, no webview. The always-running core stays at a few MB.
-- **Opt-in** — nothing happens until you enable it. No telemetry.
+- **Opt-in** — nothing happens until you enable it; the only exception is the update check (one request to GitHub every few hours, can be turned off). No telemetry.
 - **Safe** — no code injection into Explorer or any other process; modifiers are never left stuck (lock screen, sleep, crash).
 - **One file** — a single `kuality.exe`, installable or portable.
 

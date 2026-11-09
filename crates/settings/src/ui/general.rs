@@ -1,11 +1,12 @@
-//! General tab: start at logon, log level and where the config lives.
+//! General tab: start at logon, updates, log level and where the config lives.
 
 use gpui_kit::component::StyledExt as _;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use kuality_protocol::LogLevel;
+use kuality_update::Release;
 
 use super::SettingsWindow;
 use super::controls::{self, divider, error_text, hint_text, section, setting_row, warning_text};
@@ -33,12 +34,12 @@ fn off_thread<T: Send + 'static>(
 ) {
     let (tx, rx) = futures_channel::oneshot::channel();
     let spawned = std::thread::Builder::new()
-        .name("kuality-settings-startup".into())
+        .name("kuality-settings-worker".into())
         .spawn(move || {
             let _ = tx.send(work());
         });
     if let Err(e) = spawned {
-        log::error!("cannot start the startup thread: {e}");
+        log::error!("cannot start a worker thread: {e}");
         return;
     }
     cx.spawn(async move |this, cx| {
@@ -166,6 +167,171 @@ impl SettingsWindow {
     }
 }
 
+/// Updates section (`docs/specs/updates.md`). Checks run in the background when the window
+/// opens and on "Check now"; installing downloads the installer, which then closes Kuality and
+/// this window and starts Kuality again.
+#[derive(Debug, Default)]
+pub struct UpdatesView {
+    checking: bool,
+    /// Result of the last check: `Ok(None)` = up to date.
+    result: Option<Result<Option<Release>, String>>,
+    /// This is the installed copy (else "Download" opens the release page).
+    self_update: bool,
+    installing: bool,
+    install_error: Option<String>,
+}
+
+impl SettingsWindow {
+    /// Checks GitHub for a newer release in the background.
+    pub(super) fn check_updates(&mut self, cx: &mut Context<Self>) {
+        if self.updates.checking || self.updates.installing {
+            return;
+        }
+        self.updates.checking = true;
+        cx.notify();
+        off_thread(
+            cx,
+            || {
+                let self_update = kuality_update::can_self_update();
+                (self_update, kuality_update::Checker::new().check())
+            },
+            |this, (self_update, result), _| {
+                match &result {
+                    Ok(Some(r)) => log::info!("update available: Kuality {}", r.version),
+                    Ok(None) => log::info!("Kuality is up to date"),
+                    Err(e) => log::warn!("update check failed: {e}"),
+                }
+                this.updates.checking = false;
+                this.updates.self_update = self_update;
+                this.updates.result = Some(result);
+            },
+        );
+    }
+
+    /// Installs `release` (installed copy) or opens its page (portable / dev copy).
+    fn install_update(&mut self, release: Release, cx: &mut Context<Self>) {
+        if !self.updates.self_update {
+            cx.open_url(&release.page_url);
+            return;
+        }
+        if self.updates.installing {
+            return;
+        }
+        self.updates.installing = true;
+        self.updates.install_error = None;
+        cx.notify();
+        off_thread(
+            cx,
+            move || kuality_update::download_and_install(&release),
+            |this, result, _| {
+                // On success stay "installing": the installer closes this window.
+                if let Err(e) = result {
+                    log::error!("update failed: {e}");
+                    this.updates.installing = false;
+                    this.updates.install_error = Some(e);
+                }
+            },
+        );
+    }
+
+    fn render_updates(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = &self.updates;
+        let ro = self.read_only();
+        let auto = Switch::new("updates-check")
+            .accessibility_label("Check for updates automatically")
+            .checked(self.doc.config.updates.check)
+            .disabled(ro)
+            .on_click(cx.listener(|this, on: &bool, _, cx| {
+                this.doc.config.updates.check = *on;
+                this.changed(cx);
+            }));
+
+        let available = match &view.result {
+            Some(Ok(Some(r))) => Some(r.clone()),
+            _ => None,
+        };
+        let status: SharedString = if view.installing {
+            "Downloading the update… Kuality restarts when it is installed.".into()
+        } else if view.checking {
+            "Checking for updates…".into()
+        } else {
+            match &view.result {
+                Some(Ok(Some(r))) => format!("Kuality {} is available.", r.version).into(),
+                Some(Ok(None)) => "Kuality is up to date.".into(),
+                Some(Err(_)) | None => "".into(),
+            }
+        };
+        let busy = view.checking || view.installing;
+        let buttons = match available {
+            Some(release) => {
+                let page = release.page_url.clone();
+                let label = if view.self_update {
+                    format!("Install {}", release.version)
+                } else {
+                    format!("Download {}", release.version)
+                };
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("update-notes")
+                            .small()
+                            .ghost()
+                            .label("What's new")
+                            .on_click(move |_, _, cx| cx.open_url(&page)),
+                    )
+                    .child(
+                        Button::new("update-install")
+                            .small()
+                            .primary()
+                            .label(label)
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.install_update(release.clone(), cx);
+                            })),
+                    )
+            }
+            None => h_flex().child(
+                Button::new("update-check")
+                    .small()
+                    .outline()
+                    .label("Check now")
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.check_updates(cx))),
+            ),
+        };
+
+        let mut notes: Vec<Div> = Vec::new();
+        if let Some(Err(e)) = &view.result
+            && !view.checking
+        {
+            notes.push(error_text(format!("Could not check for updates: {e}"), cx));
+        }
+        if let Some(e) = view.install_error.clone() {
+            notes.push(error_text(format!("Update failed: {e}"), cx));
+        }
+        let notes = (!notes.is_empty()).then(|| v_flex().gap_1().px_4().pb_3().children(notes));
+
+        section(cx)
+            .child(setting_row(
+                "Check for updates automatically",
+                Some(
+                    "When Kuality starts and every 6 hours. Nothing is installed without asking."
+                        .into(),
+                ),
+                auto,
+                cx,
+            ))
+            .child(divider(cx))
+            .child(setting_row(
+                format!("Version {}", kuality_update::current_version()),
+                (!status.is_empty()).then_some(status),
+                buttons,
+                cx,
+            ))
+            .children(notes)
+    }
+}
+
 const LEVELS: [(LogLevel, &str); 5] = [
     (LogLevel::Error, "Error"),
     (LogLevel::Warn, "Warn"),
@@ -197,6 +363,7 @@ impl SettingsWindow {
         v_flex()
             .gap_4()
             .child(self.render_startup(cx))
+            .child(self.render_updates(cx))
             .child(section(cx).child(setting_row(
                 "Log level",
                 Some(r"How much Kuality writes to logs\kuality.log.".into()),

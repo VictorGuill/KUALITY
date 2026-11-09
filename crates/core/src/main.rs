@@ -4,6 +4,7 @@
 //! Phase 0: config load/create/hot-reload, logging, single instance, tray menu
 //! (`docs/specs/skeleton.md`). Phase 1: Hyperkey (`docs/specs/hyperkey.md`). Phase 2: Shortcuts
 //! (`docs/specs/shortcuts.md`). Phase 3: taskbar overlay and text widget (`docs/specs/overlay.md`).
+//! Updates: `docs/specs/updates.md`.
 
 // No console window in release builds (every mode); debug builds keep it for log output.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -16,6 +17,7 @@ mod logging;
 mod overlay;
 mod platform;
 mod shortcuts;
+mod updates;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -195,6 +197,14 @@ fn run_core(args: &[String]) -> ExitCode {
         }
     };
 
+    let updates = match updates::Updates::start(tray.waker(), loaded.config.updates.check) {
+        Ok(u) => Some(u),
+        Err(e) => {
+            log::error!("cannot start the update thread: {e}; updates unavailable");
+            None
+        }
+    };
+
     let mut app = App::new(
         loaded.config,
         config_path,
@@ -203,6 +213,7 @@ fn run_core(args: &[String]) -> ExitCode {
         keyboard,
         actions,
         overlay,
+        updates,
     );
     log::info!("ready");
     tray.run(move |event| app.handle(event));

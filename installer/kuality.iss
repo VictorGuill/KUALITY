@@ -6,6 +6,10 @@
 ; Per-user install, no admin rights. Start at logon is set by kuality.exe itself
 ; (`--startup normal|elevated|off`), the same code as the settings window, so the Run value and the
 ; elevated scheduled task never coexist.
+;
+; Update mode (docs/specs/updates.md): Kuality runs the downloaded installer with
+; `/SILENT /SUPPRESSMSGBOXES /NORESTART /update=1`. Then the start-at-logon entry is left as it is
+; and Kuality is started again after the install.
 
 #define AppName "Kuality"
 #define AppExe "kuality.exe"
@@ -70,8 +74,10 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Parameters: "--se
 
 [Run]
 ; `on` keeps an elevated entry made earlier (no downgrade, no UAC prompt on upgrades).
-Filename: "{app}\{#AppExe}"; Parameters: "--startup on"; StatusMsg: "Setting up start with Windows..."; Tasks: autostart and not elevated; Flags: runhidden waituntilterminated
-Filename: "{app}\{#AppExe}"; Parameters: "--startup elevated"; StatusMsg: "Setting up start as administrator..."; Tasks: elevated; Flags: runhidden waituntilterminated
+Filename: "{app}\{#AppExe}"; Parameters: "--startup on"; StatusMsg: "Setting up start with Windows..."; Tasks: autostart and not elevated; Check: not IsUpdate; Flags: runhidden waituntilterminated
+Filename: "{app}\{#AppExe}"; Parameters: "--startup elevated"; StatusMsg: "Setting up start as administrator..."; Tasks: elevated; Check: not IsUpdate; Flags: runhidden waituntilterminated
+; Update mode: start Kuality again (it was closed before the files were replaced).
+Filename: "{app}\{#AppExe}"; Check: IsUpdate; Flags: nowait
 Filename: "{app}\{#AppExe}"; Parameters: "--settings"; Description: "Open Kuality"; Flags: postinstall nowait skipifsilent
 
 [UninstallRun]
@@ -82,22 +88,37 @@ Filename: "{app}\{#AppExe}"; Parameters: "--startup off"; RunOnceId: "RemoveStar
 const
   WM_CLOSE = $0010;
   CoreWindowClass = 'Kuality.Core';
+  SettingsWindowTitle = 'Kuality Settings';
 
-{ Closes a running Kuality gracefully (its settings window follows) and waits up to 5 s. }
+{ Started by Kuality's updater (`/update=1`). }
+function IsUpdate(): Boolean;
+begin
+  Result := ExpandConstant('{param:update|0}') = '1';
+end;
+
+{ Closes a running Kuality gracefully and waits up to 5 s; then waits up to 3 s for its settings
+  window, which closes (after saving) when the core exits. }
 procedure CloseKuality();
 var
   Wnd: HWND;
   I: Integer;
 begin
   Wnd := FindWindowByClassName(CoreWindowClass);
-  if Wnd = 0 then
-    Exit;
-  PostMessage(Wnd, WM_CLOSE, 0, 0);
-  for I := 1 to 50 do
+  if Wnd <> 0 then
   begin
-    Sleep(100);
-    if FindWindowByClassName(CoreWindowClass) = 0 then
+    PostMessage(Wnd, WM_CLOSE, 0, 0);
+    for I := 1 to 50 do
+    begin
+      Sleep(100);
+      if FindWindowByClassName(CoreWindowClass) = 0 then
+        Break;
+    end;
+  end;
+  for I := 1 to 30 do
+  begin
+    if FindWindowByWindowName(SettingsWindowTitle) = 0 then
       Exit;
+    Sleep(100);
   end;
 end;
 

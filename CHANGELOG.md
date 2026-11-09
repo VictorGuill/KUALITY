@@ -2,6 +2,25 @@
 
 All notable changes to Kuality. Versions follow [Semantic Versioning](https://semver.org); each `## [x.y.z]` section becomes the notes of the GitHub Release tagged `vx.y.z` (keep one line per paragraph or bullet: release notes keep line breaks).
 
+## [1.0.0-beta.2] - 2026-11-09
+
+### New
+
+- **Automatic updates** — Kuality checks GitHub for a new version when it starts and every 6 hours, and shows a notification when one is out. Click it (or tray → **Install update**) to download it, verify its checksum and install it; Kuality restarts by itself and your start-with-Windows choice is kept.
+- **Tray → Check for updates**, and a new **Updates** section in Settings → General (turn automatic checks off, check now, see what's new, install).
+- Portable copies are notified too; "install" opens the download page.
+
+### Upgrading from 1.0.0-beta.1
+
+Beta 1 has no updater: install this version once by hand (download `Kuality-1.0.0-beta.2-setup.exe` below and run it). From now on Kuality updates itself.
+
+### Downloads
+
+- `Kuality-1.0.0-beta.2-setup.exe` — installer (per user, no admin rights needed).
+- `Kuality-1.0.0-beta.2-portable.zip` — unzip anywhere and run `kuality.exe`.
+
+The files are not code-signed yet: Windows SmartScreen may show "Windows protected your PC". Click **More info → Run anyway**. Checksums are in `SHA256SUMS.txt`.
+
 ## [1.0.0-beta.1] - 2026-11-09
 
 First public beta. Windows 11, x64.

@@ -11,7 +11,10 @@ kuality.exe  (core, always running, few MB)   — one exe, two processes (docs/s
 ├── Action worker thread   → runs `launch` / `open_url` (ShellExecuteExW), spawned on first use
 ├── Overlay thread         → widget windows attached to each taskbar, Direct2D rendering
 ├── Data providers         → media session, (later) extensions' data
-├── Tray icon              → Settings / Pause / Quit
+├── Update thread          → checks GitHub releases (60 s after start, every 6 h), downloads and
+│                            starts the installer on request (docs/specs/updates.md)
+├── Tray icon              → Settings / Pause / Check for updates or Install update / Quit,
+│                            notifications (balloon / toast)
 ├── Config watcher         → hot-reloads config.json
 └── IPC server             → (later) named pipe for the settings window
 
@@ -32,6 +35,8 @@ extensions/*  (later, separate processes in any language)
 crates/
 ├── core/       → package/binary `kuality` (the only exe; `--settings` runs the settings library)
 ├── settings/   → package `kuality-settings`, library: the settings window
+├── update/     → package `kuality-update`, library: update check (GitHub releases, SemVer), installer
+│                 download + SHA-256 check + start; used by core and settings
 └── protocol/   → package `kuality-protocol`, library: config types, key names, data-dir rule (`paths`),
                   atomic config write (`store`), Windows argument quoting (`quote`); later IPC and extension types
 ```
@@ -51,6 +56,7 @@ Current `core` modules (Phases 0–3):
 | `overlay/mod.rs` | `resolve(&Widgets) -> OverlayConfig` (runtime ids, duplicates, lenient fields, warnings) and `OverlayController` (start / apply / shutdown) |
 | `overlay/layout.rs` | Pure layout math: anchor, x/y, origin, width/height (`px` = DIPs, `%`), unit-tested |
 | `overlay/widgets/` | `Renderer` trait, `Theme`, `Content`; `text.rs` resolves and draws the text widget |
+| `updates.rs` | `Updates` (main-thread side: tray item, notifications, install / release page) and the `kuality-update` thread (`docs/specs/updates.md`) |
 | `config_store.rs` | Load/create/save of `config.json` (atomic write from `protocol::store`), `Reloader` (change detection), section diff |
 | `logging.rs` | `log` backend: `logs\kuality.log`, rotation, panic hook |
 | `platform/mod.rs` | Traits `SingleInstance`, `DirWatcher`, `TrayIcon`, `Waker`, `KeyboardBackend`, `OverlayBackend` + free functions |

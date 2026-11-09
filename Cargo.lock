@@ -3330,11 +3330,12 @@ dependencies = [
 
 [[package]]
 name = "kuality"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "embed-resource",
  "kuality-protocol",
  "kuality-settings",
+ "kuality-update",
  "log",
  "serde_json",
  "windows 0.62.2",
@@ -3342,7 +3343,7 @@ dependencies = [
 
 [[package]]
 name = "kuality-protocol"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -3350,13 +3351,24 @@ dependencies = [
 
 [[package]]
 name = "kuality-settings"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "futures-channel",
  "gpui-kit",
  "image",
  "kuality-protocol",
+ "kuality-update",
  "log",
+ "serde_json",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "kuality-update"
+version = "1.0.0-beta.2"
+dependencies = [
+ "log",
+ "serde",
  "serde_json",
  "windows 0.62.2",
 ]

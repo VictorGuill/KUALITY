@@ -140,6 +140,7 @@ pub fn changed_sections(old: &Config, new: &Config) -> Vec<&'static str> {
         ("hyperkey", old.hyperkey != new.hyperkey),
         ("shortcuts", old.shortcuts != new.shortcuts),
         ("widgets", old.widgets != new.widgets),
+        ("updates", old.updates != new.updates),
         ("other", old.extra != new.extra),
     ];
     checks
