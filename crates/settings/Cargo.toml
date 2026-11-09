@@ -22,6 +22,8 @@ gpui-kit = "=0.9.1"
 futures-channel = "0.3"
 # Pixel buffers for app icons (GPUI's own image type wraps them; already in its dependency tree).
 image = { version = "0.25", default-features = false }
+# The window's HWND, to color the native title bar (already in GPUI's dependency tree).
+raw-window-handle = "0.6"
 
 [dev-dependencies]
 kuality-protocol = { workspace = true, features = ["test-util"] }
@@ -30,6 +32,7 @@ kuality-protocol = { workspace = true, features = ["test-util"] }
 workspace = true
 features = [
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Security_Authorization",

@@ -1,7 +1,7 @@
 //! Small layout helpers shared by the tabs.
 
 use gpui_kit::component::StyledExt as _;
-use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
 };
@@ -17,10 +17,11 @@ pub const INVALID_IN_FILE: &str = "Invalid in config.json, Kuality uses the defa
 pub fn section(cx: &App) -> Div {
     v_flex()
         .w_full()
-        .rounded_lg()
+        .rounded(px(super::style::RADIUS_LG))
         .border_1()
         .border_color(cx.theme().border)
-        .bg(cx.theme().secondary.opacity(0.35))
+        .bg(super::style::card_bg(cx))
+        .overflow_hidden()
 }
 
 /// One line of a [`section`]: label and description on the left, control on the right.
@@ -33,14 +34,14 @@ pub fn setting_row(
     h_flex()
         .w_full()
         .gap_4()
-        .px_4()
-        .py_3()
+        .px_5()
+        .py_4()
         .justify_between()
         .child(
             v_flex()
                 .flex_1()
                 .min_w_0()
-                .gap_0p5()
+                .gap_1()
                 .child(div().text_sm().font_medium().child(label.into()))
                 .children(description.map(|d| {
                     div()
@@ -94,7 +95,8 @@ pub fn hint_text(text: impl Into<SharedString>, cx: &App) -> Div {
         .child(text.into())
 }
 
-/// A row of mutually exclusive buttons. `current == None` selects nothing (invalid value).
+/// A row of mutually exclusive buttons on a rounded track. `current == None` selects nothing
+/// (invalid value).
 pub fn segmented<T: Copy + PartialEq + 'static>(
     id: &'static str,
     options: &[(T, &'static str)],
@@ -102,28 +104,36 @@ pub fn segmented<T: Copy + PartialEq + 'static>(
     disabled: bool,
     cx: &mut Context<SettingsWindow>,
     on_pick: impl Fn(&mut SettingsWindow, T, &mut Window, &mut Context<SettingsWindow>) + 'static,
-) -> ButtonGroup {
-    let values: Vec<T> = options.iter().map(|(v, _)| *v).collect();
-    ButtonGroup::new(id)
-        .small()
-        .disabled(disabled)
-        .children(options.iter().enumerate().map(|(i, (v, label))| {
-            let selected = current == Some(*v);
+) -> Stateful<Div> {
+    let (track, thumb) = super::style::segment_colors(cx);
+    let on_pick = std::rc::Rc::new(on_pick);
+    h_flex()
+        .id(id)
+        .flex_none()
+        .gap_0p5()
+        .p(px(SEGMENT_INSET))
+        .rounded(cx.theme().radius + px(SEGMENT_INSET))
+        .bg(track)
+        .children(options.iter().enumerate().map(|(i, &(v, label))| {
+            let selected = current == Some(v);
+            let on_pick = on_pick.clone();
             Button::new((id, i))
-                .label(*label)
-                .when(selected, |b| b.primary())
-                .when(!selected, |b| b.outline())
+                .small()
+                .ghost()
+                .label(label)
                 .selected(selected)
-        }))
-        .on_click(cx.listener(move |this, picked: &Vec<usize>, window, cx| {
-            if this.read_only() {
-                return;
-            }
-            if let Some(&v) = picked.first().and_then(|&i| values.get(i)) {
-                on_pick(this, v, window, cx);
-            }
+                .when(selected, |b| b.bg(thumb))
+                .disabled(disabled)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if !this.read_only() {
+                        on_pick(this, v, window, cx);
+                    }
+                }))
         }))
 }
+
+/// Space between the segmented track and its buttons.
+const SEGMENT_INSET: f32 = 3.;
 
 /// "Open config file": creates the file first if it does not exist yet.
 /// `id` must be unique in the window: the banner and the General tab can both show one.
@@ -135,7 +145,7 @@ pub fn open_config_button(
     let path = this.doc.path().to_path_buf();
     Button::new(id)
         .small()
-        .outline()
+        .secondary()
         .label("Open config file")
         .on_click(move |_, _, cx| {
             if !path.exists() {
@@ -180,9 +190,9 @@ pub fn list_header(title: &'static str, right: impl IntoElement, cx: &App) -> Di
         .child(right)
 }
 
-/// Visual separator line inside a section.
+/// Visual separator line inside a section, inset from its sides.
 pub fn divider(cx: &App) -> Div {
-    div().h(px(1.)).w_full().bg(cx.theme().border)
+    div().mx_5().h(px(1.)).flex_none().bg(cx.theme().border)
 }
 
 /// The Hyper glyph: a four-pointed star, drawn from a path (no font glyph needed).
@@ -199,7 +209,7 @@ pub fn hyper_keycap() -> Div {
         .w(px(KEYCAP_H + 2.))
         .justify_center()
         .items_center()
-        .rounded(px(4.))
+        .rounded(px(5.))
         .bg(rgb(0x3A3A3C))
         .child(
             gpui_kit::component::Icon::default()
@@ -218,7 +228,7 @@ pub fn text_keycap(text: impl Into<SharedString>, cx: &App) -> Div {
         .px_1p5()
         .justify_center()
         .items_center()
-        .rounded(px(4.))
+        .rounded(px(5.))
         .border_1()
         .border_color(cx.theme().border)
         .bg(cx.theme().secondary)

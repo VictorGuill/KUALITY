@@ -633,7 +633,7 @@ impl SettingsWindow {
                 return section(cx)
                     .child(
                         h_flex()
-                            .px_4()
+                            .px_5()
                             .py_2()
                             .gap_3()
                             .justify_between()
@@ -691,7 +691,7 @@ impl SettingsWindow {
             }));
         let header = h_flex()
             .id(("widget-row", index))
-            .px_4()
+            .px_5()
             .py_2()
             .gap_3()
             .items_center()
@@ -872,7 +872,7 @@ impl SettingsWindow {
         };
 
         v_flex()
-            .px_4()
+            .px_5()
             .py_4()
             .gap_4()
             .child(field(

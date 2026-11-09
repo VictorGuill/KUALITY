@@ -102,7 +102,7 @@ impl SettingsWindow {
                     toggle,
                     cx,
                 ))
-                .child(v_flex().px_4().pb_3().gap_2().child(legend).children(notes))
+                .child(v_flex().px_5().pb_4().gap_2().child(legend).children(notes))
                 .child(divider(cx))
                 .child(setting_row(
                     "Apps see",
@@ -110,7 +110,7 @@ impl SettingsWindow {
                     picker,
                     cx,
                 ))
-                .child(v_flex().px_4().pb_3().child(hint_text(modifiers_hint, cx))),
+                .child(v_flex().px_5().pb_4().child(hint_text(modifiers_hint, cx))),
         )
     }
 }

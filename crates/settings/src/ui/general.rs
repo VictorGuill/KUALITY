@@ -142,7 +142,7 @@ impl SettingsWindow {
         if let Some(e) = view.error.clone() {
             notes.push(error_text(e, cx));
         }
-        let notes = (!notes.is_empty()).then(|| v_flex().gap_1().px_4().pb_3().children(notes));
+        let notes = (!notes.is_empty()).then(|| v_flex().gap_1().px_5().pb_4().children(notes));
 
         section(cx)
             .child(setting_row(
@@ -293,7 +293,7 @@ impl SettingsWindow {
             None => h_flex().child(
                 Button::new("update-check")
                     .small()
-                    .outline()
+                    .secondary()
                     .label("Check now")
                     .disabled(busy)
                     .on_click(cx.listener(|this, _, _, cx| this.check_updates(cx))),
@@ -309,7 +309,7 @@ impl SettingsWindow {
         if let Some(e) = view.install_error.clone() {
             notes.push(error_text(format!("Update failed: {e}"), cx));
         }
-        let notes = (!notes.is_empty()).then(|| v_flex().gap_1().px_4().pb_3().children(notes));
+        let notes = (!notes.is_empty()).then(|| v_flex().gap_1().px_5().pb_4().children(notes));
 
         section(cx)
             .child(setting_row(
@@ -374,8 +374,8 @@ impl SettingsWindow {
                 section(cx).child(
                     v_flex()
                         .gap_2()
-                        .px_4()
-                        .py_3()
+                        .px_5()
+                        .py_4()
                         .child(div().text_sm().font_medium().child("Config file"))
                         .child(
                             div()
@@ -391,7 +391,7 @@ impl SettingsWindow {
                                 .child(
                                     Button::new("open-folder")
                                         .small()
-                                        .outline()
+                                        .secondary()
                                         .label("Open data folder")
                                         .on_click(move |_, _, cx| {
                                             let _ = std::fs::create_dir_all(&dir);

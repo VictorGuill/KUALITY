@@ -443,7 +443,7 @@ impl SettingsWindow {
                         .child(
                             Button::new("enable-hyperkey")
                                 .small()
-                                .outline()
+                                .secondary()
                                 .label("Enable Hyperkey")
                                 .disabled(ro)
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -487,7 +487,7 @@ impl SettingsWindow {
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let header = h_flex()
-            .px_4()
+            .px_5()
             .py_2()
             .gap_3()
             .text_xs()
@@ -535,7 +535,7 @@ impl SettingsWindow {
             Row::Saved(i) => match &self.doc.config.shortcuts.bindings[i] {
                 BindingEntry::Invalid(_) => {
                     return h_flex()
-                        .px_4()
+                        .px_5()
                         .py_2()
                         .gap_3()
                         .items_center()
@@ -615,7 +615,7 @@ impl SettingsWindow {
             Row::Draft => div().into_any_element(),
         };
         h_flex()
-            .px_4()
+            .px_5()
             .py_2()
             .gap_3()
             .items_start()

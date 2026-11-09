@@ -6,6 +6,7 @@ mod general;
 mod hyperkey;
 mod picker;
 mod shortcuts;
+mod style;
 mod widgets;
 
 use std::collections::HashMap;
@@ -14,7 +15,7 @@ use std::time::Duration;
 
 use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::sidebar::{Sidebar, SidebarMenu, SidebarMenuItem};
-use gpui_kit::component::{ActiveTheme as _, IconName, Theme, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, IconName, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -77,7 +78,7 @@ pub fn run(config_path: PathBuf, core: CoreLink) {
                 ..Default::default()
             };
             let opened = gpui_kit::open_window(options, cx, |window, cx| {
-                Theme::sync_system_appearance(Some(window), cx);
+                style::apply(window, cx);
                 cx.new(|cx| SettingsWindow::new(config_path, core, window, cx))
             });
             if let Err(e) = opened {
@@ -243,7 +244,7 @@ impl SettingsWindow {
                 }
             }),
             cx.observe_window_appearance(window, |_, window, cx| {
-                Theme::sync_system_appearance(Some(window), cx);
+                style::apply(window, cx);
             }),
         ];
         let weak = cx.entity().downgrade();
@@ -575,10 +576,8 @@ impl SettingsWindow {
             .id("status")
             .justify_between()
             .gap_4()
-            .px_4()
-            .py_1p5()
-            .border_t_1()
-            .border_color(theme.border)
+            .px_10()
+            .py_2()
             .text_xs()
             .child(div().text_color(color).child(text))
             .when(!self.core_running, |this| {
@@ -602,7 +601,7 @@ impl Render for SettingsWindow {
         let banner = self.render_banner(cx);
         h_flex()
             .size_full()
-            .bg(cx.theme().background)
+            .bg(style::window_bg(cx))
             .text_color(cx.theme().foreground)
             .on_mouse_down(
                 MouseButton::Left,
@@ -610,28 +609,37 @@ impl Render for SettingsWindow {
             )
             .child(self.render_sidebar(cx))
             .child(
-                v_flex()
-                    .flex_1()
-                    .h_full()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .id("page")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .child(
-                                v_flex()
-                                    .gap_5()
-                                    .px_8()
-                                    .py_6()
-                                    .max_w(px(760.))
-                                    .child(div().text_xl().font_semibold().child(self.tab.label()))
-                                    .children(banner)
-                                    .child(page),
-                            ),
-                    )
-                    .child(self.render_status(cx)),
+                // The content floats as a rounded panel on the window background.
+                v_flex().flex_1().min_w_0().h_full().py_2().pr_2().child(
+                    v_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .rounded(px(style::RADIUS_LG))
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().background)
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .id("page")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .child(
+                                    v_flex()
+                                        .gap_6()
+                                        .px_10()
+                                        .py_8()
+                                        .max_w(px(780.))
+                                        .child(
+                                            div().text_xl().font_semibold().child(self.tab.label()),
+                                        )
+                                        .children(banner)
+                                        .child(page),
+                                ),
+                        )
+                        .child(self.render_status(cx)),
+                ),
             )
     }
 }

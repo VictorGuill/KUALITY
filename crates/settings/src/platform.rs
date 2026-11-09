@@ -10,10 +10,12 @@ use std::time::{Duration, Instant};
 
 use futures_channel::oneshot;
 use kuality_protocol::Key;
-use windows::Win32::Foundation::SIZE;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use windows::Win32::Foundation::{COLORREF, SIZE};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, WPARAM,
 };
+use windows::Win32::Graphics::Dwm::{DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
     DeleteObject, GetDIBits, GetObjectW, HBITMAP,
@@ -124,6 +126,38 @@ pub fn activate_existing() -> bool {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Paints the native title bar: caption background and text, as `0xRRGGBB` (Windows 11; older
+/// versions ignore it). The caption buttons keep following the window's dark-mode attribute.
+pub fn set_caption_colors(window: &impl HasWindowHandle, caption: u32, text: u32) {
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(h) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(h.hwnd.get() as *mut std::ffi::c_void);
+    for (attr, rgb) in [(DWMWA_CAPTION_COLOR, caption), (DWMWA_TEXT_COLOR, text)] {
+        let color = COLORREF(colorref(rgb));
+        // SAFETY: `hwnd` is this process's live window; the pointer and size describe `color`.
+        let set = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                attr,
+                &color as *const COLORREF as *const std::ffi::c_void,
+                size_of::<COLORREF>() as u32,
+            )
+        };
+        if let Err(e) = set {
+            log::debug!("cannot set the title bar color ({attr:?}): {e}");
+        }
+    }
+}
+
+/// `0xRRGGBB` to a Win32 `COLORREF` (`0x00BBGGRR`).
+fn colorref(rgb: u32) -> u32 {
+    ((rgb & 0xff) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 0xff)
 }
 
 fn find_existing_window() -> Option<HWND> {
@@ -608,4 +642,16 @@ fn bitmap_pixels(hbm: HBITMAP) -> Option<RawIcon> {
         height: h as u32,
         bgra,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::colorref;
+
+    #[test]
+    fn colorref_swaps_red_and_blue() {
+        assert_eq!(colorref(0x112233), 0x332211);
+        assert_eq!(colorref(0x0f0f0f), 0x0f0f0f);
+        assert_eq!(colorref(0xff0000), 0x0000ff);
+    }
 }

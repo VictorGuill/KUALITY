@@ -423,7 +423,7 @@ impl ActionPicker {
                     .h(px(ROW_HEIGHT))
                     .px_2()
                     .gap_2()
-                    .rounded_md()
+                    .rounded(cx.theme().radius)
                     .text_sm()
                     .cursor_pointer()
                     .when(entry == self.highlight, |this| this.bg(accent))
@@ -487,7 +487,7 @@ impl ActionPicker {
                 .h(px(ROW_HEIGHT))
                 .px_2()
                 .gap_2()
-                .rounded_md()
+                .rounded(cx.theme().radius)
                 .text_sm()
                 .cursor_pointer()
                 .when(entry == self.highlight, |this| this.bg(accent))
@@ -721,7 +721,7 @@ fn browse_button(
 ) -> Button {
     Button::new(id)
         .small()
-        .outline()
+        .secondary()
         .icon(match target {
             Browse::File | Browse::Program => IconName::File,
             Browse::Folder | Browse::Cwd => IconName::Folder,
