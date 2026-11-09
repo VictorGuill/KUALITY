@@ -33,7 +33,7 @@ Deferred (stay in the roadmap, not in this phase): named-pipe IPC, drag-to-place
 
 List row: enabled switch, text preview (first line, ellipsized) or `(empty)`, id, chevron to expand, delete button (confirm dialog). One row expanded at a time; the expanded row shows the editor inline. Entries that are not a known widget (`WidgetEntry::Unknown`, e.g. a `media` item) show as `Unsupported widget "<type>" (kept as is)` with only Delete.
 
-Text widget editor (defaults from `TextWidget::default()`; new items get id `text-<n>`, smallest unused n, `enabled: true`):
+Text widget editor (defaults from `TextWidget::default()`; new items get id `text-<n>`, smallest unused n, `enabled: false` so nothing appears on the taskbar until the user turns the item on):
 
 | Field | Control | Validation |
 |---|---|---|

@@ -489,6 +489,9 @@ impl SettingsWindow {
         let widget = TextWidget {
             common: CommonItem {
                 id: model::next_widget_id(items),
+                // Off until the user turns it on: a placeholder "Hello" should not pop up on
+                // the taskbar the moment the item is created.
+                enabled: false,
                 ..CommonItem::default()
             },
             text: "Hello".into(),
