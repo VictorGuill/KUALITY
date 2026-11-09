@@ -15,7 +15,7 @@ log.workspace = true
 serde_json.workspace = true
 # GPUI + gpui-component (gpui-kit pins the matching GPUI release). Exact pin: GPUI APIs change
 # between releases.
-gpui-kit = "=0.8.1"
+gpui-kit = "=0.9.1"
 # Oneshot channel for the key recorder (already in GPUI's dependency tree).
 futures-channel = "0.3"
 # Pixel buffers for app icons (GPUI's own image type wraps them; already in its dependency tree).
