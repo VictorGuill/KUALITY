@@ -11,6 +11,9 @@
 //! `SendInput` and posts trace and action messages to its own window. The window procedure runs the shortcut:
 //! `send_hotkey` right here (it must coordinate with the injected Hyper modifiers), `launch`
 //! and `open_url` on the action worker.
+//!
+//! While the hook is installed, the [`hook_watchdog`](super::hook_watchdog) reinstalls it if
+//! Windows silently removed it.
 
 use std::cell::RefCell;
 use std::io;
@@ -36,7 +39,7 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
     EVENT_SYSTEM_DESKTOPSWITCH, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
     PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND, PostMessageW, PostQuitMessage, PostThreadMessageW,
     RegisterClassExW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CLOSE, WM_KEYDOWN, WM_KEYUP,
+    WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CLOSE, WM_INPUT, WM_KEYDOWN, WM_KEYUP,
     WM_POWERBROADCAST, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_WTSSESSION_CHANGE, WNDCLASSEXW,
     WS_EX_TOOLWINDOW, WS_POPUP, WTS_CONSOLE_CONNECT, WTS_CONSOLE_DISCONNECT, WTS_REMOTE_CONNECT,
     WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
@@ -44,6 +47,7 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
 use ::windows::core::{PCWSTR, w};
 use kuality_protocol::Key;
 
+use super::hook_watchdog::{self, Watchdog};
 use super::input::{self, KUALITY_TAG};
 use crate::actions::{ActionWorker, Job};
 use crate::hyperkey::KeyboardCommand;
@@ -155,6 +159,8 @@ struct Ctx {
     enabled: bool,
     paused: bool,
     hook: Option<HHOOK>,
+    /// Detects a hook Windows removed (active while `hook` is installed).
+    watchdog: Watchdog,
     win_event: Option<HWINEVENTHOOK>,
     session_registered: bool,
     /// A release could not be injected (e.g. secure desktop); clean up on the next switch.
@@ -217,6 +223,7 @@ fn thread_main(
         enabled: false,
         paused: false,
         hook: None,
+        watchdog: Watchdog::default(),
         win_event,
         session_registered,
         cleanup_pending: false,
@@ -384,6 +391,7 @@ impl Ctx {
         match r {
             Ok(h) => {
                 self.hook = Some(h);
+                self.watchdog.start(self.hwnd);
                 // Modifiers held while the hook was off: their downs were never seen.
                 ENGINE.with_borrow_mut(|e| e.sync_physical(system_modifiers()));
             }
@@ -393,10 +401,24 @@ impl Ctx {
 
     fn uninstall_hook(&mut self) {
         if let Some(h) = self.hook.take() {
+            self.watchdog.stop();
             // SAFETY: `h` is our hook handle.
             if let Err(e) = unsafe { UnhookWindowsHookEx(h) } {
                 log::warn!("UnhookWindowsHookEx failed: {e}");
             }
+        }
+    }
+
+    /// The watchdog saw a CapsLock press the hook missed: Windows removed the hook.
+    fn on_hook_lost(&mut self) {
+        if self.hook.is_none() {
+            return;
+        }
+        log::warn!("keyboard hook was removed by Windows; reinstalling");
+        self.update(true);
+        // The missed press reached the system as a real CapsLock.
+        if self.enabled {
+            caps_toggle_off();
         }
     }
 
@@ -549,6 +571,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             super::tray::request_quit();
             LRESULT(0)
         }
+        WM_INPUT => {
+            if with_ctx(|c| c.watchdog.hook_missed(lparam)) == Some(true) {
+                with_ctx(Ctx::on_hook_lost);
+            }
+            // SAFETY: default handling (Raw Input cleanup) with the arguments we received.
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         WM_APP_ACTION => {
             with_ctx(|c| c.run_shortcut(wparam.0, lparam.0 as u64));
             LRESULT(0)
@@ -651,6 +680,9 @@ unsafe fn on_key(wparam: WPARAM, lparam: LPARAM) -> bool {
         return false;
     };
     let ev = KeyEvent { key: Key(vk), down };
+    if down && ev.key == Key::CAPSLOCK && info.flags.0 & LLKHF_INJECTED.0 == 0 {
+        hook_watchdog::hook_saw_caps_down();
+    }
 
     let result = ENGINE.with(|e| {
         let mut e = e.try_borrow_mut().ok()?;

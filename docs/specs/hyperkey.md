@@ -141,6 +141,16 @@ The hidden window registers:
 | `WTS_SESSION_LOCK`, `WTS_CONSOLE_DISCONNECT`, `WTS_REMOTE_DISCONNECT`, `PBT_APMSUSPEND`, `EVENT_SYSTEM_DESKTOPSWITCH` | `force_release` + inject (may fail on the secure desktop; ignore), then `reset()` |
 | `WTS_SESSION_UNLOCK`, `WTS_CONSOLE_CONNECT`, `WTS_REMOTE_CONNECT`, `PBT_APMRESUMEAUTOMATIC` | `reset()`; inject `Up` for any of LCTRL/LSHIFT/LALT/LWIN that `GetAsyncKeyState` reports down (clears leftovers); if active: reinstall hook and turn CapsLock toggle off if on |
 
+### Hook watchdog (`platform/windows/hook_watchdog.rs`)
+
+Windows silently removes a low-level hook whose callback times out (`LowLevelHooksTimeout`, e.g. under heavy load), with no notification. To notice it:
+
+- While the hook is installed, the keyboard window registers for keyboard Raw Input with `RIDEV_INPUTSINK` (removed with `RIDEV_REMOVE` when the hook is removed on purpose).
+- The hook callback bumps a global counter (one relaxed atomic add) for every physical CapsLock down, before anything else.
+- On `WM_INPUT` the window procedure ignores everything but a physical CapsLock down (injected input has no device handle). The hook runs before Raw Input is generated, so the counter must have moved since the previous such message; if it did not, the hook missed the press.
+- Missed press and the foreground process is not elevated above us (UIPI hides those keys from the hook, not a lost hook) → `warn` log, reinstall the hook (forced release first) and turn the CapsLock toggle off (the missed press reached the system as a real CapsLock).
+- Only CapsLock is checked: it is the key whose loss the user notices, and it keeps the check off every other key. Detection happens on the first press after the loss, so that press acts as a real CapsLock (toggled back off); the next one works.
+
 ### Crash recovery
 
 - At startup the core installs `std::panic::set_hook` (chaining the Phase 0 logging panic hook) and `SetUnhandledExceptionFilter`. Both call `input::emergency_release()`: if `MODIFIERS_DOWN` is set, one `SendInput` with `MASK` down/up and Up for LWIN, LALT, LSHIFT, LCTRL. It allocates nothing and never panics.
@@ -180,7 +190,7 @@ Explorer registers `Ctrl+Shift+Alt+Win` alone and with W/X/T/O/P/D/L/N/Y as Offi
 | CapsLock up missed (focus moved to an elevated window, hook dropped by Windows) | Self-heals on next CapsLock press/release (rule 3 then 4). Elevated targets also drop our `SendInput` (UIPI). Documented; fixed by "Run elevated" (Phase 6). |
 | CapsLock toggle got turned on (elevated window had focus, another tool) | Turned off on the next Hyper press, on activation, unlock and resume. |
 | Lock screen, Ctrl+Alt+Del, UAC, sleep | Forced release + reset (table above). |
-| Hook silently removed by Windows (`LowLevelHooksTimeout`) | Callback stays far below the timeout; hook is reinstalled on every `Apply`, unlock and resume. |
+| Hook silently removed by Windows (`LowLevelHooksTimeout`) | Callback stays far below the timeout; hook is reinstalled on every `Apply`, unlock and resume, and by the hook watchdog on the next physical CapsLock press. |
 | Explorer restart | No effect on the hook. |
 | Disable/pause while CapsLock held | `force_release` before unhooking. |
 | Another LL-hook app (AutoHotkey, RDP client, VM) installed after us | It sees keys first; whatever it swallows never reaches us. Documented. |

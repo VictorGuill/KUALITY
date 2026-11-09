@@ -32,6 +32,7 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 - [x] Office key disabled while enabled, restored when disabled
 - [x] Toggle via `hyperkey.enabled` (hot-reload) and tray "Pause"
 - [x] Safe recovery: modifiers never left stuck (on quit, crash, lock screen)
+- [x] *(2026-11-09, follow-up)* Hook watchdog: a hook Windows silently removed is reinstalled on the next CapsLock press
 
 **Done when:** holding CapsLock + T in any app is received as Ctrl+Shift+Alt+Win+T, tapping it alone does nothing visible.
 

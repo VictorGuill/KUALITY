@@ -5,6 +5,7 @@ mod crash;
 mod dpi;
 mod focus;
 mod folders;
+mod hook_watchdog;
 mod input;
 mod instance;
 mod keyboard;

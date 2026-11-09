@@ -94,6 +94,7 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **Leftover cleanup** — releases sent after unlock/resume are preceded by the mask key (a lone Win up would open Start); if a forced release failed (secure desktop), the next desktop switch also clears leftover modifiers.
 - **Window close** — `taskkill` without `/F` may target the keyboard window: its `WM_CLOSE` is forwarded to the main window (same clean shutdown). Commands fall back to `PostThreadMessageW` if the window is gone.
 - **Hard kill** — `taskkill /F` cannot release injected modifiers or restore the Office key; the next start restores the Office key if Hyperkey is disabled (documented limitation).
+- **Hook watchdog** *(2026-11-09)* — keyboard Raw Input (`RIDEV_INPUTSINK`) is registered while the hook is installed; a physical CapsLock press reaching `WM_INPUT` without the hook having counted one since the previous press means Windows removed the hook: it is reinstalled (unless the foreground process is elevated above us, where UIPI hides keys from the hook). Counting instead of relying on swallowed keys never reaching Raw Input keeps it correct either way.
 - **keyviewer** — dev-only example `cargo run -p kuality --example keyviewer` for manual tests.
 
 ## Shortcuts implementation (2026-10-31, Phase 2)
