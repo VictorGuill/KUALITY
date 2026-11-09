@@ -2,6 +2,13 @@
 
 All notable changes to Kuality. Versions follow [Semantic Versioning](https://semver.org); each `## [x.y.z]` section becomes the notes of the GitHub Release tagged `vx.y.z` (keep one line per paragraph or bullet: release notes keep line breaks).
 
+## [Unreleased]
+
+### New
+
+- **To-do list** — Settings → **To do** → Enable puts a small `TO DO (3)` at the bottom-left of the taskbar. Click it to open your list: type and press Enter to add an item, check it off (it stays, struck through) or delete it with its trash button. Esc or a click elsewhere closes it. The list is stored on this PC only and survives restarts.
+- **Taskbar bar** — the to-do lives in a new kind of taskbar widget, a bar that holds several items at one position (now playing will join it). Move it and change its font in Settings → Widgets.
+
 ## [1.0.0-beta.3] - 2026-11-09
 
 ### Changed

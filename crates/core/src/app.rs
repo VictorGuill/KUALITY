@@ -12,6 +12,7 @@ use crate::actions::ActionWorker;
 use crate::config_store::changed_sections;
 use crate::hyperkey::KeyboardController;
 use crate::overlay::OverlayController;
+use crate::overlay::widgets::LiveData;
 use crate::platform::{self, DirWatcher, Event};
 use crate::updates::Updates;
 use crate::{logging, shortcuts};
@@ -23,6 +24,9 @@ const ACTIONS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 /// which core started it (it closes when that process ends).
 const SETTINGS_ARG: &str = "--settings";
 const CORE_PID_ARG: &str = "--core-pid";
+/// Arguments that open the to-do popup (`--at <x>,<y>`: anchor in screen pixels).
+const TODO_ARG: &str = "--todo";
+const AT_ARG: &str = "--at";
 
 /// State owned by the main thread.
 #[derive(Debug)]
@@ -30,11 +34,15 @@ pub struct App<W: DirWatcher> {
     config: Config,
     config_path: PathBuf,
     reloads: Receiver<Box<Config>>,
+    /// Pending to-do count whenever `todos.json` changes (watcher thread).
+    todo_counts: Receiver<Option<usize>>,
     watcher: Option<W>,
     keyboard: Option<KeyboardController>,
     actions: Arc<ActionWorker>,
     overlay: Option<OverlayController>,
     updates: Option<Updates>,
+    /// Live widget data last sent to the overlay.
+    live: LiveData,
     /// Tray "Pause" (runtime only, keyboard features only).
     paused: bool,
 }
@@ -46,26 +54,30 @@ impl<W: DirWatcher> App<W> {
         config: Config,
         config_path: PathBuf,
         reloads: Receiver<Box<Config>>,
+        todo_counts: Receiver<Option<usize>>,
         watcher: Option<W>,
         keyboard: Option<KeyboardController>,
         actions: Arc<ActionWorker>,
         overlay: Option<OverlayController>,
         updates: Option<Updates>,
     ) -> Self {
-        let app = Self {
+        let mut app = Self {
             config,
             config_path,
             reloads,
+            todo_counts,
             watcher,
             keyboard,
             actions,
             overlay,
             updates,
+            live: LiveData::default(),
             paused: false,
         };
         app.apply_keyboard(&app.config);
+        app.update_live();
         if let Some(o) = &app.overlay {
-            o.apply(&app.config.widgets);
+            o.apply(&app.config.widgets, app.config.todo.enabled);
         }
         // Also cleans up after a crash when Hyperkey is now disabled.
         reconcile_office_key(office_override_wanted(&app.config));
@@ -99,6 +111,45 @@ impl<W: DirWatcher> App<W> {
         }
     }
 
+    /// Opens the to-do popup above (`x`, `y`) (`kuality.exe --todo`, this same exe), or closes
+    /// it when it is (or was, at the mouse press) open.
+    fn toggle_todo(&self, x: i32, y: i32, was_open: bool) {
+        if kuality_settings::close_todo_popup() || was_open {
+            log::debug!("to-do popup closed");
+            return;
+        }
+        let started = std::env::current_exe().and_then(|exe| {
+            platform::spawn_detached(
+                &exe,
+                &[
+                    TODO_ARG.into(),
+                    CORE_PID_ARG.into(),
+                    std::process::id().to_string(),
+                    AT_ARG.into(),
+                    format!("{x},{y}"),
+                ],
+            )
+        });
+        match started {
+            Ok(()) => log::debug!("started the to-do popup"),
+            Err(e) => log::error!("could not start the to-do popup: {e}"),
+        }
+    }
+
+    /// Takes the latest to-do count from the watcher and sends it to the overlay if it changed.
+    fn update_live(&mut self) {
+        let mut live = self.live;
+        while let Ok(count) = self.todo_counts.try_recv() {
+            live.todo_pending = count;
+        }
+        if live != self.live {
+            self.live = live;
+            if let Some(o) = &self.overlay {
+                o.set_data(live);
+            }
+        }
+    }
+
     /// Handles one event from the main loop.
     pub fn handle(&mut self, event: Event) -> ControlFlow<()> {
         match event {
@@ -106,6 +157,7 @@ impl<W: DirWatcher> App<W> {
                 while let Ok(new) = self.reloads.try_recv() {
                     self.apply_config(*new);
                 }
+                self.update_live();
                 if let Some(u) = &mut self.updates {
                     u.poll();
                 }
@@ -113,6 +165,10 @@ impl<W: DirWatcher> App<W> {
             }
             Event::OpenSettings => {
                 self.open_settings();
+                ControlFlow::Continue(())
+            }
+            Event::ToggleTodo { x, y, was_open } => {
+                self.toggle_todo(x, y, was_open);
                 ControlFlow::Continue(())
             }
             Event::TogglePause => {
@@ -182,10 +238,11 @@ impl<W: DirWatcher> App<W> {
             reconcile_office_key(office_override_wanted(&new));
         }
         // Only when the section changed: an Apply also brings back widgets hidden from the menu.
-        if new.widgets != self.config.widgets
+        // `todo.enabled` shows or hides the bars' to-do modules.
+        if (new.widgets != self.config.widgets || new.todo.enabled != self.config.todo.enabled)
             && let Some(o) = &self.overlay
         {
-            o.apply(&new.widgets);
+            o.apply(&new.widgets, new.todo.enabled);
         }
         if new.updates.check != self.config.updates.check
             && let Some(u) = &self.updates

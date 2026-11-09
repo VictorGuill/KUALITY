@@ -1,10 +1,11 @@
 //! Widget contents: what each widget type measures and draws, through the [`Renderer`] trait.
 
+pub mod bar;
 pub mod text;
 
 use kuality_protocol::{Color, FontWeight, TextAlign};
 
-use super::layout::SizeF;
+use super::layout::{RectF, SizeF};
 
 /// Windows mode the taskbar follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -48,6 +49,25 @@ pub fn relative_luminance(r: u8, g: u8, b: u8) -> f64 {
 }
 
 impl Theme {
+    /// Background of a hovered clickable part (like taskbar buttons: a light veil on dark
+    /// taskbars, a dark one on light taskbars).
+    pub fn hover_color(self) -> Color {
+        match self {
+            Self::Dark => Color {
+                a: 0x1A,
+                r: 0xFF,
+                g: 0xFF,
+                b: 0xFF,
+            },
+            Self::Light => Color {
+                a: 0x12,
+                r: 0x00,
+                g: 0x00,
+                b: 0x00,
+            },
+        }
+    }
+
     /// The theme whose default text color has the higher contrast ratio on a background of
     /// relative luminance `l` (white text on dark backgrounds, `#1B1B1B` on light ones).
     pub fn for_background(l: f64) -> Self {
@@ -78,29 +98,57 @@ pub struct TextStyle {
 pub trait Renderer {
     /// Natural size of `text` without wrapping (trailing whitespace included).
     fn measure_text(&mut self, text: &str, style: &TextStyle) -> SizeF;
-    /// Draws `text` inside a box of `size` at (0, 0): no wrap, vertically centered, horizontal
-    /// alignment from `style`, trimmed with an ellipsis if it does not fit.
-    fn draw_text(&mut self, text: &str, style: &TextStyle, color: Color, size: SizeF);
+    /// Draws `text` inside `rect`: no wrap, vertically centered, horizontal alignment from
+    /// `style`, trimmed with an ellipsis if it does not fit.
+    fn draw_text(&mut self, text: &str, style: &TextStyle, color: Color, rect: RectF);
+    /// Fills a rounded rectangle (hover background).
+    fn fill_rounded_rect(&mut self, rect: RectF, radius: f32, color: Color);
+}
+
+/// Data that changes without a config change (sent to the overlay thread on its own).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LiveData {
+    /// Pending to-do items; `None` when unknown (to-do off, `todos.json` invalid).
+    pub todo_pending: Option<usize>,
+}
+
+/// What draws a widget: the taskbar theme, live data and the hovered module (bars only).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DrawContext {
+    pub theme: Theme,
+    pub live: LiveData,
+    pub hover: Option<usize>,
 }
 
 /// What a widget shows.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Content {
     Text(text::TextContent),
+    Bar(bar::BarContent),
 }
 
 impl Content {
     /// Natural size in DIPs (used by `auto` width/height).
-    pub fn measure(&self, r: &mut dyn Renderer) -> SizeF {
+    pub fn measure(&self, r: &mut dyn Renderer, live: &LiveData) -> SizeF {
         match self {
             Self::Text(t) => t.measure(r),
+            Self::Bar(b) => b.measure(r, live),
+        }
+    }
+
+    /// Clickable parts, left to right, in DIPs from the box's left edge (empty for text).
+    pub fn spans(&self, r: &mut dyn Renderer, live: &LiveData) -> Vec<bar::Span> {
+        match self {
+            Self::Text(_) => Vec::new(),
+            Self::Bar(b) => b.spans(r, live),
         }
     }
 
     /// Draws the content in a box of `size` DIPs.
-    pub fn draw(&self, r: &mut dyn Renderer, size: SizeF, theme: Theme) {
+    pub fn draw(&self, r: &mut dyn Renderer, size: SizeF, cx: &DrawContext) {
         match self {
-            Self::Text(t) => t.draw(r, size, theme),
+            Self::Text(t) => t.draw(r, size, cx.theme),
+            Self::Bar(b) => b.draw(r, size, cx),
         }
     }
 }

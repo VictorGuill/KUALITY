@@ -211,6 +211,19 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **Settings** — General → Updates: switch, version + result of a check run when the window opens, Check now / What's new / Install (Download for portable copies).
 - **Dev testing** — debug builds only: `KUALITY_UPDATE_AS_VERSION` pretends another version; `cargo run -p kuality-update --example check -- <version> --download`.
 
+## To-do & taskbar bar (2026-11-09, Phase 8, user decisions)
+
+- **Order** — done before Phase 4 (media), like Phase 5.
+- **Data** — items live in their own file `todos.json` next to `config.json` (data, written on every change; `config.json` stays settings only). Local only, never synced. Missing file = empty list; an invalid file is never overwritten.
+- **Writers** — only the to-do popup writes `todos.json`; the core reads it for the count (same data-dir watcher, byte compare) and Settings never touches it.
+- **Popup** — a separate GPUI process `kuality.exe --todo`, like Settings: ~100 MB only while open, ~0.3–0.5 s to appear, nothing when closed (rejected: a native Win32/Direct2D popup in the core, too much custom UI; keeping the process alive hidden, against "lightweight first"). `WindowKind::PopUp`, rounded, above the clicked module; closes on Esc, focus loss, or a second click on the module.
+- **Container** — new widget type `bar`: one position, modules laid out left to right (`modules: [{ "type": "todo" }]`); unknown module types are kept and skipped, so `media` can join in Phase 4. Modules are clickable pills with a hover highlight.
+- **Taskbar text** — `TO DO (n)` (label configurable, count of pending items, left out at 0).
+- **Removing items** — a delete button per item, at once, no undo and no "clear done". Done items stay (struck through, after the pending ones) until deleted.
+- **Opt-in** — `todo.enabled` is off by default; turning it on in Settings adds (or enables) a bar with the to-do module at the bottom-left.
+- **Toggle detection** — pressing the taskbar takes the focus from the popup, which closes before the click arrives; the widget window records at mouse-down whether the popup's mutex exists, and such a click only closes it.
+- **Live data** — `OverlayCommand::Data(LiveData)` re-renders the widgets without an `Apply`, so widgets hidden from the menu stay hidden.
+
 ## Out of scope for now
 
 - Notifications widget (needs package identity / MSIX).

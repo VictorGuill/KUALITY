@@ -50,6 +50,10 @@ const WM_APP_TRAY: u32 = WM_APP + 1;
 const WM_APP_WAKE: u32 = WM_APP + 2;
 /// Another thread asks for the Settings action (widget context menu).
 const WM_APP_OPEN_SETTINGS: u32 = WM_APP + 3;
+/// The overlay thread asks to open or close the to-do popup: `wparam` = anchor x in screen
+/// pixels, `lparam` = anchor y (low 32 bits) | `TODO_WAS_OPEN`.
+const WM_APP_TOGGLE_TODO: u32 = WM_APP + 4;
+const TODO_WAS_OPEN: isize = 1 << 32;
 const TRAY_ICON_ID: u32 = 1;
 /// App icon resource embedded by `build.rs` (also the exe's and the settings window's icon).
 const APP_ICON: u16 = 1;
@@ -460,6 +464,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             push(Event::OpenSettings);
             LRESULT(0)
         }
+        WM_APP_TOGGLE_TODO => {
+            push(Event::ToggleTodo {
+                x: wparam.0 as isize as i32,
+                y: lparam.0 as i32,
+                was_open: lparam.0 & TODO_WAS_OPEN != 0,
+            });
+            LRESULT(0)
+        }
         WM_APP_WAKE => {
             push(Event::Wake);
             LRESULT(0)
@@ -504,6 +516,25 @@ pub(crate) fn request_open_settings() {
                 WM_APP_OPEN_SETTINGS,
                 WPARAM(0),
                 LPARAM(0),
+            )
+        };
+    }
+}
+
+/// Asks the main loop to open the to-do popup anchored at (`x`, `y`) screen pixels, or to close
+/// it if it is open (bar to-do module clicked). `was_open`: it was open when the mouse button
+/// went down. Any thread.
+pub(crate) fn request_toggle_todo(x: i32, y: i32, was_open: bool) {
+    let flag = if was_open { TODO_WAS_OPEN } else { 0 };
+    let hwnd = MAIN_HWND.load(Ordering::Relaxed);
+    if hwnd != 0 {
+        // SAFETY: PostMessageW is thread-safe.
+        let _ = unsafe {
+            PostMessageW(
+                Some(HWND(hwnd as *mut _)),
+                WM_APP_TOGGLE_TODO,
+                WPARAM(x as isize as usize),
+                LPARAM((y as isize & 0xFFFF_FFFF) | flag),
             )
         };
     }

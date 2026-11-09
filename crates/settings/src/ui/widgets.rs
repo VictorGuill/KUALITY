@@ -1,4 +1,5 @@
-//! Widgets tab: the two switches and the text widget list with an inline editor.
+//! Widgets tab: the two switches and the widget list (text widgets and bars) with an inline
+//! editor shared by both types.
 
 use std::collections::BTreeMap;
 
@@ -15,8 +16,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use kuality_protocol::{
-    Anchor, Color, CommonItem, Dimension, FontWeight, Lenient, Origin, TextAlign, TextWidget,
-    WidgetEntry, WidgetItem,
+    Anchor, BarModule, BarModuleEntry, Color, CommonItem, Dimension, FontWeight, Lenient, Origin,
+    TextAlign, TextWidget, TodoModule, WidgetEntry, WidgetItem,
 };
 
 use super::SettingsWindow;
@@ -76,12 +77,111 @@ pub(crate) enum WField {
     Origin,
     Weight,
     Align,
+    Gap,
+}
+
+/// What the editor shows, copied from a text widget or a bar.
+#[derive(Debug, Clone)]
+pub(crate) struct Snapshot {
+    common: CommonItem,
+    font_family: String,
+    font_size: Lenient<f64>,
+    font_weight: Lenient<FontWeight>,
+    color: Lenient<Option<Color>>,
+    kind: SnapKind,
+}
+
+#[derive(Debug, Clone)]
+enum SnapKind {
+    Text {
+        text: String,
+        align: Lenient<TextAlign>,
+    },
+    Bar {
+        gap: Lenient<f64>,
+        modules: Vec<BarModuleEntry>,
+    },
+}
+
+fn snapshot(item: &WidgetItem) -> Snapshot {
+    match item {
+        WidgetItem::Text(t) => Snapshot {
+            common: t.common.clone(),
+            font_family: t.font_family.clone(),
+            font_size: t.font_size.clone(),
+            font_weight: t.font_weight.clone(),
+            color: t.color.clone(),
+            kind: SnapKind::Text {
+                text: t.text.clone(),
+                align: t.align.clone(),
+            },
+        },
+        WidgetItem::Bar(b) => Snapshot {
+            common: b.common.clone(),
+            font_family: b.font_family.clone(),
+            font_size: b.font_size.clone(),
+            font_weight: b.font_weight.clone(),
+            color: b.color.clone(),
+            kind: SnapKind::Bar {
+                gap: b.gap.clone(),
+                modules: b.modules.clone(),
+            },
+        },
+    }
+}
+
+/// The editable fields of a text widget or a bar (type-specific ones are `None` for the other).
+struct StyleMut<'a> {
+    common: &'a mut CommonItem,
+    font_family: &'a mut String,
+    font_size: &'a mut Lenient<f64>,
+    font_weight: &'a mut Lenient<FontWeight>,
+    color: &'a mut Lenient<Option<Color>>,
+    text: Option<&'a mut String>,
+    align: Option<&'a mut Lenient<TextAlign>>,
+    gap: Option<&'a mut Lenient<f64>>,
+}
+
+fn style_mut(item: &mut WidgetItem) -> StyleMut<'_> {
+    match item {
+        WidgetItem::Text(t) => StyleMut {
+            common: &mut t.common,
+            font_family: &mut t.font_family,
+            font_size: &mut t.font_size,
+            font_weight: &mut t.font_weight,
+            color: &mut t.color,
+            text: Some(&mut t.text),
+            align: Some(&mut t.align),
+            gap: None,
+        },
+        WidgetItem::Bar(b) => StyleMut {
+            common: &mut b.common,
+            font_family: &mut b.font_family,
+            font_size: &mut b.font_size,
+            font_weight: &mut b.font_weight,
+            color: &mut b.color,
+            text: None,
+            align: None,
+            gap: Some(&mut b.gap),
+        },
+    }
+}
+
+/// Label of a bar module type in the UI.
+fn module_label(m: &BarModuleEntry) -> String {
+    match m {
+        BarModuleEntry::Known(BarModule::Todo(_)) => "To do".into(),
+        BarModuleEntry::Unknown(v) => format!("\"{}\" (unsupported, kept)", model::unknown_type(v)),
+    }
 }
 
 /// Inputs of the expanded text widget.
 pub(crate) struct WidgetEditor {
     pub index: usize,
-    text: Entity<TextareaState>,
+    /// Text widgets only.
+    text: Option<Entity<TextareaState>>,
+    /// Bars only.
+    gap: Option<Entity<InputState>>,
     id: Entity<InputState>,
     x: Entity<InputState>,
     y: Entity<InputState>,
@@ -148,18 +248,15 @@ fn color_hex(c: Color) -> String {
 }
 
 impl SettingsWindow {
-    fn text_widget(&self, index: usize) -> Option<&TextWidget> {
-        match self.doc.config.widgets.items.get(index) {
-            Some(WidgetEntry::Known(WidgetItem::Text(t))) => Some(t),
+    fn widget_item_mut(&mut self, index: usize) -> Option<&mut WidgetItem> {
+        match self.doc.config.widgets.items.get_mut(index) {
+            Some(WidgetEntry::Known(item)) => Some(item),
             _ => None,
         }
     }
 
-    fn text_widget_mut(&mut self, index: usize) -> Option<&mut TextWidget> {
-        match self.doc.config.widgets.items.get_mut(index) {
-            Some(WidgetEntry::Known(WidgetItem::Text(t))) => Some(t),
-            _ => None,
-        }
+    fn style_mut(&mut self, index: usize) -> Option<StyleMut<'_>> {
+        self.widget_item_mut(index).map(style_mut)
     }
 
     /// Expands widget `index` (collapses it if it is already open).
@@ -169,10 +266,11 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(t) = self.text_widget(index).cloned() else {
+        let Some(WidgetEntry::Known(item)) = self.doc.config.widgets.items.get(index) else {
             self.widget_editor = None;
             return;
         };
+        let t = snapshot(item);
         let mut errors = BTreeMap::new();
         let mut mark = |f: WField, ok: bool| {
             if !ok {
@@ -205,7 +303,19 @@ impl SettingsWindow {
         mark(WField::Anchor, t.common.anchor.valid().is_some());
         mark(WField::Origin, t.common.origin.valid().is_some());
         mark(WField::Weight, t.font_weight.valid().is_some());
-        mark(WField::Align, t.align.valid().is_some());
+        let gap_text = match &t.kind {
+            SnapKind::Text { align, .. } => {
+                mark(WField::Align, align.valid().is_some());
+                None
+            }
+            SnapKind::Bar { gap, .. } => Some(match gap {
+                Lenient::Valid(v) => model::format_number(*v),
+                Lenient::Invalid(v) => {
+                    mark(WField::Gap, false);
+                    raw_text(v)
+                }
+            }),
+        };
 
         let line = |value: String,
                     placeholder: &'static str,
@@ -220,10 +330,22 @@ impl SettingsWindow {
         let number = |value: String, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).step(1.0).default_value(value))
         };
-        let text = cx.new(|cx| {
-            let mut s = TextareaState::new(window, cx).default_value(t.text.clone());
-            s.set_auto_grow(2, 6, cx);
-            s
+        let text = match &t.kind {
+            SnapKind::Text { text, .. } => Some(cx.new(|cx| {
+                let mut s = TextareaState::new(window, cx).default_value(text.clone());
+                s.set_auto_grow(2, 6, cx);
+                s
+            })),
+            SnapKind::Bar { .. } => None,
+        };
+        let gap = gap_text.map(|g| {
+            cx.new(|cx| {
+                InputState::new(window, cx)
+                    .step(1.0)
+                    .min(model::GAP_RANGE.0)
+                    .max(model::GAP_RANGE.1)
+                    .default_value(g)
+            })
         });
         let id = line(t.common.id.clone(), "#index", window, cx);
         let x = number(x, window, cx);
@@ -240,14 +362,25 @@ impl SettingsWindow {
         });
         let color = line(color, "#RRGGBB", window, cx);
 
-        let mut subs =
-            vec![
-                cx.subscribe_in(&text, window, |this, _, ev: &InputEvent, window, cx| {
+        let mut subs = Vec::new();
+        if let Some(text) = &text {
+            subs.push(
+                cx.subscribe_in(text, window, |this, _, ev: &InputEvent, window, cx| {
                     if matches!(ev, InputEvent::Change) {
                         this.widget_field_changed(WField::Text, window, cx);
                     }
                 }),
-            ];
+            );
+        }
+        if let Some(gap) = &gap {
+            subs.push(
+                cx.subscribe_in(gap, window, |this, _, ev: &InputEvent, window, cx| {
+                    if matches!(ev, InputEvent::Change) {
+                        this.widget_field_changed(WField::Gap, window, cx);
+                    }
+                }),
+            );
+        }
         for (input, f) in [
             (&id, WField::Id),
             (&x, WField::X),
@@ -271,6 +404,7 @@ impl SettingsWindow {
         self.widget_editor = Some(WidgetEditor {
             index,
             text,
+            gap,
             id,
             x,
             y,
@@ -300,7 +434,14 @@ impl SettingsWindow {
         let index = ed.index;
         let value = |e: &Entity<InputState>| e.read(cx).value().to_string();
         let text = match f {
-            WField::Text => ed.text.read(cx).value().to_string(),
+            WField::Text => match &ed.text {
+                Some(t) => t.read(cx).value().to_string(),
+                None => return,
+            },
+            WField::Gap => match &ed.gap {
+                Some(g) => value(g),
+                None => return,
+            },
             WField::Id => value(&ed.id),
             WField::X => value(&ed.x),
             WField::Y => value(&ed.y),
@@ -313,14 +454,23 @@ impl SettingsWindow {
         };
         let (x_unit, y_unit, w_unit, h_unit) =
             (ed.x_unit, ed.y_unit, ed.width_unit, ed.height_unit);
-        let Some(t) = self.text_widget_mut(index) else {
+        let Some(t) = self.style_mut(index) else {
             return;
         };
         let result: Result<(), String> = match f {
             WField::Text => {
-                t.text = text;
+                if let Some(s) = t.text {
+                    *s = text;
+                }
                 Ok(())
             }
+            WField::Gap => model::parse_gap(&text)
+                .map(|v| {
+                    if let Some(g) = t.gap {
+                        *g = Lenient::Valid(v);
+                    }
+                })
+                .map_err(Into::into),
             WField::Id => {
                 t.common.id = text;
                 Ok(())
@@ -352,17 +502,17 @@ impl SettingsWindow {
                 }
             }
             WField::FontFamily => model::validate_font_family(&text)
-                .map(|()| t.font_family = text.trim().to_string())
+                .map(|()| *t.font_family = text.trim().to_string())
                 .map_err(Into::into),
             WField::FontSize => model::parse_font_size(&text)
-                .map(|v| t.font_size = Lenient::Valid(v))
+                .map(|v| *t.font_size = Lenient::Valid(v))
                 .map_err(Into::into),
             WField::Color => {
-                if matches!(t.color, Lenient::Valid(None)) {
+                if matches!(*t.color, Lenient::Valid(None)) {
                     Ok(())
                 } else {
                     model::parse_color(&text)
-                        .map(|c| t.color = Lenient::Valid(Some(c)))
+                        .map(|c| *t.color = Lenient::Valid(Some(c)))
                         .map_err(Into::into)
                 }
             }
@@ -387,16 +537,11 @@ impl SettingsWindow {
     }
 
     /// A choice (segmented control or checkbox) changed a widget field directly.
-    fn widget_choice(
-        &mut self,
-        f: WField,
-        cx: &mut Context<Self>,
-        set: impl FnOnce(&mut TextWidget),
-    ) {
+    fn widget_choice(&mut self, f: WField, cx: &mut Context<Self>, set: impl FnOnce(StyleMut<'_>)) {
         let Some(index) = self.widget_editor.as_ref().map(|e| e.index) else {
             return;
         };
-        if let Some(t) = self.text_widget_mut(index) {
+        if let Some(t) = self.style_mut(index) {
             set(t);
         }
         if let Some(ed) = self.widget_editor.as_mut() {
@@ -428,7 +573,7 @@ impl SettingsWindow {
         } else {
             ed.height.clone()
         };
-        if let Some(t) = self.text_widget_mut(index) {
+        if let Some(t) = self.style_mut(index) {
             let dim = if f == WField::Width {
                 &mut t.common.width
             } else {
@@ -459,8 +604,8 @@ impl SettingsWindow {
             return;
         };
         let (index, input) = (ed.index, ed.color.clone());
-        if let Some(t) = self.text_widget_mut(index) {
-            t.color = if theme {
+        if let Some(t) = self.style_mut(index) {
+            *t.color = if theme {
                 Lenient::Valid(None)
             } else {
                 Lenient::Valid(Some(Color {
@@ -488,7 +633,7 @@ impl SettingsWindow {
         let items = &mut self.doc.config.widgets.items;
         let widget = TextWidget {
             common: CommonItem {
-                id: model::next_widget_id(items),
+                id: model::next_widget_id(items, "text"),
                 // Off until the user turns it on: a placeholder "Hello" should not pop up on
                 // the taskbar the moment the item is created.
                 enabled: false,
@@ -501,6 +646,28 @@ impl SettingsWindow {
         let index = items.len() - 1;
         self.changed(cx);
         self.open_widget(index, window, cx);
+    }
+
+    /// Bar editor: shows or removes the to-do module.
+    fn set_bar_todo(&mut self, on: bool, cx: &mut Context<Self>) {
+        let Some(index) = self.widget_editor.as_ref().map(|e| e.index) else {
+            return;
+        };
+        let Some(WidgetItem::Bar(b)) = self.widget_item_mut(index) else {
+            return;
+        };
+        let has = b.todo_module().is_some();
+        if on && !has {
+            b.modules.push(BarModuleEntry::Known(
+                BarModule::Todo(TodoModule::default()),
+            ));
+        } else if !on && has {
+            b.modules
+                .retain(|m| !matches!(m, BarModuleEntry::Known(BarModule::Todo(_))));
+        } else {
+            return;
+        }
+        self.changed(cx);
     }
 
     fn confirm_delete_widget(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -628,7 +795,7 @@ impl SettingsWindow {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.confirm_delete_widget(index, window, cx)
             }));
-        let t = match entry {
+        let item = match entry {
             WidgetEntry::Unknown(v) => {
                 return section(cx)
                     .child(
@@ -648,13 +815,26 @@ impl SettingsWindow {
                     )
                     .into_any_element();
             }
-            WidgetEntry::Known(WidgetItem::Text(t)) => t,
+            WidgetEntry::Known(item) => item,
         };
-        let first_line = t.text.lines().next().unwrap_or("").to_string();
-        let title = if first_line.trim().is_empty() {
-            "(empty)".to_string()
-        } else {
-            first_line
+        let t = snapshot(&item);
+        let title = match &t.kind {
+            SnapKind::Text { text, .. } => {
+                let first_line = text.lines().next().unwrap_or("").to_string();
+                if first_line.trim().is_empty() {
+                    "(empty)".to_string()
+                } else {
+                    first_line
+                }
+            }
+            SnapKind::Bar { modules, .. } => {
+                let names: Vec<String> = modules.iter().map(module_label).collect();
+                if names.is_empty() {
+                    "Bar (no modules)".to_string()
+                } else {
+                    format!("Bar: {}", names.join(", "))
+                }
+            }
         };
         let duplicate = model::duplicate_widget_id(&self.doc.config.widgets.items, index);
         let toggle = Switch::new(("widget-enabled", index))
@@ -662,8 +842,8 @@ impl SettingsWindow {
             .checked(t.common.enabled)
             .disabled(ro)
             .on_click(cx.listener(move |this, on: &bool, _, cx| {
-                if let Some(t) = this.text_widget_mut(index) {
-                    t.common.enabled = *on;
+                if let Some(item) = this.widget_item_mut(index) {
+                    item.common_mut().enabled = *on;
                     this.changed(cx);
                 }
             }));
@@ -726,7 +906,7 @@ impl SettingsWindow {
 
     fn render_widget_editor(
         &mut self,
-        t: &TextWidget,
+        t: &Snapshot,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -735,8 +915,9 @@ impl SettingsWindow {
         };
         let ro = self.read_only();
         let duplicate = model::duplicate_widget_id(&self.doc.config.widgets.items, ed.index);
-        let (text, id, x, y, width, height, family, size, color) = (
+        let (text, gap, id, x, y, width, height, family, size, color) = (
             ed.text.clone(),
+            ed.gap.clone(),
             ed.id.clone(),
             ed.x.clone(),
             ed.y.clone(),
@@ -848,17 +1029,31 @@ impl SettingsWindow {
             ro,
             cx,
             |this, v, _, cx| {
-                this.widget_choice(WField::Weight, cx, |t| t.font_weight = Lenient::Valid(v))
+                this.widget_choice(WField::Weight, cx, |t| *t.font_weight = Lenient::Valid(v))
             },
         );
-        let align = controls::segmented(
-            "align",
-            &ALIGNS,
-            t.align.valid().copied(),
-            ro,
-            cx,
-            |this, v, _, cx| this.widget_choice(WField::Align, cx, |t| t.align = Lenient::Valid(v)),
-        );
+        let align = match &t.kind {
+            SnapKind::Text { align, .. } => Some(controls::segmented(
+                "align",
+                &ALIGNS,
+                align.valid().copied(),
+                ro,
+                cx,
+                |this, v, _, cx| {
+                    this.widget_choice(WField::Align, cx, |t| {
+                        if let Some(a) = t.align {
+                            *a = Lenient::Valid(v);
+                        }
+                    })
+                },
+            )),
+            SnapKind::Bar { .. } => None,
+        };
+        let modules = match &t.kind {
+            SnapKind::Bar { modules, .. } => Some(self.render_bar_modules(modules, cx)),
+            SnapKind::Text { .. } => None,
+        };
+        let empty_text = matches!(&t.kind, SnapKind::Text { text, .. } if text.trim().is_empty());
         let swatch = match t.color {
             Lenient::Valid(Some(c)) => Some(
                 div()
@@ -875,15 +1070,18 @@ impl SettingsWindow {
             .px_5()
             .py_4()
             .gap_4()
-            .child(field(
-                "Text",
-                Textarea::new(&text).disabled(ro),
-                errors.get(&WField::Text).map(String::as_str),
-                cx,
-            ))
-            .when(t.text.trim().is_empty(), |this| {
+            .when_some(text, |this, text| {
+                this.child(field(
+                    "Text",
+                    Textarea::new(&text).disabled(ro),
+                    errors.get(&WField::Text).map(String::as_str),
+                    cx,
+                ))
+            })
+            .when(empty_text, |this| {
                 this.child(hint_text("Empty text: the widget is not shown.", cx))
             })
+            .children(modules)
             .child(
                 h_flex()
                     .gap_4()
@@ -989,12 +1187,22 @@ impl SettingsWindow {
                 errors.get(&WField::Weight).map(String::as_str),
                 cx,
             ))
-            .child(field(
-                "Align (inside the widget box)",
-                align,
-                errors.get(&WField::Align).map(String::as_str),
-                cx,
-            ))
+            .when_some(align, |this, align| {
+                this.child(field(
+                    "Align (inside the widget box)",
+                    align,
+                    errors.get(&WField::Align).map(String::as_str),
+                    cx,
+                ))
+            })
+            .when_some(gap, |this, gap| {
+                this.child(field(
+                    "Space between modules (px)",
+                    NumberInput::new(&gap).small().w(px(130.)).disabled(ro),
+                    errors.get(&WField::Gap).map(String::as_str),
+                    cx,
+                ))
+            })
             .child(field(
                 "Color",
                 h_flex()
@@ -1027,5 +1235,46 @@ impl SettingsWindow {
                 ))
             })
             .into_any_element()
+    }
+
+    /// Bar editor: which modules the bar shows (only "To do" exists for now).
+    fn render_bar_modules(
+        &mut self,
+        modules: &[BarModuleEntry],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ro = self.read_only();
+        let has_todo = modules
+            .iter()
+            .any(|m| matches!(m, BarModuleEntry::Known(BarModule::Todo(_))));
+        let todo_off = !self.doc.config.todo.enabled;
+        let unknown: Vec<String> = modules
+            .iter()
+            .filter(|m| matches!(m, BarModuleEntry::Unknown(_)))
+            .map(module_label)
+            .collect();
+        field(
+            "Modules (left to right)",
+            v_flex()
+                .gap_2()
+                .child(
+                    Checkbox::new("bar-module-todo")
+                        .label("To do")
+                        .accessibility_label("Bar module To do")
+                        .checked(has_todo)
+                        .disabled(ro)
+                        .on_click(cx.listener(|this, on: &bool, _, cx| this.set_bar_todo(*on, cx))),
+                )
+                .when(has_todo && todo_off, |this| {
+                    this.child(warning_text(
+                        "To do is off: turn it on in the To do tab to show this module.",
+                        cx,
+                    ))
+                })
+                .children(unknown.into_iter().map(|u| hint_text(u, cx))),
+            None,
+            cx,
+        )
+        .into_any_element()
     }
 }

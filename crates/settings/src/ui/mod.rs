@@ -6,7 +6,8 @@ mod general;
 mod hyperkey;
 mod picker;
 mod shortcuts;
-mod style;
+pub(crate) mod style;
+mod todo;
 mod widgets;
 
 use std::collections::HashMap;
@@ -15,7 +16,7 @@ use std::time::Duration;
 
 use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::sidebar::{Sidebar, SidebarMenu, SidebarMenuItem};
-use gpui_kit::component::{ActiveTheme as _, IconName, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -41,10 +42,10 @@ pub enum CoreLink {
 }
 
 // Lucide icons beyond gpui-component's default set, embedded one by one.
-gpui_kit::assets::icon_assets!(ExtraIcons, [AppWindow, Keyboard]);
+gpui_kit::assets::icon_assets!(ExtraIcons, [AppWindow, Keyboard, ListTodo, Trash]);
 
 /// gpui-component's default icons plus [`ExtraIcons`].
-struct AppAssets;
+pub(crate) struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
@@ -96,10 +97,17 @@ pub(crate) enum Tab {
     Widgets,
     Hyperkey,
     Shortcuts,
+    Todo,
 }
 
 impl Tab {
-    const ALL: [Tab; 4] = [Tab::General, Tab::Widgets, Tab::Hyperkey, Tab::Shortcuts];
+    const ALL: [Tab; 5] = [
+        Tab::General,
+        Tab::Widgets,
+        Tab::Hyperkey,
+        Tab::Shortcuts,
+        Tab::Todo,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -107,15 +115,17 @@ impl Tab {
             Tab::Widgets => "Widgets",
             Tab::Hyperkey => "Hyperkey",
             Tab::Shortcuts => "Shortcuts",
+            Tab::Todo => "To do",
         }
     }
 
-    fn icon(self) -> IconName {
+    fn icon(self) -> Icon {
         match self {
-            Tab::General => IconName::Settings,
-            Tab::Widgets => IconName::PanelBottom,
-            Tab::Hyperkey => IconName::ArrowUp,
-            Tab::Shortcuts => IconName::SquareTerminal,
+            Tab::General => Icon::new(IconName::Settings),
+            Tab::Widgets => Icon::new(IconName::PanelBottom),
+            Tab::Hyperkey => Icon::new(IconName::ArrowUp),
+            Tab::Shortcuts => Icon::new(IconName::SquareTerminal),
+            Tab::Todo => Icon::new(gpui_kit::assets::IconName::ListTodo),
         }
     }
 }
@@ -168,6 +178,8 @@ pub struct SettingsWindow {
     pub(crate) startup: general::StartupView,
     /// Update check and install (General tab).
     pub(crate) updates: general::UpdatesView,
+    /// Label input of the To do tab (created on first render).
+    pub(crate) todo_label: Option<todo::LabelField>,
     _poll: Task<()>,
     _subs: Vec<Subscription>,
 }
@@ -274,6 +286,7 @@ impl SettingsWindow {
             recording: None,
             startup: general::StartupView::default(),
             updates: general::UpdatesView::default(),
+            todo_label: None,
             _poll: poll,
             _subs: subs,
         }
@@ -369,6 +382,7 @@ impl SettingsWindow {
         // Row indices may have changed.
         self.close_picker(cx);
         self.name_fields.clear();
+        self.todo_label = None;
     }
 
     fn select_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
@@ -597,6 +611,7 @@ impl Render for SettingsWindow {
             Tab::Widgets => self.render_widgets(window, cx).into_any_element(),
             Tab::Hyperkey => self.render_hyperkey(window, cx).into_any_element(),
             Tab::Shortcuts => self.render_shortcuts(window, cx).into_any_element(),
+            Tab::Todo => self.render_todo(window, cx).into_any_element(),
         };
         let banner = self.render_banner(cx);
         h_flex()

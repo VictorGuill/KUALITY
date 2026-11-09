@@ -1,33 +1,46 @@
 //! One layered child window per (taskbar, widget).
 //!
 //! The window procedure never touches the overlay state: it only posts messages to the host
-//! window (context menu, external destruction, DPI change), handled later by the thread.
+//! window (context menu, left click, hover, external destruction, DPI change), handled later by
+//! the thread.
 
 use std::cell::Cell;
 use std::io;
 
 use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use ::windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use ::windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetParent, HWND_TOP, IDC_ARROW, IsWindow,
     LoadCursorW, MA_NOACTIVATE, PostMessageW, RegisterClassExW, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, WM_CONTEXTMENU, WM_DESTROY,
-    WM_DPICHANGED_AFTERPARENT, WM_MOUSEACTIVATE, WNDCLASSEXW, WS_CHILD, WS_CLIPSIBLINGS,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOPARENTNOTIFY,
+    WM_DPICHANGED_AFTERPARENT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+    WNDCLASSEXW, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOPARENTNOTIFY,
 };
 use ::windows::core::{PCWSTR, w};
 
 use super::render::Surface;
-use super::thread::{WM_APP_MENU, WM_APP_REFRESH, host_hwnd};
+use super::thread::{WM_APP_CLICK, WM_APP_HOVER, WM_APP_MENU, WM_APP_REFRESH, host_hwnd};
 use crate::overlay::layout::RectPx;
+use crate::overlay::widgets::bar::Span;
 
 const CLASS_NAME: PCWSTR = w!("KualityWidget");
+/// `WM_MOUSELEAVE` (in `Win32::UI::Controls`, a feature the core does not otherwise need).
+const WM_MOUSELEAVE: u32 = 0x02A3;
 
 thread_local! {
     /// Set while we destroy our own windows, so `WM_DESTROY` can tell them from windows that
     /// died with their taskbar.
     static DESTROYING: Cell<bool> = const { Cell::new(false) };
+    /// The widget window whose `WM_MOUSELEAVE` is requested (0 = none).
+    static TRACKING: Cell<isize> = const { Cell::new(0) };
+    /// The to-do popup was open when the left button went down. The press itself takes the
+    /// focus from the popup, which then closes on its own: the click must not open it again.
+    static POPUP_OPEN_AT_PRESS: Cell<bool> = const { Cell::new(false) };
 }
+
+/// Set in the `lparam` of `WM_APP_CLICK` when the to-do popup was open at the press.
+pub(crate) const CLICK_POPUP_WAS_OPEN: isize = 1 << 32;
 
 pub fn register_class() -> io::Result<()> {
     // SAFETY: standard class registration with static strings.
@@ -53,6 +66,10 @@ pub fn register_class() -> io::Result<()> {
 pub struct WidgetWindow {
     pub hwnd: HWND,
     pub surface: Option<Surface>,
+    /// Clickable parts from the last render (DIPs from the left edge).
+    pub spans: Vec<Span>,
+    /// Monitor scale of the last render (physical px per DIP).
+    pub scale: f64,
 }
 
 impl WidgetWindow {
@@ -85,6 +102,8 @@ impl WidgetWindow {
         Ok(Self {
             hwnd,
             surface: None,
+            spans: Vec::new(),
+            scale: 1.0,
         })
     }
 
@@ -135,6 +154,12 @@ impl WidgetWindow {
         };
     }
 
+    /// Index of the clickable part at client x `x_px`, if any.
+    pub fn span_at(&self, x_px: i32) -> Option<usize> {
+        let x = (f64::from(x_px) / self.scale) as f32;
+        self.spans.iter().position(|s| s.contains(x))
+    }
+
     pub fn show(&self, visible: bool) {
         // SAFETY: our own window.
         let _ = unsafe { ShowWindow(self.hwnd, if visible { SW_SHOWNA } else { SW_HIDE }) };
@@ -171,6 +196,11 @@ fn test_fail_create() -> bool {
     false
 }
 
+/// Client x of a mouse message (signed low word of `lparam`).
+fn client_x(lparam: LPARAM) -> isize {
+    (lparam.0 & 0xFFFF) as u16 as i16 as isize
+}
+
 fn post_host(msg: u32, wparam: WPARAM, lparam: LPARAM) {
     if let Some(host) = host_hwnd() {
         // SAFETY: PostMessageW never blocks.
@@ -187,6 +217,49 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_LBUTTONDOWN => {
+            // A mutex lookup: never blocks.
+            POPUP_OPEN_AT_PRESS.set(kuality_settings::todo_popup_running());
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let open = if POPUP_OPEN_AT_PRESS.take() {
+                CLICK_POPUP_WAS_OPEN
+            } else {
+                0
+            };
+            // Client x in the low 32 bits (sign kept by the host's `as i32`).
+            let x = client_x(lparam) & 0xFFFF_FFFF;
+            post_host(WM_APP_CLICK, WPARAM(hwnd.0 as usize), LPARAM(x | open));
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            if TRACKING.get() != hwnd.0 as isize {
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                // SAFETY: `tme` is a valid local for our own window.
+                if unsafe { TrackMouseEvent(&mut tme) }.is_ok() {
+                    TRACKING.set(hwnd.0 as isize);
+                }
+            }
+            post_host(
+                WM_APP_HOVER,
+                WPARAM(hwnd.0 as usize),
+                LPARAM(client_x(lparam)),
+            );
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            if TRACKING.get() == hwnd.0 as isize {
+                TRACKING.set(0);
+            }
+            post_host(WM_APP_HOVER, WPARAM(hwnd.0 as usize), LPARAM(-1));
+            LRESULT(0)
+        }
         WM_DESTROY => {
             if !DESTROYING.get() {
                 // Its taskbar died (Explorer restart, monitor removed…).

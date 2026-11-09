@@ -7,7 +7,7 @@ use gpui_kit::component::{ActiveTheme as _, Theme};
 use gpui_kit::*;
 
 /// Corner radius of buttons, inputs and other small controls.
-const RADIUS: f32 = 8.;
+pub(crate) const RADIUS: f32 = 8.;
 /// Corner radius of the content panel, cards, dialogs and popovers.
 pub const RADIUS_LG: f32 = 12.;
 

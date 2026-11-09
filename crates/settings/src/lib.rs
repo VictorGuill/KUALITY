@@ -11,6 +11,7 @@ mod model;
 mod platform;
 mod recorder;
 pub mod startup;
+mod todo;
 mod ui;
 
 use std::process::ExitCode;
@@ -52,6 +53,69 @@ pub fn run(args: &[String]) -> ExitCode {
     };
     ui::run(data_dir.config_file(), core);
     ExitCode::SUCCESS
+}
+
+/// Runs the to-do popup until it closes (`kuality.exe --todo [--core-pid <n>] [--at <x>,<y>]`,
+/// `docs/specs/todo.md`). Never starts the core: the popup only edits `todos.json`.
+pub fn run_todo(args: &[String]) -> ExitCode {
+    init_logging();
+    let _instance = match platform::Instance::acquire_todo() {
+        Ok(Some(i)) => Some(i),
+        // One is open (or opening): the core toggles it, nothing to do here.
+        Ok(None) => return ExitCode::SUCCESS,
+        Err(e) => {
+            log::warn!("single-instance check failed: {e}");
+            None
+        }
+    };
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let data_dir = DataDir::resolve(&exe_dir, platform::roaming_app_data_dir());
+    let core = match core_pid_arg(args.iter().cloned()) {
+        Some(pid) => match platform::CoreProcess::open(pid) {
+            Some(core) => Some(core),
+            None => {
+                log::info!("Kuality (pid {pid}) is no longer running; not opening");
+                return ExitCode::SUCCESS;
+            }
+        },
+        None => platform::find_core(),
+    };
+    todo::run(
+        data_dir.todo_file(),
+        data_dir.config_file(),
+        todo::anchor_arg(args),
+        core,
+    );
+    ExitCode::SUCCESS
+}
+
+/// Starts the to-do popup without an anchor (Settings → To do → "Open to-do list"): bottom-left
+/// of the primary screen.
+pub(crate) fn open_todo_popup() {
+    let started = std::env::current_exe().and_then(|exe| {
+        let dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        std::process::Command::new(&exe)
+            .arg("--todo")
+            .current_dir(dir)
+            .spawn()
+    });
+    if let Err(e) = started {
+        log::error!("cannot start the to-do popup: {e}");
+    }
+}
+
+/// Whether the to-do popup runs (a mutex lookup: never blocks).
+pub fn todo_popup_running() -> bool {
+    platform::todo_popup_running()
+}
+
+/// Closes the to-do popup if it runs (called by the core when the taskbar module is clicked).
+/// Returns `false` when no popup runs, so the core opens one.
+pub fn close_todo_popup() -> bool {
+    platform::close_todo_popup()
 }
 
 /// Argument the core passes with its pid when it opens this window (after `--settings`).

@@ -16,6 +16,27 @@ pub struct SizeF {
     pub h: f32,
 }
 
+/// A rectangle in DIPs, relative to the widget box.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct RectF {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl RectF {
+    /// The box of `size` at (0, 0).
+    pub fn sized(size: SizeF) -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            w: size.w,
+            h: size.h,
+        }
+    }
+}
+
 /// A rectangle in physical pixels, relative to the taskbar's client area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RectPx {

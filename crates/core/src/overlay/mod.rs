@@ -17,8 +17,9 @@ use serde_json::Value;
 
 use crate::platform::{self, OverlayBackend};
 use layout::Placement;
-use widgets::Content;
+use widgets::bar::BarContent;
 use widgets::text::{TextContent, or_default};
+use widgets::{Content, LiveData};
 
 /// How long quit waits for the overlay thread to finish.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
@@ -47,13 +48,21 @@ pub enum OverlayCommand {
     /// New `widgets` section (sent on startup and whenever the section changes). Also brings
     /// back the widgets hidden from the context menu.
     Apply(Arc<OverlayConfig>),
+    /// New live data (e.g. the number of pending to-do items): re-renders, keeps the windows
+    /// hidden from the context menu hidden.
+    Data(LiveData),
     /// Destroy all widget windows, unhook and end the thread.
     Shutdown,
 }
 
-/// Turns the `widgets` section into an [`OverlayConfig`]. Problems are reported through `note`
-/// (unknown types at `Info`, invalid values at `Warn`).
-pub fn resolve(w: &Widgets, note: &mut dyn FnMut(log::Level, String)) -> OverlayConfig {
+/// Turns the `widgets` section into an [`OverlayConfig`]. `todo_enabled` is `todo.enabled`
+/// (bar to-do modules only show while it is on). Problems are reported through `note` (unknown
+/// types at `Info`, invalid values at `Warn`).
+pub fn resolve(
+    w: &Widgets,
+    todo_enabled: bool,
+    note: &mut dyn FnMut(log::Level, String),
+) -> OverlayConfig {
     let mut config = OverlayConfig {
         enabled: w.enabled,
         hide_on_fullscreen: w.hide_on_fullscreen,
@@ -98,6 +107,15 @@ pub fn resolve(w: &Widgets, note: &mut dyn FnMut(log::Level, String)) -> Overlay
         };
         let content = match item {
             WidgetItem::Text(t) => TextContent::resolve(t, &mut warn).map(Content::Text),
+            WidgetItem::Bar(b) => BarContent::resolve(b, todo_enabled, |is_warn, what| {
+                let level = if is_warn {
+                    log::Level::Warn
+                } else {
+                    log::Level::Info
+                };
+                note(level, format!("widget '{key}': {what}"));
+            })
+            .map(Content::Bar),
         };
         let Some(content) = content else {
             note(
@@ -123,9 +141,9 @@ fn field<T: Copy>(v: Option<&T>, default: T, name: &str, warn: &mut dyn FnMut(&s
 
 fn note_unknown(index: usize, v: &Value, note: &mut dyn FnMut(log::Level, String)) {
     match v.get("type").and_then(Value::as_str) {
-        Some("text") => note(
+        Some(t @ ("text" | "bar")) => note(
             log::Level::Warn,
-            format!("widget #{index}: invalid text widget (wrong field type?), ignored"),
+            format!("widget #{index}: invalid {t} widget (wrong field type?), ignored"),
         ),
         Some(t) => {
             let t: String = t.chars().take(40).collect();
@@ -156,13 +174,22 @@ impl OverlayController {
     }
 
     /// Resolves `widgets` (logging problems) and sends it to the overlay thread.
-    pub fn apply(&self, widgets: &Widgets) {
-        let config = resolve(widgets, &mut |level, msg| log::log!(level, "{msg}"));
+    pub fn apply(&self, widgets: &Widgets, todo_enabled: bool) {
+        let config = resolve(widgets, todo_enabled, &mut |level, msg| {
+            log::log!(level, "{msg}")
+        });
         if config.enabled {
             log::info!("widgets enabled: {} to show", config.items.len());
         }
         if let Some(b) = &self.backend {
             b.send(OverlayCommand::Apply(Arc::new(config)));
+        }
+    }
+
+    /// Sends new live data (re-renders the widgets that show it).
+    pub fn set_data(&self, data: LiveData) {
+        if let Some(b) = &self.backend {
+            b.send(OverlayCommand::Data(data));
         }
     }
 
@@ -191,7 +218,7 @@ mod tests {
     fn run(widgets: serde_json::Value) -> (OverlayConfig, Vec<(log::Level, String)>) {
         let w: Widgets = serde_json::from_value(widgets).unwrap();
         let mut notes = Vec::new();
-        let c = resolve(&w, &mut |l, m| notes.push((l, m)));
+        let c = resolve(&w, true, &mut |l, m| notes.push((l, m)));
         (c, notes)
     }
 
@@ -267,6 +294,32 @@ mod tests {
         assert_eq!(
             levels,
             [log::Level::Warn, log::Level::Warn, log::Level::Info]
+        );
+    }
+
+    #[test]
+    fn bar_resolves_and_hides_without_todo() {
+        let section = json!({ "enabled": true, "items": [
+            { "type": "bar", "id": "bar-1", "modules": [{ "type": "todo" }] }
+        ] });
+        let (c, notes) = run(section.clone());
+        assert_eq!(keys(&c), ["bar-1"]);
+        assert!(matches!(c.items[0].content, Content::Bar(_)));
+        assert!(notes.is_empty(), "{notes:?}");
+        let w: Widgets = serde_json::from_value(section).unwrap();
+        let mut notes = Vec::new();
+        let off = resolve(&w, false, &mut |l, m| notes.push((l, m)));
+        assert!(
+            off.items.is_empty(),
+            "to-do off: the bar has nothing to show"
+        );
+        let (_, notes) = run(json!({ "enabled": true, "items": [
+            { "type": "bar", "modules": [{ "type": "clock" }] }
+        ] }));
+        assert!(
+            notes
+                .iter()
+                .any(|(l, m)| *l == log::Level::Info && m.contains("'clock'"))
         );
     }
 }

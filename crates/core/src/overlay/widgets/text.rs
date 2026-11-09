@@ -5,7 +5,7 @@ use kuality_protocol::{
 };
 
 use super::{Renderer, TextStyle, Theme};
-use crate::overlay::layout::SizeF;
+use crate::overlay::layout::{RectF, SizeF};
 
 /// Longer texts are truncated (in chars).
 pub const MAX_TEXT_CHARS: usize = 1000;
@@ -71,7 +71,7 @@ impl TextContent {
 
     pub fn draw(&self, r: &mut dyn Renderer, size: SizeF, theme: Theme) {
         let color = self.color.unwrap_or_else(|| theme.text_color());
-        r.draw_text(&self.text, &self.style, color, size);
+        r.draw_text(&self.text, &self.style, color, RectF::sized(size));
     }
 }
 
@@ -175,9 +175,10 @@ mod tests {
             fn measure_text(&mut self, _: &str, _: &TextStyle) -> SizeF {
                 SizeF::default()
             }
-            fn draw_text(&mut self, _: &str, _: &TextStyle, color: Color, _: SizeF) {
+            fn draw_text(&mut self, _: &str, _: &TextStyle, color: Color, _: RectF) {
                 self.0.push(color);
             }
+            fn fill_rounded_rect(&mut self, _: RectF, _: f32, _: Color) {}
         }
         let mut spy = Spy(Vec::new());
         let w = TextWidget {

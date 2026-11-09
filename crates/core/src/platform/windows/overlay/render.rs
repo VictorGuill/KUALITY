@@ -11,7 +11,8 @@ use ::windows::Win32::Graphics::Direct2D::Common::{
 use ::windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE,
-    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory,
+    D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1DCRenderTarget,
+    ID2D1Factory,
 };
 use ::windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -31,7 +32,7 @@ use ::windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
 use ::windows::core::{BOOL, HSTRING};
 use kuality_protocol::{Color, FontWeight, TextAlign};
 
-use crate::overlay::layout::{SizeF, SizePx};
+use crate::overlay::layout::{RectF, SizeF, SizePx};
 use crate::overlay::widgets::{Renderer, TextStyle};
 
 /// Used when the configured family is not installed.
@@ -330,21 +331,11 @@ impl Renderer for D2d {
         })
     }
 
-    fn draw_text(&mut self, text: &str, style: &TextStyle, color: Color, size: SizeF) {
+    fn draw_text(&mut self, text: &str, style: &TextStyle, color: Color, rect: RectF) {
         let drawn = (|| -> ::windows::core::Result<()> {
             let format = self.text_format(style)?;
-            let c = D2D1_COLOR_F {
-                r: f32::from(color.r) / 255.0,
-                g: f32::from(color.g) / 255.0,
-                b: f32::from(color.b) / 255.0,
-                a: f32::from(color.a) / 255.0,
-            };
-            let rect = D2D_RECT_F {
-                left: 0.0,
-                top: 0.0,
-                right: size.w,
-                bottom: size.h,
-            };
+            let c = d2d_color(color);
+            let rect = d2d_rect(rect);
             // SAFETY: plain Direct2D/DirectWrite calls between BeginDraw and EndDraw.
             unsafe {
                 let sign = self.dwrite.CreateEllipsisTrimmingSign(&format)?;
@@ -369,5 +360,40 @@ impl Renderer for D2d {
         if let Err(e) = drawn {
             log::warn!("cannot draw text: {e}");
         }
+    }
+
+    fn fill_rounded_rect(&mut self, rect: RectF, radius: f32, color: Color) {
+        let shape = D2D1_ROUNDED_RECT {
+            rect: d2d_rect(rect),
+            radiusX: radius,
+            radiusY: radius,
+        };
+        // SAFETY: plain Direct2D calls between BeginDraw and EndDraw.
+        let filled = unsafe {
+            self.target
+                .CreateSolidColorBrush(&d2d_color(color), None)
+                .map(|brush| self.target.FillRoundedRectangle(&shape, &brush))
+        };
+        if let Err(e) = filled {
+            log::warn!("cannot fill a rectangle: {e}");
+        }
+    }
+}
+
+fn d2d_color(c: Color) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: f32::from(c.r) / 255.0,
+        g: f32::from(c.g) / 255.0,
+        b: f32::from(c.b) / 255.0,
+        a: f32::from(c.a) / 255.0,
+    }
+}
+
+fn d2d_rect(r: RectF) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: r.x,
+        top: r.y,
+        right: r.x + r.w,
+        bottom: r.y + r.h,
     }
 }

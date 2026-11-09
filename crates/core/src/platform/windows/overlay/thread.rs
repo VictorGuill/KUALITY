@@ -47,9 +47,10 @@ use super::fullscreen;
 use super::render::D2d;
 use super::taskbars;
 use super::theme;
-use super::widget_window::{self, WidgetWindow};
+use super::widget_window::{self, CLICK_POPUP_WAS_OPEN, WidgetWindow};
 use crate::overlay::layout::{SizeF, SizePx, layout};
-use crate::overlay::widgets::Theme;
+use crate::overlay::widgets::bar::ModuleKind;
+use crate::overlay::widgets::{Content, DrawContext, LiveData, Theme};
 use crate::overlay::{OverlayCommand, OverlayConfig};
 use crate::platform::OverlayBackend;
 
@@ -60,6 +61,12 @@ const WM_APP_COMMAND: u32 = WM_APP + 1;
 pub(crate) const WM_APP_REFRESH: u32 = WM_APP + 2;
 /// A widget window was right-clicked: `wparam` = its HWND, `lparam` = screen position.
 pub(crate) const WM_APP_MENU: u32 = WM_APP + 3;
+/// A widget window was left-clicked: `wparam` = its HWND, `lparam` = client x (low 32 bits) |
+/// `CLICK_POPUP_WAS_OPEN`.
+pub(crate) const WM_APP_CLICK: u32 = WM_APP + 4;
+/// The mouse moved over a widget window: `wparam` = its HWND, `lparam` = client x, or -1 when
+/// it left the window.
+pub(crate) const WM_APP_HOVER: u32 = WM_APP + 5;
 
 const MENU_SETTINGS: usize = 1;
 const MENU_HIDE: usize = 2;
@@ -253,6 +260,10 @@ struct State {
     config: Arc<OverlayConfig>,
     /// Items hidden from the context menu until the next `Apply` or restart.
     session_hidden: HashSet<String>,
+    /// Latest [`OverlayCommand::Data`].
+    live: LiveData,
+    /// Widget window and module index under the mouse.
+    hover: Option<(HWND, usize)>,
     taskbars: Vec<TaskbarHost>,
     /// Created on the first enable, then kept.
     d2d: Option<D2d>,
@@ -308,6 +319,8 @@ fn thread_main(rx: Receiver<OverlayCommand>, ready: mpsc::SyncSender<io::Result<
         rx,
         config: Arc::default(),
         session_hidden: HashSet::new(),
+        live: LiveData::default(),
+        hover: None,
         taskbars: Vec::new(),
         d2d: None,
         theme: Theme::default(),
@@ -423,6 +436,13 @@ impl State {
                 self.apply(config);
                 false
             }
+            OverlayCommand::Data(live) => {
+                if live != self.live {
+                    self.live = live;
+                    self.rerender();
+                }
+                false
+            }
             OverlayCommand::Shutdown => {
                 self.teardown();
                 if self.session_registered {
@@ -449,6 +469,71 @@ impl State {
         }
         self.retries = 0;
         self.refresh();
+    }
+
+    /// Lays out and renders again without re-enumerating taskbars (content or hover changed).
+    fn rerender(&mut self) {
+        if self.config.enabled && !self.taskbars.is_empty() {
+            let create_error = self.layout_all();
+            self.after_create(create_error);
+        }
+    }
+
+    /// The mouse is at client x `x` of `widget` (`None`: it left). Re-renders when the hovered
+    /// module changes.
+    fn on_hover(&mut self, widget: HWND, x: Option<i32>) {
+        let module = x.and_then(|x| {
+            self.window(widget)
+                .and_then(|w| w.span_at(x))
+                .map(|i| (widget, i))
+        });
+        let hover = match (module, self.hover) {
+            // Leaving another window (messages can arrive out of order) changes nothing.
+            (None, Some((h, _))) if h != widget => self.hover,
+            _ => module,
+        };
+        if hover != self.hover {
+            self.hover = hover;
+            self.rerender();
+        }
+    }
+
+    /// A widget window was clicked at client x `x`: runs the clicked module's action.
+    /// `popup_was_open`: the to-do popup was open when the button went down.
+    fn on_click(&self, widget: HWND, x: i32, popup_was_open: bool) {
+        let Some((win, taskbar)) = self.taskbars.iter().find_map(|t| {
+            t.windows
+                .iter()
+                .find(|(_, w)| w.hwnd == widget)
+                .map(|(_, w)| (w, t.hwnd))
+        }) else {
+            return;
+        };
+        let Some(span) = win.span_at(x).map(|i| win.spans[i]) else {
+            return;
+        };
+        match span.kind {
+            ModuleKind::Todo => {
+                // Anchor for the popup: the module's left edge, at the taskbar's top edge.
+                let (mut w, mut t) = (RECT::default(), RECT::default());
+                // SAFETY: plain queries into locals (our window, Explorer's taskbar; no messages).
+                let ok = unsafe {
+                    GetWindowRect(widget, &mut w).is_ok() && GetWindowRect(taskbar, &mut t).is_ok()
+                };
+                if ok {
+                    let left = w.left + (f64::from(span.x) * win.scale).round() as i32;
+                    super::super::tray::request_toggle_todo(left, t.top, popup_was_open);
+                }
+            }
+        }
+    }
+
+    fn window(&self, hwnd: HWND) -> Option<&WidgetWindow> {
+        self.taskbars
+            .iter()
+            .flat_map(|t| &t.windows)
+            .find(|(_, w)| w.hwnd == hwnd)
+            .map(|(_, w)| w)
     }
 
     /// Destroys every widget window, removes the hooks and stops the timers.
@@ -621,18 +706,27 @@ impl State {
         let mut create_error = None;
         let d2d = self.d2d.as_mut()?;
         let fallback = self.theme;
-        // Natural sizes in DIPs do not depend on the monitor: measure once.
+        let live = self.live;
+        let hover = self.hover;
+        // Natural sizes and clickable parts in DIPs do not depend on the monitor: measure once.
         let items: Vec<_> = self
             .config
             .items
             .iter()
             .filter(|i| !self.session_hidden.contains(&i.key))
-            .map(|i| (i, i.content.measure(d2d)))
+            .map(|i| {
+                let spans = match &i.content {
+                    Content::Bar(_) => i.content.spans(d2d, &live),
+                    Content::Text(_) => Vec::new(),
+                };
+                (i, i.content.measure(d2d, &live), spans)
+            })
             .collect();
         for tb in &mut self.taskbars {
             let theme = tb.sampled_theme.unwrap_or(fallback);
             let mut old = std::mem::take(&mut tb.windows);
-            for &(item, content) in &items {
+            for (item, content, spans) in &items {
+                let (item, content) = (*item, *content);
                 let existing = old
                     .iter()
                     .position(|(k, _)| *k == item.key)
@@ -655,9 +749,16 @@ impl State {
                     w: (f64::from(rect.w) / tb.scale) as f32,
                     h: (f64::from(rect.h) / tb.scale) as f32,
                 };
+                let cx = DrawContext {
+                    theme,
+                    live,
+                    hover: hover.filter(|(h, _)| *h == win.hwnd).map(|(_, i)| i),
+                };
                 let rendered = d2d.render(&mut win.surface, rect.size(), tb.scale, |r| {
-                    item.content.draw(r, box_dip, theme)
+                    item.content.draw(r, box_dip, &cx)
                 });
+                win.spans.clone_from(spans);
+                win.scale = tb.scale;
                 let presented = rendered.and_then(|()| match &win.surface {
                     Some(s) => s.present(win.hwnd),
                     None => Ok(()),
@@ -961,6 +1062,16 @@ unsafe extern "system" fn host_wndproc(
         }
         WM_APP_MENU => {
             on_widget_menu(hwnd, HWND(wparam.0 as *mut _), lparam);
+            LRESULT(0)
+        }
+        WM_APP_CLICK => {
+            let open = lparam.0 & CLICK_POPUP_WAS_OPEN != 0;
+            with_state(|s| s.on_click(HWND(wparam.0 as *mut _), lparam.0 as i32, open));
+            LRESULT(0)
+        }
+        WM_APP_HOVER => {
+            let x = (lparam.0 >= 0).then_some(lparam.0 as i32);
+            with_state(|s| s.on_hover(HWND(wparam.0 as *mut _), x));
             LRESULT(0)
         }
         WM_TIMER => {

@@ -12,6 +12,10 @@ use kuality_protocol::{
     LaunchArgs, Length, Mods, OpenUrlAction, SendHotkeyAction, Trigger, TriggerError, WidgetEntry,
     parse_chord, parse_trigger, quote, valid_url,
 };
+use kuality_protocol::{
+    Anchor, BarModule, BarModuleEntry, BarWidget, CommonItem, Lenient, TodoModule, WidgetItem,
+    Widgets,
+};
 
 /// What the file on disk looks like.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,6 +300,71 @@ pub fn parse_font_size(text: &str) -> Result<f64, &'static str> {
     }
 }
 
+/// Bar `gap` bounds (same clamp as the core).
+pub const GAP_RANGE: (f64, f64) = (0.0, 200.0);
+
+pub fn parse_gap(text: &str) -> Result<f64, &'static str> {
+    let v = parse_number(text)?;
+    if (GAP_RANGE.0..=GAP_RANGE.1).contains(&v) {
+        Ok(v)
+    } else {
+        Err("Between 0 and 200")
+    }
+}
+
+/// Makes sure an enabled bar shows the to-do module (Settings → To do → Enable): enables the
+/// first bar that has one, else adds a new bar at the bottom-left of the taskbar. Returns
+/// whether `widgets` changed.
+pub fn ensure_todo_bar(widgets: &mut Widgets) -> bool {
+    let bars = || {
+        widgets.items.iter().filter_map(|e| match e {
+            WidgetEntry::Known(WidgetItem::Bar(b)) => Some(b),
+            _ => None,
+        })
+    };
+    if bars().any(|b| b.common.enabled && b.todo_module().is_some()) {
+        return false;
+    }
+    let first = widgets.items.iter_mut().find_map(|e| match e {
+        WidgetEntry::Known(WidgetItem::Bar(b)) if b.todo_module().is_some() => Some(b),
+        _ => None,
+    });
+    if let Some(bar) = first {
+        bar.common.enabled = true;
+        return true;
+    }
+    let bar = BarWidget {
+        common: CommonItem {
+            id: next_widget_id(&widgets.items, "bar"),
+            anchor: Lenient::Valid(Anchor::Left),
+            x: Lenient::Valid(Length::Px(12.0)),
+            ..CommonItem::default()
+        },
+        modules: vec![BarModuleEntry::Known(
+            BarModule::Todo(TodoModule::default()),
+        )],
+        ..BarWidget::default()
+    };
+    widgets.items.push(WidgetEntry::Known(WidgetItem::Bar(bar)));
+    true
+}
+
+/// The to-do module the To do tab edits: the first one of the first bar that has one.
+pub fn todo_module_mut(widgets: &mut Widgets) -> Option<&mut TodoModule> {
+    widgets.items.iter_mut().find_map(|e| match e {
+        WidgetEntry::Known(WidgetItem::Bar(b)) => b.todo_module_mut(),
+        _ => None,
+    })
+}
+
+/// Read-only [`todo_module_mut`], with whether its bar is enabled.
+pub fn todo_module(widgets: &Widgets) -> Option<(&TodoModule, bool)> {
+    widgets.items.iter().find_map(|e| match e {
+        WidgetEntry::Known(WidgetItem::Bar(b)) => b.todo_module().map(|t| (t, b.common.enabled)),
+        _ => None,
+    })
+}
+
 pub fn parse_color(text: &str) -> Result<Color, &'static str> {
     Color::parse(text.trim()).ok_or("Use #RRGGBB or #AARRGGBB")
 }
@@ -322,7 +391,8 @@ pub fn args_display(args: &LaunchArgs) -> String {
 }
 
 /// Smallest unused `text-<n>` id.
-pub fn next_widget_id(items: &[WidgetEntry]) -> String {
+/// First unused id `<prefix>-<n>` (`text-1`, `bar-1`…).
+pub fn next_widget_id(items: &[WidgetEntry], prefix: &str) -> String {
     let used: Vec<&str> = items
         .iter()
         .filter_map(|e| match e {
@@ -331,7 +401,7 @@ pub fn next_widget_id(items: &[WidgetEntry]) -> String {
         })
         .collect();
     (1..)
-        .map(|n| format!("text-{n}"))
+        .map(|n| format!("{prefix}-{n}"))
         .find(|id| !used.contains(&id.as_str()))
         .expect("an unused id exists")
 }
@@ -950,13 +1020,14 @@ mod tests {
 
     #[test]
     fn widget_ids() {
-        assert_eq!(next_widget_id(&[]), "text-1");
+        assert_eq!(next_widget_id(&[], "text"), "text-1");
+        assert_eq!(next_widget_id(&[], "bar"), "bar-1");
         let items = vec![
             text("text-1"),
             WidgetEntry::Unknown(json!({ "type": "media", "id": "text-2" })),
             text("text-4"),
         ];
-        assert_eq!(next_widget_id(&items), "text-3");
+        assert_eq!(next_widget_id(&items, "text"), "text-3");
         let items = vec![text("a"), text("b"), text("a"), text("")];
         assert!(duplicate_widget_id(&items, 0));
         assert!(duplicate_widget_id(&items, 2));
@@ -1264,5 +1335,38 @@ mod tests {
             panic!("send_hotkey expected");
         };
         assert_eq!((h.keys.as_str(), &h.extra), ("win+1", &extra));
+    }
+
+    #[test]
+    fn ensure_todo_bar_adds_or_enables_once() {
+        let mut w = Widgets::default();
+        assert!(ensure_todo_bar(&mut w));
+        let WidgetEntry::Known(WidgetItem::Bar(b)) = &w.items[0] else {
+            panic!("expected a bar");
+        };
+        assert_eq!(b.common.id, "bar-1");
+        assert!(b.common.enabled);
+        assert_eq!(b.common.x, Lenient::Valid(Length::Px(12.0)));
+        assert!(b.todo_module().is_some());
+        assert!(!ensure_todo_bar(&mut w), "already there");
+        assert_eq!(w.items.len(), 1);
+
+        // A disabled bar with the module is turned on instead of adding another.
+        if let WidgetEntry::Known(item) = &mut w.items[0] {
+            item.common_mut().enabled = false;
+        }
+        assert!(ensure_todo_bar(&mut w));
+        assert_eq!(w.items.len(), 1);
+        assert_eq!(todo_module(&w).map(|(_, on)| on), Some(true));
+        todo_module_mut(&mut w).unwrap().label = "Tasks".into();
+        assert_eq!(todo_module(&w).unwrap().0.label, "Tasks");
+    }
+
+    #[test]
+    fn gap_rule() {
+        assert_eq!(parse_gap("16"), Ok(16.0));
+        assert!(parse_gap("-1").is_err());
+        assert!(parse_gap("201").is_err());
+        assert!(parse_gap("x").is_err());
     }
 }

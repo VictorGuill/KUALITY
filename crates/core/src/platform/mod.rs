@@ -52,6 +52,10 @@ pub enum Event {
     Wake,
     /// Tray menu: Settings.
     OpenSettings,
+    /// Bar to-do module clicked: open the to-do popup above (`x`, `y`) screen pixels, or close
+    /// it if it is open. `was_open`: it was open when the mouse button went down (the press
+    /// itself may already have closed it, by taking its focus).
+    ToggleTodo { x: i32, y: i32, was_open: bool },
     /// Tray menu: Pause (toggles keyboard features).
     TogglePause,
     /// Tray menu: Check for updates.

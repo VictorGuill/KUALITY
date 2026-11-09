@@ -4,7 +4,8 @@
 //! Phase 0: config load/create/hot-reload, logging, single instance, tray menu
 //! (`docs/specs/skeleton.md`). Phase 1: Hyperkey (`docs/specs/hyperkey.md`). Phase 2: Shortcuts
 //! (`docs/specs/shortcuts.md`). Phase 3: taskbar overlay and text widget (`docs/specs/overlay.md`).
-//! Updates: `docs/specs/updates.md`.
+//! Updates: `docs/specs/updates.md`. To-do and the taskbar bar: `docs/specs/todo.md` (the
+//! popup is a third mode of this exe, `--todo`).
 
 // No console window in release builds (every mode); debug builds keep it for log output.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -17,6 +18,7 @@ mod logging;
 mod overlay;
 mod platform;
 mod shortcuts;
+mod todos;
 mod updates;
 
 use std::path::{Path, PathBuf};
@@ -39,6 +41,7 @@ const RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// First arguments that run something else than the core (`docs/specs/distribution.md`).
 const SETTINGS_ARG: &str = "--settings";
+const TODO_ARG: &str = "--todo";
 const STARTUP_ARG: &str = "--startup";
 const STARTUP_TASK_ARG: &str = "--startup-task";
 
@@ -47,6 +50,8 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         // Own process: the core never loads GPUI, and the window's memory is freed when it closes.
         Some(SETTINGS_ARG) => kuality_settings::run(&args[1..]),
+        // The to-do popup: same reason (GPUI), only alive while it is open.
+        Some(TODO_ARG) => kuality_settings::run_todo(&args[1..]),
         // Start at logon: `--startup <off|on|normal|elevated>` (installer, scripts) and the
         // elevated helper it starts through UAC.
         Some(STARTUP_ARG) => kuality_settings::startup::cli(&args[1..]),
@@ -149,21 +154,38 @@ fn run_core(args: &[String]) -> ExitCode {
     };
 
     // Hot-reload: the watcher thread parses the file and hands new configs to the main thread.
+    // It also re-reads `todos.json` (same folder) for the taskbar to-do count.
     let (tx, rx) = mpsc::channel();
+    let (todo_tx, todo_rx) = mpsc::channel();
     let waker = tray.waker();
     let mut reloader = Reloader::new(config_path.clone(), loaded.bytes);
+    let mut todo_watch = todos::TodoWatch::new(data_dir.todo_file());
+    if let Some(count) = todo_watch.check() {
+        let _ = todo_tx.send(count);
+    }
     // Never log on `Unchanged`: other writes in the data dir also wake the watcher.
-    let on_change = Box::new(move || match reloader.check() {
-        ReloadOutcome::Unchanged => {}
-        ReloadOutcome::Missing => log::warn!("config file was deleted; keeping the current config"),
-        ReloadOutcome::ReadFailed(e) => {
-            log::warn!("cannot read config: {e}; will retry on next change")
-        }
-        ReloadOutcome::Invalid(e) => log::warn!("invalid config: {e}; keeping the current config"),
-        ReloadOutcome::Changed(config) => {
-            if tx.send(config).is_ok() {
-                waker.wake();
+    let on_change = Box::new(move || {
+        match reloader.check() {
+            ReloadOutcome::Unchanged => {}
+            ReloadOutcome::Missing => {
+                log::warn!("config file was deleted; keeping the current config")
             }
+            ReloadOutcome::ReadFailed(e) => {
+                log::warn!("cannot read config: {e}; will retry on next change")
+            }
+            ReloadOutcome::Invalid(e) => {
+                log::warn!("invalid config: {e}; keeping the current config")
+            }
+            ReloadOutcome::Changed(config) => {
+                if tx.send(config).is_ok() {
+                    waker.wake();
+                }
+            }
+        }
+        if let Some(count) = todo_watch.check()
+            && todo_tx.send(count).is_ok()
+        {
+            waker.wake();
         }
     });
     let watcher = match platform::Watcher::start(&data_dir.path, RELOAD_DEBOUNCE, on_change) {
@@ -209,6 +231,7 @@ fn run_core(args: &[String]) -> ExitCode {
         loaded.config,
         config_path,
         rx,
+        todo_rx,
         watcher,
         keyboard,
         actions,

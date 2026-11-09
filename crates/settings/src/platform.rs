@@ -11,14 +11,19 @@ use std::time::{Duration, Instant};
 use futures_channel::oneshot;
 use kuality_protocol::Key;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use windows::Win32::Foundation::POINT;
 use windows::Win32::Foundation::{COLORREF, SIZE};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, WPARAM,
 };
-use windows::Win32::Graphics::Dwm::{DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DwmSetWindowAttribute};
+use windows::Win32::Graphics::Dwm::{
+    DWM_WINDOW_CORNER_PREFERENCE, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
-    DeleteObject, GetDIBits, GetObjectW, HBITMAP,
+    DeleteObject, GetDIBits, GetMonitorInfoW, GetObjectW, HBITMAP, MONITOR_DEFAULTTONEAREST,
+    MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
 };
 use windows::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -29,6 +34,7 @@ use windows::Win32::System::Threading::{
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     QueryFullProcessImageNameW, SYNCHRONIZATION_SYNCHRONIZE, WaitForSingleObject,
 };
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, FOLDERID_AppsFolder, FOLDERID_RoamingAppData, IEnumShellItems, IShellItem,
     IShellItemImageFactory, KF_FLAG_DEFAULT, SHGetKnownFolderItem, SHGetKnownFolderPath, SIGDN,
@@ -37,18 +43,23 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, EnumWindows, FindWindowW, GetForegroundWindow, GetMessageW,
     GetWindowTextW, GetWindowThreadProcessId, HC_ACTION, IsIconic, IsWindowVisible,
-    KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, PostQuitMessage, PostThreadMessageW, SW_RESTORE,
-    SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow, TranslateMessage,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
+    KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, PostMessageW, PostQuitMessage, PostThreadMessageW,
+    SW_RESTORE, SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow, TranslateMessage,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_CLOSE, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
 };
 use windows::core::{BOOL, Interface as _, PCWSTR, PWSTR, w};
 
 use crate::apps::{AppInfo, ICON_PX, RawIcon, straight_alpha};
 use crate::recorder::{Mode, Outcome, Recording};
+use crate::todo::ScreenRect;
 
 /// Window title, also used by a second instance to find the first one.
 pub const WINDOW_TITLE: &str = "Kuality Settings";
 const INSTANCE_MUTEX: &str = r"Local\Kuality.Settings";
+/// Title of the to-do popup window, used by the core to find and close it.
+pub const TODO_WINDOW_TITLE: &str = "Kuality To-do";
+/// Held by the to-do popup while it runs.
+const TODO_MUTEX: &str = r"Local\Kuality.Todo";
 const CORE_MUTEX: &str = r"Local\Kuality.Core";
 /// Class of the core's hidden main window (owns the tray icon).
 const CORE_WINDOW_CLASS: PCWSTR = w!("Kuality.Core");
@@ -85,7 +96,16 @@ pub struct Instance(HANDLE);
 impl Instance {
     /// `None` if another settings window is already running.
     pub fn acquire() -> io::Result<Option<Self>> {
-        let name = wide(INSTANCE_MUTEX);
+        Self::acquire_named(INSTANCE_MUTEX)
+    }
+
+    /// `None` if another to-do popup is already running.
+    pub fn acquire_todo() -> io::Result<Option<Self>> {
+        Self::acquire_named(TODO_MUTEX)
+    }
+
+    fn acquire_named(mutex: &str) -> io::Result<Option<Self>> {
+        let name = wide(mutex);
         // SAFETY: `name` is a NUL-terminated UTF-16 string alive for the call.
         let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
             .map_err(io::Error::other)?;
@@ -111,7 +131,7 @@ impl Drop for Instance {
 pub fn activate_existing() -> bool {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        if let Some(hwnd) = find_existing_window() {
+        if let Some(hwnd) = find_own_window(WINDOW_TITLE) {
             // SAFETY: plain calls on a window handle; a stale handle only makes them fail.
             unsafe {
                 if IsIconic(hwnd).as_bool() {
@@ -160,22 +180,29 @@ fn colorref(rgb: u32) -> u32 {
     ((rgb & 0xff) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 0xff)
 }
 
-fn find_existing_window() -> Option<HWND> {
-    let mut found: Option<HWND> = None;
-    // SAFETY: the callback only runs during EnumWindows and gets a pointer to `found`, which
+/// What [`enum_proc`] looks for and what it found.
+struct WindowSearch {
+    title: &'static str,
+    found: Option<HWND>,
+}
+
+/// A visible window titled `title` owned by another process of this exe.
+fn find_own_window(title: &'static str) -> Option<HWND> {
+    let mut search = WindowSearch { title, found: None };
+    // SAFETY: the callback only runs during EnumWindows and gets a pointer to `search`, which
     // outlives the call.
     let _ = unsafe {
         EnumWindows(
             Some(enum_proc),
-            LPARAM(&mut found as *mut Option<HWND> as isize),
+            LPARAM(&mut search as *mut WindowSearch as isize),
         )
     };
-    found
+    search.found
 }
 
 unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    // SAFETY: `lparam` is the `&mut Option<HWND>` passed by `find_existing_window`.
-    let found = unsafe { &mut *(lparam.0 as *mut Option<HWND>) };
+    // SAFETY: `lparam` is the `&mut WindowSearch` passed by `find_own_window`.
+    let search = unsafe { &mut *(lparam.0 as *mut WindowSearch) };
     // SAFETY: plain query on a window handle given by EnumWindows.
     if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
         return true.into();
@@ -183,7 +210,7 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let mut buf = [0u16; 64];
     // SAFETY: `buf` is a valid buffer for the call.
     let n = unsafe { GetWindowTextW(hwnd, &mut buf) };
-    if String::from_utf16_lossy(&buf[..n.max(0) as usize]) != WINDOW_TITLE {
+    if String::from_utf16_lossy(&buf[..n.max(0) as usize]) != search.title {
         return true.into();
     }
     let mut pid = 0u32;
@@ -193,8 +220,105 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     if pid == unsafe { GetCurrentProcessId() } || !process_is_settings(pid) {
         return true.into();
     }
-    *found = Some(hwnd);
+    search.found = Some(hwnd);
     false.into()
+}
+
+// ---------------------------------------------------------------------------------------------
+// To-do popup.
+
+/// Closes the running to-do popup (the core toggles it from the taskbar). Returns `false` when
+/// none runs. While a popup is still starting (its mutex exists, no window yet), nothing is
+/// done and `true` is returned, so a double click never opens two.
+pub fn close_todo_popup() -> bool {
+    if !todo_popup_running() {
+        return false;
+    }
+    if let Some(hwnd) = find_own_window(TODO_WINDOW_TITLE) {
+        // SAFETY: posting never blocks; a stale handle only makes it fail.
+        let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+    }
+    true
+}
+
+/// Whether a to-do popup runs in this session (its mutex exists).
+pub fn todo_popup_running() -> bool {
+    let name = wide(TODO_MUTEX);
+    // SAFETY: `name` is NUL-terminated and alive for the call; the handle is closed at once.
+    unsafe {
+        match OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, PCWSTR(name.as_ptr())) {
+            Ok(h) => {
+                let _ = CloseHandle(h);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+/// A monitor for the popup: GPUI display id (the `HMONITOR`), work area and scale.
+#[derive(Debug, Clone, Copy)]
+pub struct Monitor {
+    pub id: u64,
+    pub work: ScreenRect,
+    pub scale: f32,
+}
+
+/// The monitor at `anchor` (nearest), or the primary one.
+pub fn monitor_at(anchor: Option<(i32, i32)>) -> Option<Monitor> {
+    // SAFETY: plain monitor queries into locals.
+    unsafe {
+        let monitor = match anchor {
+            Some((x, y)) => MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST),
+            None => MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY),
+        };
+        if monitor.is_invalid() {
+            return None;
+        }
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+        let (mut dpi_x, mut dpi_y) = (96, 96);
+        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
+        let w = info.rcWork;
+        Some(Monitor {
+            id: monitor.0 as u64,
+            work: ScreenRect {
+                left: w.left,
+                top: w.top,
+                right: w.right,
+                bottom: w.bottom,
+            },
+            scale: dpi_x as f32 / 96.0,
+        })
+    }
+}
+
+/// Rounded corners (Windows 11) and the foreground for the popup window.
+pub fn popup_window_setup(window: &impl HasWindowHandle) {
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(h) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(h.hwnd.get() as *mut std::ffi::c_void);
+    let corners: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
+    // SAFETY: `hwnd` is this process's live window; the pointer and size describe `corners`.
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corners as *const _ as *const std::ffi::c_void,
+            size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        );
+        // The core allowed it (AllowSetForegroundWindow) before starting this process.
+        let _ = SetForegroundWindow(hwnd);
+    }
 }
 
 /// Whether `pid` runs this exe (the window title check already tells settings from the core).

@@ -3,7 +3,7 @@
 Work phase by phase. The **current phase** is the first one not marked ✅.
 Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase-N-name`).
 
-**MVP = Phases 0–3.** Phase 5 was done before Phase 4 (user request: a settings window first, no new features).
+**MVP = Phases 0–3.** Phase 5 was done before Phase 4 (user request: a settings window first, no new features). Phase 8 (to-do) was also done before Phase 4 (user request, 2026-11-09).
 
 ---
 
@@ -69,6 +69,7 @@ Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase
 - [ ] Current session: cover art, title, artist
 - [ ] Controls: previous / play-pause / next
 - [ ] Updates on session/track change; hides when nothing is playing (configurable)
+- [ ] Shown as a `media` module of the taskbar bar (Phase 8), next to the to-do module
 
 ## Phase 5 — Settings app ✅
 
@@ -111,7 +112,22 @@ Done before Phase 4 and scoped to the settings that already exist (Phases 0–3)
 - [ ] Catalog repo (`catalog.json` + sha256 zips)
 - [ ] First extension: fan speeds (C# + LibreHardwareMonitor)
 
+## Phase 8 — To-do & taskbar bar ✅
+
+Done before Phase 4 (user request, 2026-11-09); see `docs/specs/todo.md`.
+
+- [x] Spec `docs/specs/todo.md`
+- [x] `todos.json` (items: text, done, created / done_at) and the `todo` config section
+- [x] Bar widget (`type: "bar"`): modules side by side at one position; first module `todo` (`TO DO (n)`)
+- [x] Clickable widgets: hover highlight, left click → module action; live data (pending count) without a config change
+- [x] To-do popup `kuality.exe --todo` (GPUI): add, check off, delete; above the clicked module; closes on Esc / focus loss / second click
+- [x] Settings: To do tab; bars in the Widgets tab (position, font, modules)
+
+**Done when:** enabling To do shows `TO DO` at the bottom-left of the taskbar, a click opens the list, items can be added / checked / deleted, the count follows, and the list survives a restart.
+
 ## Future (unordered)
+
+- Hotkey / shortcut action to open the to-do list
 
 - First-run wizard presenting each feature
 - Real CapsLock via double-tap

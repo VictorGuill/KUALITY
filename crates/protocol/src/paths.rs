@@ -10,6 +10,8 @@ pub const PORTABLE_MARKER: &str = "portable";
 pub const APP_DIR_NAME: &str = "Kuality";
 /// Config file name inside the data dir.
 pub const CONFIG_FILE: &str = "config.json";
+/// To-do items file name inside the data dir.
+pub const TODO_FILE: &str = "todos.json";
 /// Logs folder name inside the data dir.
 pub const LOGS_DIR: &str = "logs";
 
@@ -60,6 +62,10 @@ impl DataDir {
         self.path.join(CONFIG_FILE)
     }
 
+    pub fn todo_file(&self) -> PathBuf {
+        self.path.join(TODO_FILE)
+    }
+
     pub fn logs_dir(&self) -> PathBuf {
         self.path.join(LOGS_DIR)
     }
@@ -79,6 +85,7 @@ mod tests {
         assert_eq!(d.path, roaming.join("Kuality"));
         assert_eq!(d.config_file(), roaming.join("Kuality").join("config.json"));
         assert_eq!(d.logs_dir(), roaming.join("Kuality").join("logs"));
+        assert_eq!(d.todo_file(), roaming.join("Kuality").join("todos.json"));
     }
 
     #[test]

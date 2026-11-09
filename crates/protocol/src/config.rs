@@ -24,6 +24,7 @@ pub struct Config {
     pub shortcuts: Shortcuts,
     pub widgets: Widgets,
     pub updates: Updates,
+    pub todo: Todo,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -37,6 +38,7 @@ impl Default for Config {
             shortcuts: Shortcuts::default(),
             widgets: Widgets::default(),
             updates: Updates::default(),
+            todo: Todo::default(),
             extra: Extra::new(),
         }
     }
@@ -86,6 +88,27 @@ impl Default for Updates {
             extra: Extra::new(),
         }
     }
+}
+
+/// `todo` section (see `docs/specs/todo.md`). The items themselves live in `todos.json`
+/// ([`crate::todo`]), not here.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Todo {
+    pub enabled: bool,
+    /// Where a new item goes in the list.
+    pub new_items: Lenient<NewItems>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// `"top" | "bottom"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewItems {
+    #[default]
+    Top,
+    Bottom,
 }
 
 /// Log verbosity, lowercase in JSON.
@@ -311,6 +334,8 @@ pub enum WidgetEntry {
 pub enum WidgetItem {
     /// Static text.
     Text(TextWidget),
+    /// A row of modules (to-do, later media…) sharing one position.
+    Bar(BarWidget),
 }
 
 impl WidgetItem {
@@ -318,6 +343,15 @@ impl WidgetItem {
     pub fn common(&self) -> &CommonItem {
         match self {
             Self::Text(t) => &t.common,
+            Self::Bar(b) => &b.common,
+        }
+    }
+
+    /// Mutable [`Self::common`].
+    pub fn common_mut(&mut self) -> &mut CommonItem {
+        match self {
+            Self::Text(t) => &mut t.common,
+            Self::Bar(b) => &mut b.common,
         }
     }
 
@@ -325,6 +359,7 @@ impl WidgetItem {
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Text(_) => "text",
+            Self::Bar(_) => "bar",
         }
     }
 }
@@ -399,6 +434,103 @@ impl Default for TextWidget {
     }
 }
 
+/// `type: "bar"`: modules laid out side by side, left to right, at one position.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BarWidget {
+    #[serde(flatten)]
+    pub common: CommonItem,
+    pub modules: Vec<BarModuleEntry>,
+    pub font_family: String,
+    /// In DIPs.
+    pub font_size: Lenient<f64>,
+    pub font_weight: Lenient<FontWeight>,
+    /// `None` = theme color.
+    pub color: Lenient<Option<Color>>,
+    /// Space between modules, in DIPs.
+    pub gap: Lenient<f64>,
+    /// Unknown fields; declared last so known fields are taken first.
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// Default `gap` of a bar, in DIPs.
+pub const DEFAULT_BAR_GAP: f64 = 16.0;
+
+impl Default for BarWidget {
+    fn default() -> Self {
+        Self {
+            common: CommonItem::default(),
+            modules: Vec::new(),
+            font_family: DEFAULT_FONT_FAMILY.into(),
+            font_size: Lenient::Valid(DEFAULT_FONT_SIZE),
+            font_weight: Lenient::Valid(FontWeight::Semibold),
+            color: Lenient::Valid(None),
+            gap: Lenient::Valid(DEFAULT_BAR_GAP),
+            extra: Extra::new(),
+        }
+    }
+}
+
+impl BarWidget {
+    /// The first to-do module, if any.
+    pub fn todo_module(&self) -> Option<&TodoModule> {
+        self.modules.iter().find_map(|m| match m {
+            BarModuleEntry::Known(BarModule::Todo(t)) => Some(t),
+            BarModuleEntry::Unknown(_) => None,
+        })
+    }
+
+    /// Mutable [`Self::todo_module`].
+    pub fn todo_module_mut(&mut self) -> Option<&mut TodoModule> {
+        self.modules.iter_mut().find_map(|m| match m {
+            BarModuleEntry::Known(BarModule::Todo(t)) => Some(t),
+            BarModuleEntry::Unknown(_) => None,
+        })
+    }
+}
+
+/// One entry of a bar's `modules`. Unknown module types (e.g. `media` before Phase 4) are kept
+/// as raw JSON so they survive a save, and ignored at runtime.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BarModuleEntry {
+    Known(BarModule),
+    Unknown(Value),
+}
+
+/// A bar module of a known type, tagged by `type`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BarModule {
+    /// `TO DO (3)`: opens the to-do list on click.
+    Todo(TodoModule),
+}
+
+/// `type: "todo"` bar module.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TodoModule {
+    pub label: String,
+    /// Append ` (n)` with the number of pending items (nothing when 0).
+    pub show_count: bool,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// Default to-do module label.
+pub const DEFAULT_TODO_LABEL: &str = "TO DO";
+
+impl Default for TodoModule {
+    fn default() -> Self {
+        Self {
+            label: DEFAULT_TODO_LABEL.into(),
+            show_count: true,
+            extra: Extra::new(),
+        }
+    }
+}
+
 /// A field value that may be invalid. Invalid values are kept verbatim (so a save does not lose
 /// them) and the reader falls back to the field default with a warning.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -406,6 +538,12 @@ impl Default for TextWidget {
 pub enum Lenient<T> {
     Valid(T),
     Invalid(Value),
+}
+
+impl<T: Default> Default for Lenient<T> {
+    fn default() -> Self {
+        Self::Valid(T::default())
+    }
 }
 
 impl<T> Lenient<T> {
@@ -661,6 +799,8 @@ mod tests {
         assert!(c.shortcuts.bindings.is_empty());
         assert!(!c.widgets.enabled);
         assert!(c.widgets.items.is_empty());
+        assert!(!c.todo.enabled);
+        assert_eq!(c.todo.new_items, Lenient::Valid(NewItems::Top));
     }
 
     #[test]
@@ -706,6 +846,7 @@ mod tests {
         expected["general"]["log_level"] = json!("info");
         expected["hyperkey"]["modifiers"] = json!("none");
         expected["updates"] = json!({ "check": true });
+        expected["todo"] = json!({ "enabled": false, "new_items": "top" });
         assert_eq!(back, expected);
     }
 
@@ -717,7 +858,8 @@ mod tests {
             "hyperkey": { "enabled": false, "modifiers": "none" },
             "shortcuts": { "enabled": false, "bindings": [] },
             "widgets": { "enabled": false, "hide_on_fullscreen": true, "items": [] },
-            "updates": { "check": true }
+            "updates": { "check": true },
+            "todo": { "enabled": false, "new_items": "top" }
         });
         assert_eq!(serde_json::to_value(Config::default()).unwrap(), expected);
     }
@@ -1165,5 +1307,49 @@ mod tests {
             }))
         );
         assert_eq!(color(json!("red")), Lenient::Invalid(json!("red")));
+    }
+
+    #[test]
+    fn bar_with_todo_and_unknown_module_round_trips() {
+        let input = json!({ "id": "bar-1", "type": "bar", "anchor": "left", "x": "12px",
+            "modules": [
+                { "type": "todo", "label": "Tasks", "show_count": false, "note": 1 },
+                { "type": "media", "width": "200px" }
+            ] });
+        let e: WidgetEntry = serde_json::from_value(input.clone()).unwrap();
+        let WidgetEntry::Known(WidgetItem::Bar(b)) = &e else {
+            panic!("expected a bar, got {e:?}");
+        };
+        assert_eq!(b.common.id, "bar-1");
+        assert_eq!(b.common.x, Lenient::Valid(Length::Px(12.0)));
+        assert_eq!(b.gap, Lenient::Valid(DEFAULT_BAR_GAP));
+        assert_eq!(b.font_weight, Lenient::Valid(FontWeight::Semibold));
+        let t = b.todo_module().unwrap();
+        assert_eq!(t.label, "Tasks");
+        assert!(!t.show_count);
+        assert_eq!(t.extra["note"], json!(1));
+        assert!(matches!(&b.modules[1], BarModuleEntry::Unknown(v) if *v == input["modules"][1]));
+        let back = serde_json::to_value(&e).unwrap();
+        assert_eq!(back["type"], json!("bar"));
+        assert_eq!(back["modules"], input["modules"]);
+    }
+
+    #[test]
+    fn todo_module_and_section_defaults() {
+        let e: WidgetEntry =
+            serde_json::from_value(json!({ "type": "bar", "modules": [{ "type": "todo" }] }))
+                .unwrap();
+        let WidgetEntry::Known(WidgetItem::Bar(b)) = &e else {
+            panic!("expected a bar");
+        };
+        assert_eq!(b.todo_module(), Some(&TodoModule::default()));
+        assert_eq!(b.todo_module().unwrap().label, "TO DO");
+        assert!(b.todo_module().unwrap().show_count);
+        let c = Config::from_json(br#"{ "todo": { "enabled": true, "new_items": "sideways" } }"#)
+            .unwrap();
+        assert!(c.todo.enabled);
+        assert_eq!(c.todo.new_items, Lenient::Invalid(json!("sideways")));
+        let c = Config::from_json(br#"{ "todo": { "new_items": "bottom" } }"#).unwrap();
+        assert_eq!(c.todo.new_items, Lenient::Valid(NewItems::Bottom));
     }
 }
