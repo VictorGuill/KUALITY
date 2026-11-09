@@ -42,3 +42,21 @@ jobs:
 
       - name: Test
         run: cargo test
+
+  # Keeps a release-profile cache of the dependencies for the release workflow (a tag run can
+  # restore caches saved on main, not the other way round). Runs in parallel with `check`.
+  release-cache:
+    name: release build cache (Windows x64)
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-x64
+
+      - name: Release build
+        run: cargo build --release

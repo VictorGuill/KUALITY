@@ -3,9 +3,10 @@
 # A tag with a pre-release suffix (`v1.0.0-beta.1`) is published as a pre-release.
 # Release notes come from the matching `## [<version>]` section of CHANGELOG.md.
 #
-# No fmt/clippy/test here: tags are pushed on commits of `main`, which CI already checked. No Rust
-# cache either: a cache saved by a tag run is only visible to that tag, and CI's debug cache does not
-# help a release build.
+# No fmt/clippy/test here: tags are pushed on commits of `main`, which CI already checked. The
+# release-profile dependency cache comes from CI's `release-cache` job on main (restore only: a
+# cache saved by a tag run would only be visible to that tag). Keep `env` equal to ci.yml's: it is
+# part of the cache key.
 name: Release
 
 on:
@@ -21,6 +22,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: "0"
 
 jobs:
   release:
@@ -30,6 +32,11 @@ jobs:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-x64
+          save-if: false
 
       - name: Check tag against Cargo.toml
         shell: pwsh
