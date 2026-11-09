@@ -60,6 +60,7 @@ Every tag `v<version>` is a release, built and published by GitHub Actions
    git push origin main v<version>
    ```
 
-The workflow checks that the tag matches `Cargo.toml`, runs clippy and the tests, builds the installer
-and the portable zip, and publishes them with `SHA256SUMS.txt`. A version with a suffix
+Tag only a commit of `main` whose CI run is green: the release workflow does not run clippy or the
+tests again. It checks that the tag matches `Cargo.toml`, builds the installer and the portable zip,
+and publishes them with `SHA256SUMS.txt`. A version with a suffix
 (`1.1.0-beta.2`) is published as a **pre-release**.

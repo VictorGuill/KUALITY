@@ -18,6 +18,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # No debug info in CI: faster builds and a much smaller cache to save and restore.
+  CARGO_PROFILE_DEV_DEBUG: "0"
 
 jobs:
   check:
