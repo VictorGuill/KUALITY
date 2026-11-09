@@ -1,0 +1,98 @@
+# Pushing a tag `v<version>` builds Kuality and publishes a GitHub Release with the installer, the
+# portable zip and SHA256SUMS.txt. The tag must match the workspace version in Cargo.toml.
+# A tag with a pre-release suffix (`v1.0.0-beta.1`) is published as a pre-release.
+# Release notes come from the matching `## [<version>]` section of CHANGELOG.md.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build and publish (Windows x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check tag against Cargo.toml
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($meta.packages | Where-Object name -eq 'kuality').version
+          if ($tag -ne "v$version") { throw "Tag $tag does not match the Cargo.toml version $version" }
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ISCC.exe -ErrorAction SilentlyContinue) -and
+              -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Inno Setup install failed" }
+          }
+
+      - name: Package
+        shell: pwsh
+        run: .\scripts\package.ps1 -Installer
+
+      - name: Checksums and release notes
+        shell: pwsh
+        run: |
+          $files = "Kuality-$env:VERSION-setup.exe", "Kuality-$env:VERSION-portable.zip"
+          foreach ($f in $files) { if (-not (Test-Path "dist\$f")) { throw "dist\$f was not built" } }
+          $files | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash "dist\$_" -Algorithm SHA256).Hash.ToLower(), $_
+          } | Set-Content -Encoding ascii dist\SHA256SUMS.txt
+          Get-Content dist\SHA256SUMS.txt
+
+          # Section `## [<version>] ...` of CHANGELOG.md, up to the next `## ` heading.
+          $notes = @(); $inside = $false
+          foreach ($line in Get-Content CHANGELOG.md) {
+            if ($line -match '^## ') {
+              if ($inside) { break }
+              $inside = $line -match "^## \[$([regex]::Escape($env:VERSION))\]"
+              continue
+            }
+            if ($inside) { $notes += $line }
+          }
+          if (-not ($notes -join '').Trim()) { throw "CHANGELOG.md has no section for $env:VERSION" }
+          ($notes -join "`n").Trim() | Set-Content -Encoding utf8 dist\notes.md
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $kind = if ($env:VERSION -match '-') { '--prerelease' } else { '--latest' }
+          gh release create $tag `
+            --title "Kuality $env:VERSION" `
+            --notes-file dist\notes.md `
+            --verify-tag $kind `
+            "dist\Kuality-$env:VERSION-setup.exe" `
+            "dist\Kuality-$env:VERSION-portable.zip" `
+            dist\SHA256SUMS.txt

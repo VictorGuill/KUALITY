@@ -98,7 +98,7 @@ Done before Phase 4 and scoped to the settings that already exist (Phases 0–3)
 - [x] Inno Setup installer (with elevated-autostart checkbox, desktop shortcut option)
 - [x] Portable zip (`scripts/package.ps1`)
 - [x] App icon, version info, release build profile (size-optimized) *(final logo 2026-11-01; monochrome tray icon follows the taskbar theme)*
-
+- [x] *(2026-11-09, follow-up)* Public GitHub repo: CI (fmt/clippy/test), tag `v*` → GitHub Release with installer, portable zip and `SHA256SUMS.txt`; `CHANGELOG.md`, `CONTRIBUTING.md`, issue templates; first release `v1.0.0-beta.1`
 ## Phase 7 — Extensions
 
 - [ ] Spec `docs/specs/extensions.md`
@@ -114,7 +114,7 @@ Done before Phase 4 and scoped to the settings that already exist (Phases 0–3)
 - First-run wizard presenting each feature
 - Real CapsLock via double-tap
 - Notifications widget
-- Auto-updates
+- Update check (enabled by default): notify when a release is out, install it on request — see `DECISIONS.md` "Releases & CI"
 - Per-monitor layouts
 - Translations
 - macOS / Linux ports

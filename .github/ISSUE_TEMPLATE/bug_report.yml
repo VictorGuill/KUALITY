@@ -1,0 +1,49 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Enable Hyperkey
+        2. Hold CapsLock and press T in ...
+        3. ...
+  - type: input
+    id: version
+    attributes:
+      label: Kuality version
+      description: Right-click kuality.exe → Properties → Details → Product version.
+      placeholder: 1.0.0-beta.1
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install type
+      options:
+        - Installer
+        - Portable zip
+        - Built from source
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: Win+R → `winver`.
+      placeholder: Windows 11 24H2 (26100.xxxx)
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log
+      description: Relevant lines from `%APPDATA%\Kuality\logs\kuality.log` (or the `logs` folder next to a portable `kuality.exe`).
+      render: text

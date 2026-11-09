@@ -1,0 +1,20 @@
+name: Feature request
+description: Suggest an idea or an improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would you like to do?
+      description: The problem or use case, in your own words.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How could Kuality help?
+      description: Your idea of how it could work. Mock-ups and examples from other apps are welcome.
+  - type: markdown
+    attributes:
+      value: |
+        Kuality aims to stay lightweight and opt-in, see [VISION.md](https://github.com/VictorGuill/KUALITY/blob/main/docs/VISION.md).

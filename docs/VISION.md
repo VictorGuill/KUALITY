@@ -22,6 +22,6 @@ A small, fast, always-running Windows 11 utility that lets the user:
 - macOS / Linux support (code is kept portable-friendly, but no ports planned).
 - Windows 10 support.
 - Translations (UI is English only).
-- Auto-updates.
+- Auto-updates. *(2026-11-09: planned, update check enabled by default; see DECISIONS "Releases & CI".)*
 - Multi-monitor specific layouts (all monitors show the same widgets).
 - Injecting code into Explorer (unlike Windhawk mods).
