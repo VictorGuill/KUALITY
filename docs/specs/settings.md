@@ -88,7 +88,7 @@ The table has one row per binding, in file order:
 - **Delete** (confirm dialog). `BindingEntry::Invalid` entries show as `Unrecognized shortcut (kept as is)` with only Delete.
 - New bindings get `name: ""`, `pass_through: false`.
 
-**Add shortcut** appends a *draft* row with its Hotkey button already recording; once a key is recorded the picker opens. The draft is written once it has both a valid key and an action, and is lost on close or with its delete button (hint shown on the row). Only one draft at a time.
+**Add shortcut** appends a *draft* row with its Hotkey button already recording; once a key is recorded it is shown on the row and the user clicks "Choose an action" to open the picker. The draft is written once it has both a valid key and an action, and is lost on close or with its delete button (hint shown on the row). Only one draft at a time.
 
 #### Action picker
 
@@ -98,7 +98,7 @@ A popover under the Action button (Esc on the list closes it, a click outside to
 - **Applications**: every item of the shell's Applications folder (`shell:AppsFolder`, the Start menu's "All apps": desktop and Store apps) with its icon, by name. Picking one saves `{"type": "launch", "path": "shell:AppsFolder\\<id>", "args": [], "cwd": null}`, where `<id>` is the item's parsing name (an AppUserModelID such as `Helium.FCBY…` or `Microsoft.WindowsCalculator_8wekyb3d8bbwe!App`, or a known-folder path such as `{1AC14E77-…}\charmap.exe`). The core already launches these through `ShellExecuteExW`. An id that is no longer installed shows a name derived from it.
 - **Other actions**, pinned under the list, each opening a small page (back arrow or Esc returns to the list; **Save** or Enter applies):
   - *Open website…*: address field; `github.com` becomes `https://github.com`; must pass the core's URL rule.
-  - *Send keys…*: **Record keys** button (chord recorder) plus a text field (`win+1`, `ctrl+shift+esc`, `volume_mute`), with a live `Sends Win + 1` preview; must pass `parse_chord`.
+  - *Send keys…*: the chord recorder starts listening as soon as the page opens (**Record keys** button toggles it; clicking the text field or Esc stops it to type instead) plus a text field (`win+1`, `ctrl+shift+esc`, `volume_mute`), with a live `Sends Win + 1` preview; must pass `parse_chord`.
   - *Open file or folder…*: path field + **Choose file…** / **Choose folder…**; saved as `launch` without arguments.
   - *Run program…*: program field + **Browse…**; an **Advanced** disclosure holds *Arguments* (one command line) and *Working folder*. An existing argument list is shown joined with Windows quoting (`join_args`) and stays a list unless edited; an edit is saved as a raw string; empty folder → `null`.
 - Opening the picker on an existing binding starts where it is edited: the list (current app checked) for an app, else the matching page, filled in.

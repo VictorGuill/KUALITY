@@ -261,7 +261,16 @@ impl ActionPicker {
         self.page = page;
         self.error = None;
         self.focus_page(window, cx);
+        // "Send keys" listens at once; a click on the field (or Esc) stops it to type instead.
+        if page == Page::SendKeys {
+            cx.emit(PickerEvent::RecordKeys);
+        }
         cx.notify();
+    }
+
+    /// Whether the picker shows the "Send keys" page (it then records as soon as it opens).
+    pub fn on_send_keys(&self) -> bool {
+        self.page == Page::SendKeys
     }
 
     fn activate(&mut self, entry: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -594,7 +603,17 @@ impl ActionPicker {
                     })
                     .child(field(
                         "Or type them",
-                        Input::new(&self.keys),
+                        // Clicking the field to type stops the listening recorder.
+                        div()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    if this.recording {
+                                        cx.emit(PickerEvent::StopRecording);
+                                    }
+                                }),
+                            )
+                            .child(Input::new(&self.keys)),
                         error.as_deref(),
                         cx,
                     ))

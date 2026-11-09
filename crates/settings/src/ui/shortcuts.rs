@@ -110,11 +110,15 @@ impl SettingsWindow {
                 this.on_picker_event(row, ev.clone(), window, cx)
             },
         );
+        let send_keys = view.read(cx).on_send_keys();
         self.picker = Some(OpenPicker {
             row,
             view,
             _sub: sub,
         });
+        if send_keys {
+            self.start_recording(RecordTarget::Chord, window, cx);
+        }
         cx.notify();
     }
 
@@ -205,12 +209,9 @@ impl SettingsWindow {
                             return;
                         };
                         d.key = text;
-                        let needs_action = d.action.is_none();
+                        // The recorded hotkey stays visible on the draft row; the user opens the
+                        // action picker themselves with the row's "Choose an action" button.
                         self.commit_draft(cx);
-                        // Raycast-style: hotkey first, then straight to "what does it do".
-                        if needs_action && self.draft.is_some() {
-                            self.open_picker(Row::Draft, window, cx);
-                        }
                     }
                 }
             }
