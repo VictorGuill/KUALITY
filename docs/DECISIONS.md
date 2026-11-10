@@ -223,6 +223,8 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **Opt-in** — `todo.enabled` is off by default; turning it on in Settings adds (or enables) a bar with the to-do module at the bottom-left.
 - **Toggle detection** — pressing the taskbar takes the focus from the popup, which closes before the click arrives; the widget window records at mouse-down whether the popup's mutex exists, and such a click only closes it.
 - **Live data** — `OverlayCommand::Data(LiveData)` re-renders the widgets without an `Apply`, so widgets hidden from the menu stay hidden.
+- **Open on hover** (2026-11-10, user request) — resting the mouse on the module (250 ms) shows the list as a "peek": no focus taken, closed 300 ms after the mouse leaves the module and the list; a click on the module or into the list keeps it like a clicked one. On by default, switch `open_on_hover` in Settings → To do. The peek is marked by a second mutex `Local\Kuality.TodoPeek` so a module click knows to keep it rather than close it.
+- **Hit testing** — every bar module is filled with an invisible color (alpha 1/255): layered windows let the mouse through fully transparent pixels, so before this only the letters reacted.
 
 ## Out of scope for now
 

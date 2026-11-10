@@ -4,7 +4,7 @@ use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kuality_protocol::{CONFIG_VERSION, Config};
 
@@ -13,7 +13,7 @@ use crate::config_store::changed_sections;
 use crate::hyperkey::KeyboardController;
 use crate::overlay::OverlayController;
 use crate::overlay::widgets::LiveData;
-use crate::platform::{self, DirWatcher, Event};
+use crate::platform::{self, DirWatcher, Event, TodoRequest, TodoTrigger};
 use crate::updates::Updates;
 use crate::{logging, shortcuts};
 
@@ -27,6 +27,11 @@ const CORE_PID_ARG: &str = "--core-pid";
 /// Arguments that open the to-do popup (`--at <x>,<y>`: anchor in screen pixels).
 const TODO_ARG: &str = "--todo";
 const AT_ARG: &str = "--at";
+/// `--hover <left>,<top>,<right>,<bottom>`: the popup shows on hover and closes when the mouse
+/// leaves this module rectangle (physical px) and the popup.
+const HOVER_ARG: &str = "--hover";
+/// A hover does not start a second popup this soon after starting one.
+const TODO_START_GUARD: Duration = Duration::from_millis(500);
 
 /// State owned by the main thread.
 #[derive(Debug)]
@@ -43,6 +48,8 @@ pub struct App<W: DirWatcher> {
     updates: Option<Updates>,
     /// Live widget data last sent to the overlay.
     live: LiveData,
+    /// When the to-do popup was last started (it takes a moment to claim its mutex).
+    todo_started: Option<Instant>,
     /// Tray "Pause" (runtime only, keyboard features only).
     paused: bool,
 }
@@ -72,6 +79,7 @@ impl<W: DirWatcher> App<W> {
             overlay,
             updates,
             live: LiveData::default(),
+            todo_started: None,
             paused: false,
         };
         app.apply_keyboard(&app.config);
@@ -111,27 +119,55 @@ impl<W: DirWatcher> App<W> {
         }
     }
 
-    /// Opens the to-do popup above (`x`, `y`) (`kuality.exe --todo`, this same exe), or closes
-    /// it when it is (or was, at the mouse press) open.
-    fn toggle_todo(&self, x: i32, y: i32, was_open: bool) {
-        if kuality_settings::close_todo_popup() || was_open {
-            log::debug!("to-do popup closed");
-            return;
+    /// A click on, or the mouse resting on, a bar's to-do module (`kuality.exe --todo`, this
+    /// same exe, is the popup):
+    /// - click while the list is only shown on hover: keep it open (bring it to the front);
+    /// - click while it is (or was, at the mouse press) open: close it;
+    /// - click otherwise: open it above the module;
+    /// - hover: show it until the mouse leaves the module and the list, unless one is open.
+    fn on_todo(&mut self, r: TodoRequest) {
+        match r.trigger {
+            TodoTrigger::Click {
+                was_peeking: true, ..
+            } if kuality_settings::focus_todo_popup() => {
+                log::debug!("to-do popup kept open");
+                return;
+            }
+            TodoTrigger::Click {
+                was_open,
+                was_peeking: false,
+            } if kuality_settings::close_todo_popup() || was_open => {
+                log::debug!("to-do popup closed");
+                return;
+            }
+            TodoTrigger::Hover
+                if kuality_settings::todo_popup_running()
+                    || self
+                        .todo_started
+                        .is_some_and(|t| t.elapsed() < TODO_START_GUARD) =>
+            {
+                return;
+            }
+            _ => {}
         }
-        let started = std::env::current_exe().and_then(|exe| {
-            platform::spawn_detached(
-                &exe,
-                &[
-                    TODO_ARG.into(),
-                    CORE_PID_ARG.into(),
-                    std::process::id().to_string(),
-                    AT_ARG.into(),
-                    format!("{x},{y}"),
-                ],
-            )
-        });
+        let m = r.module;
+        let mut args = vec![
+            TODO_ARG.into(),
+            CORE_PID_ARG.into(),
+            std::process::id().to_string(),
+            AT_ARG.into(),
+            format!("{},{}", m.x, r.taskbar_top),
+        ];
+        if r.trigger == TodoTrigger::Hover {
+            args.push(HOVER_ARG.into());
+            args.push(format!("{},{},{},{}", m.x, m.y, m.x + m.w, m.y + m.h));
+        }
+        let started = std::env::current_exe().and_then(|exe| platform::spawn_detached(&exe, &args));
         match started {
-            Ok(()) => log::debug!("started the to-do popup"),
+            Ok(()) => {
+                self.todo_started = Some(Instant::now());
+                log::debug!("started the to-do popup");
+            }
             Err(e) => log::error!("could not start the to-do popup: {e}"),
         }
     }
@@ -167,8 +203,8 @@ impl<W: DirWatcher> App<W> {
                 self.open_settings();
                 ControlFlow::Continue(())
             }
-            Event::ToggleTodo { x, y, was_open } => {
-                self.toggle_todo(x, y, was_open);
+            Event::Todo(r) => {
+                self.on_todo(r);
                 ControlFlow::Continue(())
             }
             Event::TogglePause => {

@@ -17,6 +17,14 @@ pub const MODULE_PAD_X: f32 = 8.0;
 pub const PAD_Y: f32 = 6.0;
 /// Corner radius of the hover background (DIPs).
 pub const HOVER_RADIUS: f32 = 4.0;
+/// Fills every module so the whole pill takes the mouse: a layered window lets the mouse
+/// through where it is fully transparent (between the letters). Alpha 1/255 is invisible.
+pub const HIT_FILL: Color = Color {
+    a: 1,
+    r: 0,
+    g: 0,
+    b: 0,
+};
 /// `gap` is clamped to this range (DIPs).
 pub const GAP_RANGE: (f64, f64) = (0.0, 200.0);
 /// Longer labels are truncated (in chars).
@@ -25,27 +33,45 @@ pub const MAX_LABEL_CHARS: usize = 100;
 /// What a module does when clicked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModuleKind {
-    /// Opens (or closes) the to-do popup.
-    Todo,
+    /// Opens (or closes) the to-do popup; `open_on_hover`: also shows it when the mouse rests
+    /// on the module.
+    Todo { open_on_hover: bool },
+}
+
+impl ModuleKind {
+    /// Resting the mouse on the module runs its hover action.
+    pub fn opens_on_hover(self) -> bool {
+        match self {
+            Self::Todo { open_on_hover } => open_on_hover,
+        }
+    }
 }
 
 /// A resolved module.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Module {
-    Todo { label: String, show_count: bool },
+    Todo {
+        label: String,
+        show_count: bool,
+        open_on_hover: bool,
+    },
 }
 
 impl Module {
     pub fn kind(&self) -> ModuleKind {
         match self {
-            Self::Todo { .. } => ModuleKind::Todo,
+            Self::Todo { open_on_hover, .. } => ModuleKind::Todo {
+                open_on_hover: *open_on_hover,
+            },
         }
     }
 
     /// The text shown for the module.
     pub fn text(&self, live: &LiveData) -> String {
         match self {
-            Self::Todo { label, show_count } => todo_text(label, *show_count, live.todo_pending),
+            Self::Todo {
+                label, show_count, ..
+            } => todo_text(label, *show_count, live.todo_pending),
         }
     }
 }
@@ -109,6 +135,7 @@ impl BarContent {
                     modules.push(Module::Todo {
                         label,
                         show_count: t.show_count,
+                        open_on_hover: t.open_on_hover,
                     });
                 }
                 BarModuleEntry::Unknown(v) => match v.get("type").and_then(Value::as_str) {
@@ -195,15 +222,18 @@ impl BarContent {
         let measured = self.measured(r, &cx.live);
         let spans = spans_of(&self.modules, &measured, self.gap);
         for (i, (span, (text, _))) in spans.iter().zip(&measured).enumerate() {
-            if cx.hover == Some(i) {
-                let pill = RectF {
-                    x: span.x,
-                    y: 0.0,
-                    w: span.w,
-                    h: size.h,
-                };
-                r.fill_rounded_rect(pill, HOVER_RADIUS, cx.theme.hover_color());
-            }
+            let pill = RectF {
+                x: span.x,
+                y: 0.0,
+                w: span.w,
+                h: size.h,
+            };
+            let fill = if cx.hover == Some(i) {
+                cx.theme.hover_color()
+            } else {
+                HIT_FILL
+            };
+            r.fill_rounded_rect(pill, HOVER_RADIUS, fill);
             let text_rect = RectF {
                 x: span.x + MODULE_PAD_X,
                 y: 0.0,
@@ -244,7 +274,7 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         texts: Vec<(String, RectF)>,
-        fills: Vec<RectF>,
+        fills: Vec<(RectF, Color)>,
     }
 
     impl Renderer for Fake {
@@ -257,8 +287,8 @@ mod tests {
         fn draw_text(&mut self, text: &str, _: &TextStyle, _: Color, rect: RectF) {
             self.texts.push((text.to_owned(), rect));
         }
-        fn fill_rounded_rect(&mut self, rect: RectF, _: f32, _: Color) {
-            self.fills.push(rect);
+        fn fill_rounded_rect(&mut self, rect: RectF, _: f32, color: Color) {
+            self.fills.push((rect, color));
         }
     }
 
@@ -294,7 +324,8 @@ mod tests {
             c.modules,
             [Module::Todo {
                 label: "TO DO".into(),
-                show_count: true
+                show_count: true,
+                open_on_hover: true
             }]
         );
         assert_eq!(c.style.weight, FontWeight::Semibold);
@@ -323,6 +354,7 @@ mod tests {
                 BarModuleEntry::Known(BarModule::Todo(TodoModule {
                     label: "B".into(),
                     show_count: false,
+                    open_on_hover: false,
                     ..TodoModule::default()
                 })),
             ],
@@ -341,12 +373,16 @@ mod tests {
                 Span {
                     x: 0.0,
                     w: 106.0,
-                    kind: ModuleKind::Todo
+                    kind: ModuleKind::Todo {
+                        open_on_hover: true
+                    }
                 },
                 Span {
                     x: 122.0,
                     w: 26.0,
-                    kind: ModuleKind::Todo
+                    kind: ModuleKind::Todo {
+                        open_on_hover: false
+                    }
                 }
             ]
         );
@@ -367,14 +403,19 @@ mod tests {
         assert_eq!(r.texts[0].0, "TO DO (3)");
         assert_eq!(r.texts[0].1.x, 8.0);
         assert_eq!(r.texts[1].0, "B");
+        let pill = |x, w| RectF {
+            x,
+            y: 0.0,
+            w,
+            h: 28.0,
+        };
         assert_eq!(
             r.fills,
-            [RectF {
-                x: 122.0,
-                y: 0.0,
-                w: 26.0,
-                h: 28.0
-            }]
+            [
+                (pill(0.0, 106.0), HIT_FILL),
+                (pill(122.0, 26.0), Theme::Dark.hover_color())
+            ],
+            "every pill takes the mouse; the hovered one is highlighted"
         );
     }
 }

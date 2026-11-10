@@ -1,6 +1,10 @@
 //! The to-do popup (`kuality.exe --todo`, see `docs/specs/todo.md`): a small borderless window
 //! above the taskbar listing `todos.json`. It is the only writer of that file; every change is
 //! written at once so the taskbar count follows. It closes on Esc or when it loses focus.
+//!
+//! Opened by the mouse resting on the module (`--hover`), it is a "peek": shown without taking
+//! the focus, and closed once the mouse has left the module and the popup, until it is clicked
+//! (then it behaves as if opened by a click).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -26,6 +30,10 @@ const HEIGHT: f32 = 440.0;
 const MARGIN: f32 = 8.0;
 /// Focus changes right after opening are ignored (the window may not be active yet).
 const ACTIVATION_GRACE: Duration = Duration::from_millis(400);
+/// A peek closes when the mouse has been away from the module and the popup this long.
+const PEEK_LEAVE_GRACE: Duration = Duration::from_millis(300);
+/// How often a peek checks the mouse position.
+const PEEK_POLL: Duration = Duration::from_millis(100);
 
 /// A screen rectangle in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +42,28 @@ pub struct ScreenRect {
     pub top: i32,
     pub right: i32,
     pub bottom: i32,
+}
+
+impl ScreenRect {
+    pub fn contains(&self, (x, y): (i32, i32)) -> bool {
+        x >= self.left && x < self.right && y >= self.top && y < self.bottom
+    }
+}
+
+/// The popup was opened by the mouse resting on the module (`--hover`).
+pub struct Peek {
+    /// The module on screen: the mouse may rest there or on the popup.
+    pub module: ScreenRect,
+    /// Holds the "shown on hover" mutex until the popup is clicked.
+    pub guard: Option<platform::Instance>,
+}
+
+struct PeekState {
+    /// Module and popup rectangles.
+    keep: Vec<ScreenRect>,
+    /// When the mouse left them (`None`: it is on one).
+    away_since: Option<Instant>,
+    _guard: Option<platform::Instance>,
 }
 
 /// Top-left corner (physical px) of a popup of `size` DIPs on a monitor with work area `work`
@@ -63,15 +93,36 @@ pub fn place_popup(
 
 /// `--at <x>,<y>`: the anchor the core passes (physical screen pixels).
 pub fn anchor_arg(args: &[String]) -> Option<(i32, i32)> {
+    match numbers_arg(args, "--at")?[..] {
+        [x, y] => Some((x, y)),
+        _ => None,
+    }
+}
+
+/// `--hover <left>,<top>,<right>,<bottom>`: opened by the mouse resting on the module at this
+/// screen rectangle (physical pixels).
+pub fn hover_arg(args: &[String]) -> Option<ScreenRect> {
+    match numbers_arg(args, "--hover")?[..] {
+        [left, top, right, bottom] if left < right && top < bottom => Some(ScreenRect {
+            left,
+            top,
+            right,
+            bottom,
+        }),
+        _ => None,
+    }
+}
+
+/// The comma-separated integers after `name` (`name a,b` or `name=a,b`).
+fn numbers_arg(args: &[String], name: &str) -> Option<Vec<i32>> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        let value = match a.strip_prefix("--at=") {
-            Some(v) => v,
-            None if a == "--at" => it.next()?,
-            None => continue,
+        let value = match a.strip_prefix(name) {
+            Some(v) if v.starts_with('=') => &v[1..],
+            Some("") => it.next()?,
+            _ => continue,
         };
-        let (x, y) = value.split_once(',')?;
-        return Some((x.trim().parse().ok()?, y.trim().parse().ok()?));
+        return value.split(',').map(|n| n.trim().parse().ok()).collect();
     }
     None
 }
@@ -101,12 +152,13 @@ fn new_items_at_top(config_path: &Path) -> bool {
         != Some(NewItems::Bottom)
 }
 
-/// Opens the popup and runs until it closes (Esc, focus lost, WM_CLOSE from the core, or the
-/// core exiting).
+/// Opens the popup and runs until it closes (Esc, focus lost, WM_CLOSE from the core, the
+/// core exiting, or the mouse leaving a peek).
 pub fn run(
     todo_path: PathBuf,
     config_path: PathBuf,
     anchor: Option<(i32, i32)>,
+    peek: Option<Peek>,
     core: Option<platform::CoreProcess>,
 ) {
     let at_top = new_items_at_top(&config_path);
@@ -114,21 +166,49 @@ pub fn run(
         .with_assets(AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            // Screen queries only after GPUI made the process DPI aware (physical pixels).
             let monitor = platform::monitor_at(anchor);
-            let (bounds, display_id) = match monitor {
-                Some(m) => {
-                    let (x, y) = place_popup(anchor, m.work, m.scale, (WIDTH, HEIGHT));
-                    let origin = point(px(x as f32 / m.scale), px(y as f32 / m.scale));
+            // Physical position and size, when the monitor is known.
+            let placed = monitor.map(|m| {
+                let (x, y) = place_popup(anchor, m.work, m.scale, (WIDTH, HEIGHT));
+                let (w, h) = (
+                    (WIDTH * m.scale).round() as i32,
+                    (HEIGHT * m.scale).round() as i32,
+                );
+                ScreenRect {
+                    left: x,
+                    top: y,
+                    right: x + w,
+                    bottom: y + h,
+                }
+            });
+            let peek = peek.map(|p| PeekState {
+                keep: [Some(p.module), placed].into_iter().flatten().collect(),
+                away_since: None,
+                _guard: p.guard,
+            });
+            if let Some(p) = &peek
+                && !platform::cursor_pos().is_some_and(|c| p.keep.iter().any(|r| r.contains(c)))
+            {
+                // The mouse already left while this process started.
+                log::debug!("mouse left before the to-do popup opened; not opening");
+                cx.quit();
+                return;
+            }
+            let (bounds, display_id) = match (monitor, placed) {
+                (Some(m), Some(r)) => {
+                    let origin = point(px(r.left as f32 / m.scale), px(r.top as f32 / m.scale));
                     (
                         Bounds::new(origin, size(px(WIDTH), px(HEIGHT))),
                         Some(DisplayId::new(m.id)),
                     )
                 }
-                None => (
+                _ => (
                     Bounds::centered(None, size(px(WIDTH), px(HEIGHT)), cx),
                     None,
                 ),
             };
+            let activate = peek.is_none();
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
@@ -140,7 +220,8 @@ pub fn run(
                 is_movable: false,
                 is_resizable: false,
                 is_minimizable: false,
-                focus: true,
+                // A peek does not take the focus from the window being used.
+                focus: activate,
                 show: true,
                 display_id,
                 app_id: Some("Kuality.Todo".into()),
@@ -148,8 +229,8 @@ pub fn run(
             };
             let opened = gpui_kit::open_window(options, cx, |window, cx| {
                 style::apply(window, cx);
-                platform::popup_window_setup(window);
-                cx.new(|cx| TodoPopup::new(todo_path, at_top, core, window, cx))
+                platform::popup_window_setup(window, activate);
+                cx.new(|cx| TodoPopup::new(todo_path, at_top, peek, core, window, cx))
             });
             if let Err(e) = opened {
                 log::error!("cannot open the to-do popup: {e}");
@@ -169,6 +250,8 @@ struct TodoPopup {
     at_top: bool,
     input: Entity<InputState>,
     opened: Instant,
+    /// Shown on hover and not clicked yet.
+    peek: Option<PeekState>,
     _subs: Vec<Subscription>,
 }
 
@@ -176,6 +259,7 @@ impl TodoPopup {
     fn new(
         path: PathBuf,
         at_top: bool,
+        peek: Option<PeekState>,
         core: Option<platform::CoreProcess>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -209,7 +293,13 @@ impl TodoPopup {
                 }
             }),
             cx.observe_window_activation(window, |this, window, cx| {
-                if !window.is_window_active() && this.opened.elapsed() >= ACTIVATION_GRACE {
+                if window.is_window_active() {
+                    if this.peek.take().is_some() {
+                        // Clicked: it now stays until it loses the focus, like after a click on
+                        // the module.
+                        log::debug!("to-do popup clicked; kept open");
+                    }
+                } else if this.peek.is_none() && this.opened.elapsed() >= ACTIVATION_GRACE {
                     log::debug!("to-do popup lost focus; closing");
                     cx.quit();
                 }
@@ -218,6 +308,18 @@ impl TodoPopup {
                 style::apply(window, cx);
             }),
         ];
+        if peek.is_some() {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(PEEK_POLL).await;
+                    match this.update(cx, |this, cx| this.check_peek(cx)) {
+                        Ok(true) => {}
+                        _ => break,
+                    }
+                }
+            })
+            .detach();
+        }
         Self {
             path,
             list,
@@ -226,8 +328,26 @@ impl TodoPopup {
             at_top,
             input,
             opened: Instant::now(),
+            peek,
             _subs: subs,
         }
+    }
+
+    /// A peek closes once the mouse has been away from the module and the popup for
+    /// `PEEK_LEAVE_GRACE`. Returns whether to keep checking (still a peek).
+    fn check_peek(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(p) = &mut self.peek else {
+            return false;
+        };
+        let inside = platform::cursor_pos().is_none_or(|c| p.keep.iter().any(|r| r.contains(c)));
+        if inside {
+            p.away_since = None;
+        } else if p.away_since.get_or_insert_with(Instant::now).elapsed() >= PEEK_LEAVE_GRACE {
+            log::debug!("mouse left the to-do popup; closing");
+            cx.quit();
+            return false;
+        }
+        true
     }
 
     fn read_only(&self) -> bool {
@@ -414,7 +534,7 @@ impl Render for TodoPopup {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: it would bring GPUI's `test` attribute in place of the built-in one.
-    use super::{ScreenRect, TodoList, anchor_arg, load, new_items_at_top, place_popup};
+    use super::{ScreenRect, TodoList, anchor_arg, hover_arg, load, new_items_at_top, place_popup};
 
     const WORK: ScreenRect = ScreenRect {
         left: 0,
@@ -477,7 +597,29 @@ mod tests {
         );
         assert_eq!(anchor_arg(&args(&["--at", "x,1"])), None);
         assert_eq!(anchor_arg(&args(&["--at"])), None);
+        assert_eq!(anchor_arg(&args(&["--at", "1,2,3"])), None);
+        assert_eq!(anchor_arg(&args(&["--attach", "1,2"])), None);
         assert_eq!(anchor_arg(&args(&[])), None);
+    }
+
+    #[test]
+    fn hover_argument_and_rect() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let r = hover_arg(&args(&["--at", "12,1032", "--hover", "12,1032,118,1080"])).unwrap();
+        assert_eq!(
+            r,
+            ScreenRect {
+                left: 12,
+                top: 1032,
+                right: 118,
+                bottom: 1080
+            }
+        );
+        assert!(r.contains((12, 1032)) && r.contains((117, 1079)));
+        assert!(!r.contains((118, 1050)) && !r.contains((50, 1031)));
+        assert_eq!(hover_arg(&args(&["--hover=5,5,1,9"])), None, "empty");
+        assert_eq!(hover_arg(&args(&["--hover", "1,2"])), None);
+        assert_eq!(hover_arg(&args(&["--at", "1,2"])), None);
     }
 
     #[test]

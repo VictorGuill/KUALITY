@@ -47,12 +47,12 @@ use super::fullscreen;
 use super::render::D2d;
 use super::taskbars;
 use super::theme;
-use super::widget_window::{self, CLICK_POPUP_WAS_OPEN, WidgetWindow};
-use crate::overlay::layout::{SizeF, SizePx, layout};
-use crate::overlay::widgets::bar::ModuleKind;
+use super::widget_window::{self, CLICK_POPUP_PEEKING, CLICK_POPUP_WAS_OPEN, WidgetWindow};
+use crate::overlay::layout::{RectPx, SizeF, SizePx, layout};
+use crate::overlay::widgets::bar::{ModuleKind, Span};
 use crate::overlay::widgets::{Content, DrawContext, LiveData, Theme};
 use crate::overlay::{OverlayCommand, OverlayConfig};
-use crate::platform::OverlayBackend;
+use crate::platform::{OverlayBackend, TodoRequest, TodoTrigger};
 
 const CLASS_NAME: PCWSTR = w!("KualityOverlayHost");
 /// Commands are waiting in the channel.
@@ -62,11 +62,13 @@ pub(crate) const WM_APP_REFRESH: u32 = WM_APP + 2;
 /// A widget window was right-clicked: `wparam` = its HWND, `lparam` = screen position.
 pub(crate) const WM_APP_MENU: u32 = WM_APP + 3;
 /// A widget window was left-clicked: `wparam` = its HWND, `lparam` = client x (low 32 bits) |
-/// `CLICK_POPUP_WAS_OPEN`.
+/// `CLICK_POPUP_*` flags.
 pub(crate) const WM_APP_CLICK: u32 = WM_APP + 4;
 /// The mouse moved over a widget window: `wparam` = its HWND, `lparam` = client x, or -1 when
 /// it left the window.
 pub(crate) const WM_APP_HOVER: u32 = WM_APP + 5;
+/// The left button went down on a widget window (`wparam` = its HWND): no hover action now.
+pub(crate) const WM_APP_PRESS: u32 = WM_APP + 6;
 
 const MENU_SETTINGS: usize = 1;
 const MENU_HIDE: usize = 2;
@@ -76,6 +78,11 @@ const TIMER_LATE_2S: usize = 2;
 const TIMER_LATE_5S: usize = 3;
 const TIMER_RETRY: usize = 4;
 const TIMER_CREATE_RETRY: usize = 5;
+/// The mouse rested on a module with a hover action.
+const TIMER_HOVER: usize = 6;
+/// How long the mouse rests on a module before its hover action runs (passing over the taskbar
+/// does nothing).
+const HOVER_DELAY_MS: u32 = 250;
 const REFRESH_DEBOUNCE_MS: u32 = 300;
 const RETRY_MS: u32 = 1000;
 /// Failed widget window creation (e.g. `CreateWindowExW` denied while Explorer is busy) is
@@ -494,38 +501,88 @@ impl State {
         };
         if hover != self.hover {
             self.hover = hover;
+            self.kill_timer(TIMER_HOVER);
+            if let Some((w, i)) = hover
+                && self.span(w, i).is_some_and(|s| s.kind.opens_on_hover())
+            {
+                self.set_timer(TIMER_HOVER, HOVER_DELAY_MS);
+            }
             self.rerender();
         }
     }
 
+    /// The mouse rested on a module: runs its hover action.
+    fn on_hover_timer(&self) {
+        let Some((widget, i)) = self.hover else {
+            return;
+        };
+        // Only the to-do module has a hover action for now.
+        if self.span(widget, i).is_some_and(|s| {
+            matches!(
+                s.kind,
+                ModuleKind::Todo {
+                    open_on_hover: true
+                }
+            )
+        }) && let Some(r) = self.todo_request(widget, i, TodoTrigger::Hover)
+        {
+            super::super::tray::request_todo(r);
+        }
+    }
+
     /// A widget window was clicked at client x `x`: runs the clicked module's action.
-    /// `popup_was_open`: the to-do popup was open when the button went down.
-    fn on_click(&self, widget: HWND, x: i32, popup_was_open: bool) {
-        let Some((win, taskbar)) = self.taskbars.iter().find_map(|t| {
+    /// `popup_state`: `CLICK_*` flags, the to-do popup's state when the button went down.
+    fn on_click(&self, widget: HWND, x: i32, popup_state: isize) {
+        self.kill_timer(TIMER_HOVER);
+        let Some(i) = self.window(widget).and_then(|w| w.span_at(x)) else {
+            return;
+        };
+        match self.span(widget, i).map(|s| s.kind) {
+            Some(ModuleKind::Todo { .. }) => {
+                let trigger = TodoTrigger::Click {
+                    was_open: popup_state & CLICK_POPUP_WAS_OPEN != 0,
+                    was_peeking: popup_state & CLICK_POPUP_PEEKING != 0,
+                };
+                if let Some(r) = self.todo_request(widget, i, trigger) {
+                    super::super::tray::request_todo(r);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Module `i` of `widget` on screen, for the to-do popup.
+    fn todo_request(&self, widget: HWND, i: usize, trigger: TodoTrigger) -> Option<TodoRequest> {
+        let (win, taskbar) = self.taskbars.iter().find_map(|t| {
             t.windows
                 .iter()
                 .find(|(_, w)| w.hwnd == widget)
                 .map(|(_, w)| (w, t.hwnd))
-        }) else {
-            return;
+        })?;
+        let span = win.spans.get(i)?;
+        let (mut w, mut t) = (RECT::default(), RECT::default());
+        // SAFETY: plain queries into locals (our window, Explorer's taskbar; no messages).
+        let ok = unsafe {
+            GetWindowRect(widget, &mut w).is_ok() && GetWindowRect(taskbar, &mut t).is_ok()
         };
-        let Some(span) = win.span_at(x).map(|i| win.spans[i]) else {
-            return;
-        };
-        match span.kind {
-            ModuleKind::Todo => {
-                // Anchor for the popup: the module's left edge, at the taskbar's top edge.
-                let (mut w, mut t) = (RECT::default(), RECT::default());
-                // SAFETY: plain queries into locals (our window, Explorer's taskbar; no messages).
-                let ok = unsafe {
-                    GetWindowRect(widget, &mut w).is_ok() && GetWindowRect(taskbar, &mut t).is_ok()
-                };
-                if ok {
-                    let left = w.left + (f64::from(span.x) * win.scale).round() as i32;
-                    super::super::tray::request_toggle_todo(left, t.top, popup_was_open);
-                }
-            }
+        if !ok {
+            return None;
         }
+        let px = |dips: f32| (f64::from(dips) * win.scale).round() as i32;
+        Some(TodoRequest {
+            module: RectPx {
+                x: w.left + px(span.x),
+                y: w.top,
+                w: px(span.w),
+                h: w.bottom - w.top,
+            },
+            taskbar_top: t.top,
+            trigger,
+        })
+    }
+
+    fn span(&self, widget: HWND, i: usize) -> Option<&Span> {
+        self.window(widget)?.spans.get(i)
     }
 
     fn window(&self, hwnd: HWND) -> Option<&WidgetWindow> {
@@ -547,6 +604,7 @@ impl State {
             TIMER_LATE_5S,
             TIMER_RETRY,
             TIMER_CREATE_RETRY,
+            TIMER_HOVER,
         ] {
             self.kill_timer(id);
         }
@@ -582,7 +640,9 @@ impl State {
 
     fn on_timer(&mut self, id: usize) {
         self.kill_timer(id);
-        if matches!(
+        if id == TIMER_HOVER {
+            self.on_hover_timer();
+        } else if matches!(
             id,
             TIMER_REFRESH | TIMER_LATE_2S | TIMER_LATE_5S | TIMER_RETRY | TIMER_CREATE_RETRY
         ) {
@@ -1065,8 +1125,12 @@ unsafe extern "system" fn host_wndproc(
             LRESULT(0)
         }
         WM_APP_CLICK => {
-            let open = lparam.0 & CLICK_POPUP_WAS_OPEN != 0;
-            with_state(|s| s.on_click(HWND(wparam.0 as *mut _), lparam.0 as i32, open));
+            let state = lparam.0 & (CLICK_POPUP_WAS_OPEN | CLICK_POPUP_PEEKING);
+            with_state(|s| s.on_click(HWND(wparam.0 as *mut _), lparam.0 as i32, state));
+            LRESULT(0)
+        }
+        WM_APP_PRESS => {
+            with_state(|s| s.kill_timer(TIMER_HOVER));
             LRESULT(0)
         }
         WM_APP_HOVER => {

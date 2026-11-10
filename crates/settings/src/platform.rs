@@ -41,8 +41,8 @@ use windows::Win32::UI::Shell::{
     SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, SIIGBF_ICONONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, EnumWindows, FindWindowW, GetForegroundWindow, GetMessageW,
-    GetWindowTextW, GetWindowThreadProcessId, HC_ACTION, IsIconic, IsWindowVisible,
+    CallNextHookEx, DispatchMessageW, EnumWindows, FindWindowW, GetCursorPos, GetForegroundWindow,
+    GetMessageW, GetWindowTextW, GetWindowThreadProcessId, HC_ACTION, IsIconic, IsWindowVisible,
     KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, PostMessageW, PostQuitMessage, PostThreadMessageW,
     SW_RESTORE, SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow, TranslateMessage,
     UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_CLOSE, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
@@ -60,6 +60,8 @@ const INSTANCE_MUTEX: &str = r"Local\Kuality.Settings";
 pub const TODO_WINDOW_TITLE: &str = "Kuality To-do";
 /// Held by the to-do popup while it runs.
 const TODO_MUTEX: &str = r"Local\Kuality.Todo";
+/// Held by a to-do popup while it is only shown on hover (until it is clicked).
+const TODO_PEEK_MUTEX: &str = r"Local\Kuality.TodoPeek";
 const CORE_MUTEX: &str = r"Local\Kuality.Core";
 /// Class of the core's hidden main window (owns the tray icon).
 const CORE_WINDOW_CLASS: PCWSTR = w!("Kuality.Core");
@@ -102,6 +104,11 @@ impl Instance {
     /// `None` if another to-do popup is already running.
     pub fn acquire_todo() -> io::Result<Option<Self>> {
         Self::acquire_named(TODO_MUTEX)
+    }
+
+    /// Marks the to-do popup as "shown on hover" while held.
+    pub fn acquire_todo_peek() -> io::Result<Option<Self>> {
+        Self::acquire_named(TODO_PEEK_MUTEX)
     }
 
     fn acquire_named(mutex: &str) -> io::Result<Option<Self>> {
@@ -241,9 +248,36 @@ pub fn close_todo_popup() -> bool {
     true
 }
 
+/// Brings the running to-do popup to the front (the core calls it on a click, so Windows allows
+/// it). Returns whether its window was found and activated.
+pub fn focus_todo_popup() -> bool {
+    match find_own_window(TODO_WINDOW_TITLE) {
+        // SAFETY: plain call; a stale handle only makes it fail.
+        Some(hwnd) => unsafe { SetForegroundWindow(hwnd) }.as_bool(),
+        None => false,
+    }
+}
+
 /// Whether a to-do popup runs in this session (its mutex exists).
 pub fn todo_popup_running() -> bool {
-    let name = wide(TODO_MUTEX);
+    mutex_exists(TODO_MUTEX)
+}
+
+/// Whether the running to-do popup is only shown on hover (not clicked yet).
+pub fn todo_popup_peeking() -> bool {
+    mutex_exists(TODO_PEEK_MUTEX)
+}
+
+/// The mouse position in physical screen pixels.
+pub fn cursor_pos() -> Option<(i32, i32)> {
+    let mut p = POINT::default();
+    // SAFETY: writes into a local.
+    unsafe { GetCursorPos(&mut p) }.ok()?;
+    Some((p.x, p.y))
+}
+
+fn mutex_exists(mutex: &str) -> bool {
+    let name = wide(mutex);
     // SAFETY: `name` is NUL-terminated and alive for the call; the handle is closed at once.
     unsafe {
         match OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, PCWSTR(name.as_ptr())) {
@@ -299,7 +333,7 @@ pub fn monitor_at(anchor: Option<(i32, i32)>) -> Option<Monitor> {
 }
 
 /// Rounded corners (Windows 11) and the foreground for the popup window.
-pub fn popup_window_setup(window: &impl HasWindowHandle) {
+pub fn popup_window_setup(window: &impl HasWindowHandle, activate: bool) {
     let Ok(handle) = window.window_handle() else {
         return;
     };
@@ -316,8 +350,10 @@ pub fn popup_window_setup(window: &impl HasWindowHandle) {
             &corners as *const _ as *const std::ffi::c_void,
             size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
         );
-        // The core allowed it (AllowSetForegroundWindow) before starting this process.
-        let _ = SetForegroundWindow(hwnd);
+        if activate {
+            // The core allowed it (AllowSetForegroundWindow) before starting this process.
+            let _ = SetForegroundWindow(hwnd);
+        }
     }
 }
 

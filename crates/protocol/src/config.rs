@@ -514,6 +514,9 @@ pub struct TodoModule {
     pub label: String,
     /// Append ` (n)` with the number of pending items (nothing when 0).
     pub show_count: bool,
+    /// Resting the mouse on the module shows the list (it closes again when the mouse leaves,
+    /// unless it was clicked).
+    pub open_on_hover: bool,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -526,6 +529,7 @@ impl Default for TodoModule {
         Self {
             label: DEFAULT_TODO_LABEL.into(),
             show_count: true,
+            open_on_hover: true,
             extra: Extra::new(),
         }
     }
@@ -1313,7 +1317,8 @@ mod tests {
     fn bar_with_todo_and_unknown_module_round_trips() {
         let input = json!({ "id": "bar-1", "type": "bar", "anchor": "left", "x": "12px",
             "modules": [
-                { "type": "todo", "label": "Tasks", "show_count": false, "note": 1 },
+                { "type": "todo", "label": "Tasks", "show_count": false, "open_on_hover": false,
+                  "note": 1 },
                 { "type": "media", "width": "200px" }
             ] });
         let e: WidgetEntry = serde_json::from_value(input.clone()).unwrap();
@@ -1326,7 +1331,7 @@ mod tests {
         assert_eq!(b.font_weight, Lenient::Valid(FontWeight::Semibold));
         let t = b.todo_module().unwrap();
         assert_eq!(t.label, "Tasks");
-        assert!(!t.show_count);
+        assert!(!t.show_count && !t.open_on_hover);
         assert_eq!(t.extra["note"], json!(1));
         assert!(matches!(&b.modules[1], BarModuleEntry::Unknown(v) if *v == input["modules"][1]));
         let back = serde_json::to_value(&e).unwrap();
@@ -1344,7 +1349,7 @@ mod tests {
         };
         assert_eq!(b.todo_module(), Some(&TodoModule::default()));
         assert_eq!(b.todo_module().unwrap().label, "TO DO");
-        assert!(b.todo_module().unwrap().show_count);
+        assert!(b.todo_module().unwrap().show_count && b.todo_module().unwrap().open_on_hover);
         let c = Config::from_json(br#"{ "todo": { "enabled": true, "new_items": "sideways" } }"#)
             .unwrap();
         assert!(c.todo.enabled);

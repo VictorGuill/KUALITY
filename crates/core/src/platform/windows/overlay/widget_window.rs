@@ -20,7 +20,9 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
 use ::windows::core::{PCWSTR, w};
 
 use super::render::Surface;
-use super::thread::{WM_APP_CLICK, WM_APP_HOVER, WM_APP_MENU, WM_APP_REFRESH, host_hwnd};
+use super::thread::{
+    WM_APP_CLICK, WM_APP_HOVER, WM_APP_MENU, WM_APP_PRESS, WM_APP_REFRESH, host_hwnd,
+};
 use crate::overlay::layout::RectPx;
 use crate::overlay::widgets::bar::Span;
 
@@ -34,13 +36,16 @@ thread_local! {
     static DESTROYING: Cell<bool> = const { Cell::new(false) };
     /// The widget window whose `WM_MOUSELEAVE` is requested (0 = none).
     static TRACKING: Cell<isize> = const { Cell::new(0) };
-    /// The to-do popup was open when the left button went down. The press itself takes the
-    /// focus from the popup, which then closes on its own: the click must not open it again.
-    static POPUP_OPEN_AT_PRESS: Cell<bool> = const { Cell::new(false) };
+    /// State of the to-do popup when the left button went down (`CLICK_*` flags). The press
+    /// itself takes the focus from an open popup, which then closes on its own: the click must
+    /// not open it again.
+    static POPUP_AT_PRESS: Cell<isize> = const { Cell::new(0) };
 }
 
 /// Set in the `lparam` of `WM_APP_CLICK` when the to-do popup was open at the press.
 pub(crate) const CLICK_POPUP_WAS_OPEN: isize = 1 << 32;
+/// Set in the `lparam` of `WM_APP_CLICK` when the to-do popup was only shown on hover.
+pub(crate) const CLICK_POPUP_PEEKING: isize = 1 << 33;
 
 pub fn register_class() -> io::Result<()> {
     // SAFETY: standard class registration with static strings.
@@ -218,19 +223,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_LBUTTONDOWN => {
-            // A mutex lookup: never blocks.
-            POPUP_OPEN_AT_PRESS.set(kuality_settings::todo_popup_running());
+            // Mutex lookups: never block.
+            let mut state = 0;
+            if kuality_settings::todo_popup_running() {
+                state |= CLICK_POPUP_WAS_OPEN;
+                if kuality_settings::todo_popup_peeking() {
+                    state |= CLICK_POPUP_PEEKING;
+                }
+            }
+            POPUP_AT_PRESS.set(state);
+            post_host(WM_APP_PRESS, WPARAM(hwnd.0 as usize), LPARAM(0));
             LRESULT(0)
         }
         WM_LBUTTONUP => {
-            let open = if POPUP_OPEN_AT_PRESS.take() {
-                CLICK_POPUP_WAS_OPEN
-            } else {
-                0
-            };
+            let state = POPUP_AT_PRESS.take();
             // Client x in the low 32 bits (sign kept by the host's `as i32`).
             let x = client_x(lparam) & 0xFFFF_FFFF;
-            post_host(WM_APP_CLICK, WPARAM(hwnd.0 as usize), LPARAM(x | open));
+            post_host(WM_APP_CLICK, WPARAM(hwnd.0 as usize), LPARAM(x | state));
             LRESULT(0)
         }
         WM_MOUSEMOVE => {

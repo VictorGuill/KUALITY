@@ -83,10 +83,22 @@ pub fn run_todo(args: &[String]) -> ExitCode {
         },
         None => platform::find_core(),
     };
+    // Shown on hover: it closes when the mouse leaves, until it is clicked.
+    let peek = todo::hover_arg(args).map(|module| todo::Peek {
+        module,
+        guard: match platform::Instance::acquire_todo_peek() {
+            Ok(g) => g,
+            Err(e) => {
+                log::warn!("cannot mark the popup as shown on hover: {e}");
+                None
+            }
+        },
+    });
     todo::run(
         data_dir.todo_file(),
         data_dir.config_file(),
         todo::anchor_arg(args),
+        peek,
         core,
     );
     ExitCode::SUCCESS
@@ -110,6 +122,17 @@ pub(crate) fn open_todo_popup() {
 /// Whether the to-do popup runs (a mutex lookup: never blocks).
 pub fn todo_popup_running() -> bool {
     platform::todo_popup_running()
+}
+
+/// Whether the running to-do popup is only shown on hover (a mutex lookup: never blocks).
+pub fn todo_popup_peeking() -> bool {
+    platform::todo_popup_peeking()
+}
+
+/// Brings the to-do popup to the front (a click on the module while it is shown on hover keeps
+/// it open). Returns whether it was found.
+pub fn focus_todo_popup() -> bool {
+    platform::focus_todo_popup()
 }
 
 /// Closes the to-do popup if it runs (called by the core when the taskbar module is clicked).

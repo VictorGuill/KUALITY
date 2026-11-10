@@ -12,12 +12,17 @@ The taskbar part is the first module of a new **bar** widget: one widget with on
   - **Enable to-do** (off by default). Turning it on also makes sure an enabled bar shows the to-do module: it enables the first bar that has one, or adds `bar-<n>` at the bottom-left of the taskbar (anchor left, x 12 px, centered vertically).
   - **New items go to**: Top or Bottom.
   - **To-do list**: an "Open to-do list" button (opens the popup at the bottom-left of the primary screen).
-  - **Taskbar label** (default `TO DO`) and **Show the number of pending items**. Both edit the first to-do module.
+  - **Taskbar label** (default `TO DO`), **Show the number of pending items** and **Open when hovered** (on by default). They edit the first to-do module.
   - A warning with **Turn on** when taskbar widgets are off, and **Add to the taskbar** when no enabled bar shows the module.
 - **Taskbar**:
   - The module shows `TO DO (3)`: the label plus the number of items not done yet. The count is left out at 0, when it is turned off, and when `todos.json` is invalid.
-  - Hovering shows a rounded highlight (like taskbar buttons).
+  - Hovering shows a rounded highlight (like taskbar buttons). The whole pill takes the mouse, not only the letters.
   - A click opens the popup above it; clicking it again while the popup is open closes it.
+  - **Hover** (user request, 2026-11-10; `open_on_hover`): resting the mouse on the module for 250 ms shows the popup without a click, as a "peek":
+    - It does not take the focus from the window in use.
+    - It closes when the mouse has been away from both the module and the popup for 300 ms. Moving up into the list keeps it open.
+    - A click on the module or inside the popup keeps it: it takes the focus and then behaves as if opened by a click.
+    - It never opens a second popup, and it does not open again while the mouse stays on the module after a click closed it.
 - **Popup** (`kuality.exe --todo`, a separate process like Settings):
   - About 340 × 440 DIPs, borderless, rounded, topmost, no taskbar button.
   - Its left edge sits at the module's left edge and its bottom 8 DIPs above the taskbar, kept inside the work area.
@@ -37,7 +42,7 @@ The taskbar part is the first module of a new **bar** widget: one widget with on
     "origin": "left", "width": "auto", "height": "auto",
     "font_family": "Segoe UI Variable Text", "font_size": 12.0, "font_weight": "semibold",
     "color": null, "gap": 16.0,
-    "modules": [ { "type": "todo", "label": "TO DO", "show_count": true } ] } ] }
+    "modules": [ { "type": "todo", "label": "TO DO", "show_count": true, "open_on_hover": true } ] } ] }
 ```
 
 - `todo.new_items` is `Lenient` (`top` | `bottom`).
@@ -69,10 +74,16 @@ The taskbar part is the first module of a new **bar** widget: one widget with on
 - **Bar rendering** (`overlay/widgets/bar.rs`):
   - Each module is a "pill": text plus 8 DIP padding on each side, 6 DIP above and below.
   - Modules are laid out left to right `gap` apart. `spans()` gives the x-ranges for hit testing, stored per widget window.
-  - Hover fills the hovered pill with `Theme::hover_color` (`Renderer::fill_rounded_rect`).
+  - Hover fills the hovered pill with `Theme::hover_color` (`Renderer::fill_rounded_rect`). The other pills get `HIT_FILL` (alpha 1/255, invisible): a layered window lets the mouse through where it is fully transparent, which made only the letters hoverable.
 - **Clicks**:
   - Widget windows now handle `WM_LBUTTONDOWN/UP`, `WM_MOUSEMOVE` and `WM_MOUSELEAVE` (`TrackMouseEvent`). They only post to the host (`WM_APP_CLICK`, `WM_APP_HOVER`).
-  - The host maps the click to a module. For to-do it posts `WM_APP_TOGGLE_TODO` (anchor: module left, taskbar top, physical px) to the main window, which becomes `Event::ToggleTodo`.
+  - The host maps the click to a module. For to-do it hands a `TodoRequest` (module rectangle and taskbar top, physical px; trigger `Click`) to the main window (`WM_APP_TODO`), which becomes `Event::Todo`.
+- **Hover**:
+  - When the hovered module changes, the overlay thread (re)arms `TIMER_HOVER` (250 ms) if the module has a hover action. A press (`WM_APP_PRESS`), a click, or leaving cancels it.
+  - When it fires, the core gets `Event::Todo(TodoRequest { module, taskbar_top, trigger: Hover })` and starts `--todo … --at x,y --hover l,t,r,b` (module rectangle, physical px), unless a popup runs or one was started less than 500 ms ago.
+  - The popup opens with `focus: false` (`SW_SHOWNOACTIVATE`), holds the mutex `Local\Kuality.TodoPeek`, and polls the cursor every 100 ms. When the mouse is outside the module and popup rectangles for 300 ms, it quits. If the mouse already left while the process started, it never opens.
+  - On activation (any click into it) it releases the peek mutex and from then on closes on focus loss like a clicked popup.
+  - A click on the module while the peek mutex exists brings the popup to the front (`SetForegroundWindow` from the core, which received the click) instead of closing it.
 - **Toggle**:
   - Pressing on the taskbar takes the focus from the popup, which closes itself before the click arrives. So the widget window records at `WM_LBUTTONDOWN` whether the popup's mutex (`Local\Kuality.Todo`) exists, a lookup that never blocks.
   - If it existed, the click only closes the popup (posts `WM_CLOSE` to its window) and never opens another one.
@@ -112,6 +123,7 @@ The taskbar part is the first module of a new **bar** widget: one widget with on
   - [x] Widget click while open closes it (3/3). A click elsewhere closes it. Esc closes it.
   - [x] Settings → To do: off hides the bar, on shows it again; the Widgets tab shows "Bar: To do" with its editor.
   - [x] Invalid `todos.json`: `TO DO` without a count, the popup shows the error, the file is untouched.
+  - [x] Hover (2026-11-10): highlight between the letters too; the list opens ~220 ms after the mouse arrives, without taking the focus (3/3), and closes ~0.4 s after the mouse leaves (3/3); moving up into the list keeps it open; a click on the module or in the list keeps it open with the focus, and a click elsewhere / a second module click closes it; a plain click still opens and closes it, and it does not reopen while the mouse stays.
   - [ ] Explorer restart, second monitor, light taskbar (overlay rules unchanged; not re-tested).
 
 ## Assumptions

@@ -17,6 +17,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::io;
 use std::ops::ControlFlow;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -43,17 +44,17 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
 };
 use ::windows::core::{BOOL, PCWSTR, w};
 
-use crate::platform::{Event, TrayIcon, Waker};
+use crate::platform::{Event, TodoRequest, TrayIcon, Waker};
 
 const CLASS_NAME: PCWSTR = w!("Kuality.Core");
 const WM_APP_TRAY: u32 = WM_APP + 1;
 const WM_APP_WAKE: u32 = WM_APP + 2;
 /// Another thread asks for the Settings action (widget context menu).
 const WM_APP_OPEN_SETTINGS: u32 = WM_APP + 3;
-/// The overlay thread asks to open or close the to-do popup: `wparam` = anchor x in screen
-/// pixels, `lparam` = anchor y (low 32 bits) | `TODO_WAS_OPEN`.
-const WM_APP_TOGGLE_TODO: u32 = WM_APP + 4;
-const TODO_WAS_OPEN: isize = 1 << 32;
+/// A bar to-do module was clicked or hovered; the request is in `PENDING_TODO` (the latest one
+/// wins).
+const WM_APP_TODO: u32 = WM_APP + 4;
+static PENDING_TODO: Mutex<Option<TodoRequest>> = Mutex::new(None);
 const TRAY_ICON_ID: u32 = 1;
 /// App icon resource embedded by `build.rs` (also the exe's and the settings window's icon).
 const APP_ICON: u16 = 1;
@@ -464,12 +465,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             push(Event::OpenSettings);
             LRESULT(0)
         }
-        WM_APP_TOGGLE_TODO => {
-            push(Event::ToggleTodo {
-                x: wparam.0 as isize as i32,
-                y: lparam.0 as i32,
-                was_open: lparam.0 & TODO_WAS_OPEN != 0,
-            });
+        WM_APP_TODO => {
+            let request = PENDING_TODO
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            if let Some(r) = request {
+                push(Event::Todo(r));
+            }
             LRESULT(0)
         }
         WM_APP_WAKE => {
@@ -521,20 +524,19 @@ pub(crate) fn request_open_settings() {
     }
 }
 
-/// Asks the main loop to open the to-do popup anchored at (`x`, `y`) screen pixels, or to close
-/// it if it is open (bar to-do module clicked). `was_open`: it was open when the mouse button
-/// went down. Any thread.
-pub(crate) fn request_toggle_todo(x: i32, y: i32, was_open: bool) {
-    let flag = if was_open { TODO_WAS_OPEN } else { 0 };
+/// Hands a to-do module click / hover to the main loop (it opens, keeps or closes the popup).
+/// Any thread.
+pub(crate) fn request_todo(request: TodoRequest) {
+    *PENDING_TODO.lock().unwrap_or_else(|e| e.into_inner()) = Some(request);
     let hwnd = MAIN_HWND.load(Ordering::Relaxed);
     if hwnd != 0 {
         // SAFETY: PostMessageW is thread-safe.
         let _ = unsafe {
             PostMessageW(
                 Some(HWND(hwnd as *mut _)),
-                WM_APP_TOGGLE_TODO,
-                WPARAM(x as isize as usize),
-                LPARAM((y as isize & 0xFFFF_FFFF) | flag),
+                WM_APP_TODO,
+                WPARAM(0),
+                LPARAM(0),
             )
         };
     }

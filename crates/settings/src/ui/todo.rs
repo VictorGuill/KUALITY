@@ -123,7 +123,7 @@ impl SettingsWindow {
                 cx,
             ));
         if let (Some((m, _)), Some(label)) = (&module, label) {
-            let show_count = m.show_count;
+            let (show_count, open_on_hover) = (m.show_count, m.open_on_hover);
             main = main
                 .child(divider(cx))
                 .child(setting_row(
@@ -143,6 +143,22 @@ impl SettingsWindow {
                         .on_click(cx.listener(|this, on: &bool, _, cx| {
                             if let Some(m) = model::todo_module_mut(&mut this.doc.config.widgets) {
                                 m.show_count = *on;
+                                this.changed(cx);
+                            }
+                        })),
+                    cx,
+                ))
+                .child(divider(cx))
+                .child(setting_row(
+                    "Open when hovered",
+                    Some("Resting the mouse on it shows the list; it closes when the mouse leaves, unless you click it.".into()),
+                    Switch::new("todo-hover")
+                        .accessibility_label("Open when hovered")
+                        .checked(open_on_hover)
+                        .disabled(ro)
+                        .on_click(cx.listener(|this, on: &bool, _, cx| {
+                            if let Some(m) = model::todo_module_mut(&mut this.doc.config.widgets) {
+                                m.open_on_hover = *on;
                                 this.changed(cx);
                             }
                         })),

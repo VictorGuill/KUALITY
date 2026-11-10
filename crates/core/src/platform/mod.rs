@@ -13,6 +13,7 @@ use std::sync::Arc;
 use crate::actions::ActionWorker;
 use crate::hyperkey::KeyboardCommand;
 use crate::overlay::OverlayCommand;
+use crate::overlay::layout::RectPx;
 
 #[cfg(windows)]
 mod windows;
@@ -52,10 +53,8 @@ pub enum Event {
     Wake,
     /// Tray menu: Settings.
     OpenSettings,
-    /// Bar to-do module clicked: open the to-do popup above (`x`, `y`) screen pixels, or close
-    /// it if it is open. `was_open`: it was open when the mouse button went down (the press
-    /// itself may already have closed it, by taking its focus).
-    ToggleTodo { x: i32, y: i32, was_open: bool },
+    /// Bar to-do module clicked or hovered: open, keep or close the to-do popup.
+    Todo(TodoRequest),
     /// Tray menu: Pause (toggles keyboard features).
     TogglePause,
     /// Tray menu: Check for updates.
@@ -64,6 +63,26 @@ pub enum Event {
     InstallUpdate,
     /// Tray menu: Quit, or the OS asked the app to close.
     Quit,
+}
+
+/// A click on (or the mouse resting on) a bar's to-do module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TodoRequest {
+    /// The module on screen (physical px).
+    pub module: RectPx,
+    /// Top edge of its taskbar: the popup opens above it.
+    pub taskbar_top: i32,
+    pub trigger: TodoTrigger,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodoTrigger {
+    /// Left click. `was_open` / `was_peeking`: the popup was open / only shown on hover when
+    /// the button went down (the press itself may already have closed an open one, by taking
+    /// its focus).
+    Click { was_open: bool, was_peeking: bool },
+    /// The mouse rested on the module: show the list until the mouse leaves it.
+    Hover,
 }
 
 /// Wakes the main event loop from any thread.
