@@ -114,7 +114,7 @@ Done before Phase 4 and scoped to the settings that already exist (Phases 0–3)
 
 ## Phase 8 — To-do & taskbar bar ✅
 
-Done before Phase 4 (user request, 2026-11-09); see `docs/specs/todo.md`.
+Done before Phase 4 (user request, 2026-11-09); see `docs/specs/todo.md`. Released in `v1.0.0-beta.4`.
 
 - [x] Spec `docs/specs/todo.md`
 - [x] `todos.json` (items: text, done, created / done_at) and the `todo` config section

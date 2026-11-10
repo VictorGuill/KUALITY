@@ -2,12 +2,23 @@
 
 All notable changes to Kuality. Versions follow [Semantic Versioning](https://semver.org); each `## [x.y.z]` section becomes the notes of the GitHub Release tagged `vx.y.z` (keep one line per paragraph or bullet: release notes keep line breaks).
 
-## [Unreleased]
+## [1.0.0-beta.4] - 2026-11-10
 
 ### New
 
 - **To-do list** — Settings → **To do** → Enable puts a small `TO DO (3)` at the bottom-left of the taskbar. Rest the mouse on it to see your list (it closes again when you move away), or click it to open it: type and press Enter to add an item, check it off (it stays, struck through) or delete it with its trash button. Esc or a click elsewhere closes it. The list is stored on this PC only and survives restarts.
 - **Taskbar bar** — the to-do lives in a new kind of taskbar widget, a bar that holds several items at one position (now playing will join it). Move it and change its font in Settings → Widgets.
+
+### Upgrading
+
+Kuality 1.0.0-beta.2 or later shows a notification: click it (or tray → **Install update**). From 1.0.0-beta.1, install this version once by hand. The to-do list is off until you turn it on in Settings → **To do**.
+
+### Downloads
+
+- `Kuality-1.0.0-beta.4-setup.exe` — installer (per user, no admin rights needed).
+- `Kuality-1.0.0-beta.4-portable.zip` — unzip anywhere and run `kuality.exe`.
+
+The files are not code-signed yet: Windows SmartScreen may show "Windows protected your PC". Click **More info → Run anyway**. Checksums are in `SHA256SUMS.txt`.
 
 ## [1.0.0-beta.3] - 2026-11-09
 

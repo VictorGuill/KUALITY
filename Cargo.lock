@@ -3330,7 +3330,7 @@ dependencies = [
 
 [[package]]
 name = "kuality"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "embed-resource",
  "kuality-protocol",
@@ -3343,7 +3343,7 @@ dependencies = [
 
 [[package]]
 name = "kuality-protocol"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -3351,7 +3351,7 @@ dependencies = [
 
 [[package]]
 name = "kuality-settings"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "futures-channel",
  "gpui-kit",
@@ -3366,7 +3366,7 @@ dependencies = [
 
 [[package]]
 name = "kuality-update"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "log",
  "serde",
