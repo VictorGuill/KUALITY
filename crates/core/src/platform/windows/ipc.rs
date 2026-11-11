@@ -421,6 +421,12 @@ fn serve_clients(
                 if stopping(stop, RETRY_MS) {
                     return;
                 }
+                // Go on with a fresh instance (the old one is closed once it is replaced).
+                match create(false) {
+                    Some(fresh) => pipe = fresh,
+                    None => return,
+                }
+                continue;
             }
         }
         // Before this instance is closed, so the pipe name never disappears between two
