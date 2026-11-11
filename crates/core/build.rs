@@ -14,8 +14,8 @@ use std::env;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-/// Loaded on first use: DLLs imported only by GPUI and its dependencies (the settings window)
-/// or by the update check.
+/// Loaded on first use: DLLs imported only by GPUI and its dependencies (the settings window),
+/// by the update check or by the clipboard history.
 const DELAY_LOAD: &[&str] = &[
     "d3d11.dll",
     "dxgi.dll",
@@ -31,6 +31,8 @@ const DELAY_LOAD: &[&str] = &[
     // Only the update check uses these (`kuality-update`): WinHTTP and CNG for SHA-256.
     "winhttp.dll",
     "bcrypt.dll",
+    // Only the clipboard history uses it (DPAPI and `CryptProtectMemory`), while it is enabled.
+    "crypt32.dll",
 ];
 
 fn main() {
