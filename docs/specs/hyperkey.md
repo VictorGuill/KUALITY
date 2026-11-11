@@ -104,7 +104,7 @@ pub enum KeyboardCommand {
 - `active = config.enabled && !paused`. On every command recompute `active`:
   - becomes active → install hook (`SetWindowsHookExW(WH_KEYBOARD_LL, proc, GetModuleHandleW(None), 0)`), then if CapsLock is toggled on, inject `CAPSLOCK` down/up (tagged) to turn it off.
   - becomes inactive → `force_release` (inject result), `UnhookWindowsHookEx`.
-  - stays active → nothing (but `Apply` always reinstalls the hook: unhook + hook, after `force_release`; cheap, and recovers a hook Windows silently removed).
+  - stays active → nothing (but `Apply` always reinstalls the hook: unhook + hook, after `force_release`; it recovers a hook Windows silently removed). *(2026-11-11: `Apply` is only sent when the keyboard settings changed, see "Integration with main".)*
 - `Shutdown` → `force_release`, unhook, unregister notifications, `DestroyWindow`, `PostQuitMessage(0)`. Main joins the thread (1 s timeout).
 
 ### Hook callback (strict rules)
@@ -176,7 +176,7 @@ Explorer registers `Ctrl+Shift+Alt+Win` alone and with W/X/T/O/P/D/L/N/Y as Offi
 ### Integration with main (`app.rs` from skeleton.md)
 
 - `main.rs` creates `KeyboardController::start()` at startup (spawns the thread, returns a handle holding the `Sender` and `HWND`).
-- After the first config load, and in `app.rs` whenever a `WM_APP_CONFIG` reload delivers a new `Config`: `controller.apply(&config.hyperkey)` and Office key reconcile. (Apply on every reload; the thread reinstalling the hook is harmless.)
+- After the first config load, and in `app.rs` whenever a `WM_APP_CONFIG` reload delivers a new `Config`: `controller.apply(&config.hyperkey)` and Office key reconcile. (Apply on every reload; the thread reinstalling the hook is harmless.) *(2026-11-11: only when `hyperkey`, `shortcuts`, `clipboard.enabled` or `clipboard.hotkey` changed (`keyboard_config_changed`). The settings window saves 300 ms after every edit, and each `Apply` released a held Hyper and left a short gap without the hook; the hook watchdog covers a hook removed by Windows.)*
 - Tray Pause click: toggle `paused`, `controller.set_paused(paused)`, update check mark + tooltip.
 - Quit: `controller.shutdown()` (join), Office key Restore, then the rest of Phase 0 shutdown.
 
@@ -190,7 +190,7 @@ Explorer registers `Ctrl+Shift+Alt+Win` alone and with W/X/T/O/P/D/L/N/Y as Offi
 | CapsLock up missed (focus moved to an elevated window, hook dropped by Windows) | Self-heals on next CapsLock press/release (rule 3 then 4). Elevated targets also drop our `SendInput` (UIPI). Documented; fixed by "Run elevated" (Phase 6). |
 | CapsLock toggle got turned on (elevated window had focus, another tool) | Turned off on the next Hyper press, on activation, unlock and resume. |
 | Lock screen, Ctrl+Alt+Del, UAC, sleep | Forced release + reset (table above). |
-| Hook silently removed by Windows (`LowLevelHooksTimeout`) | Callback stays far below the timeout; hook is reinstalled on every `Apply`, unlock and resume, and by the hook watchdog on the next physical CapsLock press. |
+| Hook silently removed by Windows (`LowLevelHooksTimeout`) | Callback stays far below the timeout; hook is reinstalled on every `Apply` (a change of the keyboard settings), unlock and resume, and by the hook watchdog on the next physical CapsLock press. The keyboard thread never waits for the disk to log (lines are written by `kuality-log`). |
 | Explorer restart | No effect on the hook. |
 | Disable/pause while CapsLock held | `force_release` before unhooking. |
 | Another LL-hook app (AutoHotkey, RDP client, VM) installed after us | It sees keys first; whatever it swallows never reaches us. Documented. |

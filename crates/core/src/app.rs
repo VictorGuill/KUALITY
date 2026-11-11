@@ -348,8 +348,11 @@ impl<W: DirWatcher> App<W> {
         log::info!("config reloaded, changed: {}", changed.join(", "));
         warn_if_newer(&new);
         logging::set_level(new.general.log_level);
-        // On every reload: the keyboard thread reinstalls the hook, which is harmless.
-        self.apply_keyboard(&new);
+        // Only when it matters to the keyboard thread: an `Apply` releases held Hyper modifiers
+        // and reinstalls the hook, and the settings window saves on every edit.
+        if keyboard_config_changed(&self.config, &new) {
+            self.apply_keyboard(&new);
+        }
         if office_override_wanted(&new) != office_override_wanted(&self.config) {
             reconcile_office_key(office_override_wanted(&new));
         }
@@ -384,6 +387,15 @@ impl<W: DirWatcher> App<W> {
     }
 }
 
+/// Whether a reload changes what the keyboard thread works with: Hyperkey, the shortcuts, or
+/// the clipboard hotkey (compiled into the shortcut table while the history is enabled).
+fn keyboard_config_changed(old: &Config, new: &Config) -> bool {
+    old.hyperkey != new.hyperkey
+        || old.shortcuts != new.shortcuts
+        || old.clipboard.enabled != new.clipboard.enabled
+        || old.clipboard.hotkey != new.clipboard.hotkey
+}
+
 /// The Office key override is only needed when Hyper presses Ctrl+Shift+Alt+Win (the Office
 /// key combination); without Win, Hyper never produces it.
 fn office_override_wanted(config: &Config) -> bool {
@@ -413,5 +425,43 @@ pub fn warn_if_newer(config: &Config) {
              the file will not be written",
             config.version
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kuality_protocol::{Lenient, LogLevel};
+
+    #[test]
+    fn only_keyboard_settings_reach_the_keyboard_thread() {
+        let old = Config::default();
+        assert!(!keyboard_config_changed(&old, &old.clone()));
+
+        // Edits made all the time from the settings window: no hook reinstall.
+        let mut new = old.clone();
+        new.general.log_level = LogLevel::Debug;
+        new.widgets.enabled = true;
+        new.todo.enabled = true;
+        new.updates.check = !old.updates.check;
+        new.clipboard.images = !old.clipboard.images;
+        new.clipboard.max_entries = Lenient::Valid(500);
+        assert!(!keyboard_config_changed(&old, &new));
+
+        let mut new = old.clone();
+        new.hyperkey.enabled = true;
+        assert!(keyboard_config_changed(&old, &new));
+
+        let mut new = old.clone();
+        new.shortcuts.enabled = true;
+        assert!(keyboard_config_changed(&old, &new));
+
+        // The clipboard hotkey is part of the shortcut table.
+        let mut new = old.clone();
+        new.clipboard.enabled = true;
+        assert!(keyboard_config_changed(&old, &new));
+        let mut new = old.clone();
+        new.clipboard.hotkey = Lenient::Valid("win+v".into());
+        assert!(keyboard_config_changed(&old, &new));
     }
 }
