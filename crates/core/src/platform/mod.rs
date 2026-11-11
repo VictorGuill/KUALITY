@@ -19,10 +19,12 @@ use crate::overlay::layout::RectPx;
 mod windows;
 #[cfg(windows)]
 pub use self::windows::{
-    Foreground, Instance, Keyboard, Overlay, Tray, Watcher, action_thread_init, action_thread_run,
-    action_thread_stop, action_thread_wake, dpi_awareness, foreground_window, init_main_thread,
-    install_crash_guard, launch, local_time_now, office_key, open_url, open_with_default_app,
-    roaming_app_data_dir, set_tray_paused, set_tray_update, show_notification, spawn_detached,
+    ClipboardMonitor, Foreground, Instance, IpcServer, Keyboard, MemoryCipher, Overlay, Putter,
+    Reply, Tray, Watcher, action_thread_init, action_thread_run, action_thread_stop,
+    action_thread_wake, dpi_awareness, foreground_window, init_main_thread, install_crash_guard,
+    launch, local_time_now, office_key, open_url, open_with_default_app, protect,
+    roaming_app_data_dir, set_paste_target, set_tray_paused, set_tray_update, show_notification,
+    spawn_detached, unprotect,
 };
 
 #[cfg(not(windows))]
@@ -55,6 +57,8 @@ pub enum Event {
     OpenSettings,
     /// Bar to-do module clicked or hovered: open, keep or close the to-do popup.
     Todo(TodoRequest),
+    /// The clipboard history hotkey: open the popup, or close it if it is open.
+    Clipboard,
     /// Tray menu: Pause (toggles keyboard features).
     TogglePause,
     /// Tray menu: Check for updates.

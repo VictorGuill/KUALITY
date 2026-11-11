@@ -55,6 +55,8 @@ const WM_APP_OPEN_SETTINGS: u32 = WM_APP + 3;
 /// wins).
 const WM_APP_TODO: u32 = WM_APP + 4;
 static PENDING_TODO: Mutex<Option<TodoRequest>> = Mutex::new(None);
+/// The clipboard history hotkey fired (keyboard thread).
+const WM_APP_CLIPBOARD: u32 = WM_APP + 5;
 const TRAY_ICON_ID: u32 = 1;
 /// App icon resource embedded by `build.rs` (also the exe's and the settings window's icon).
 const APP_ICON: u16 = 1;
@@ -475,6 +477,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
+        WM_APP_CLIPBOARD => {
+            push(Event::Clipboard);
+            LRESULT(0)
+        }
         WM_APP_WAKE => {
             push(Event::Wake);
             LRESULT(0)
@@ -535,6 +541,22 @@ pub(crate) fn request_todo(request: TodoRequest) {
             PostMessageW(
                 Some(HWND(hwnd as *mut _)),
                 WM_APP_TODO,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        };
+    }
+}
+
+/// Asks the main loop to open or close the clipboard history popup. Any thread.
+pub(crate) fn request_clipboard() {
+    let hwnd = MAIN_HWND.load(Ordering::Relaxed);
+    if hwnd != 0 {
+        // SAFETY: PostMessageW is thread-safe.
+        let _ = unsafe {
+            PostMessageW(
+                Some(HWND(hwnd as *mut _)),
+                WM_APP_CLIPBOARD,
                 WPARAM(0),
                 LPARAM(0),
             )

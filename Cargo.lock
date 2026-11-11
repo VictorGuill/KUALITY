@@ -3337,6 +3337,7 @@ dependencies = [
  "kuality-settings",
  "kuality-update",
  "log",
+ "png 0.18.1",
  "serde_json",
  "windows 0.62.2",
 ]

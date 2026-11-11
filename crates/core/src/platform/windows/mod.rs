@@ -1,6 +1,7 @@
 //! Windows implementation of the platform layer.
 
 mod actions;
+mod clipboard;
 mod crash;
 mod dpi;
 mod focus;
@@ -8,6 +9,7 @@ mod folders;
 mod hook_watchdog;
 mod input;
 mod instance;
+mod ipc;
 mod keyboard;
 pub mod office_key;
 mod overlay;
@@ -17,11 +19,13 @@ mod tray;
 mod watcher;
 
 pub use actions::{action_thread_init, action_thread_run, action_thread_stop, action_thread_wake};
+pub use clipboard::{ClipboardMonitor, MemoryCipher, Putter, protect, set_paste_target, unprotect};
 pub use crash::install_crash_guard;
 pub use dpi::dpi_awareness;
 pub use focus::{Foreground, foreground_window};
 pub use folders::roaming_app_data_dir;
 pub use instance::Instance;
+pub use ipc::{IpcServer, Reply};
 pub use keyboard::Keyboard;
 pub use overlay::Overlay;
 pub use shell::{launch, open_url, open_with_default_app, spawn_detached};

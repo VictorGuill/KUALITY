@@ -5,13 +5,15 @@
 //! (`docs/specs/skeleton.md`). Phase 1: Hyperkey (`docs/specs/hyperkey.md`). Phase 2: Shortcuts
 //! (`docs/specs/shortcuts.md`). Phase 3: taskbar overlay and text widget (`docs/specs/overlay.md`).
 //! Updates: `docs/specs/updates.md`. To-do and the taskbar bar: `docs/specs/todo.md` (the
-//! popup is a third mode of this exe, `--todo`).
+//! popup is a third mode of this exe, `--todo`). Clipboard history: `docs/specs/clipboard.md`
+//! (popup `--clipboard`).
 
 // No console window in release builds (every mode); debug builds keep it for log output.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actions;
 mod app;
+mod clipboard;
 mod config_store;
 mod hyperkey;
 mod logging;
@@ -42,6 +44,7 @@ const RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
 /// First arguments that run something else than the core (`docs/specs/distribution.md`).
 const SETTINGS_ARG: &str = "--settings";
 const TODO_ARG: &str = "--todo";
+const CLIPBOARD_ARG: &str = "--clipboard";
 const STARTUP_ARG: &str = "--startup";
 const STARTUP_TASK_ARG: &str = "--startup-task";
 
@@ -52,6 +55,8 @@ fn main() -> ExitCode {
         Some(SETTINGS_ARG) => kuality_settings::run(&args[1..]),
         // The to-do popup: same reason (GPUI), only alive while it is open.
         Some(TODO_ARG) => kuality_settings::run_todo(&args[1..]),
+        // The clipboard history popup (GPUI too).
+        Some(CLIPBOARD_ARG) => kuality_settings::run_clipboard(&args[1..]),
         // Start at logon: `--startup <off|on|normal|elevated>` (installer, scripts) and the
         // elevated helper it starts through UAC.
         Some(STARTUP_ARG) => kuality_settings::startup::cli(&args[1..]),
@@ -230,6 +235,7 @@ fn run_core(args: &[String]) -> ExitCode {
     let mut app = App::new(
         loaded.config,
         config_path,
+        data_dir.clipboard_pins_file(),
         rx,
         todo_rx,
         watcher,

@@ -2,16 +2,21 @@
 //! `docs/specs/shortcuts.md`.
 //!
 //! [`compile`] turns the `shortcuts` config section into a lookup table for the keyboard thread
-//! (validated, ready to run). It runs on the main thread on every config load.
+//! (validated, ready to run). It runs on the main thread on every config load. The clipboard
+//! history hotkey (`clipboard.hotkey`, `docs/specs/clipboard.md`) is compiled into the same
+//! table as a built-in first entry.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use kuality_protocol::{
-    Action, BindingEntry, Chord, Key, LaunchAction, LaunchArgs, Mods, OpenUrlAction,
+    Action, BindingEntry, Chord, Clipboard, Key, LaunchAction, LaunchArgs, Mods, OpenUrlAction,
     SendHotkeyAction, Shortcuts, Trigger, TriggerError, parse_chord, parse_trigger, valid_url,
 };
 
 use kuality_protocol::quote;
+
+/// `source` of built-in entries (not from `shortcuts.bindings`).
+pub const BUILTIN_SOURCE: usize = usize::MAX;
 
 /// Source of [`CompiledBindings::generation`].
 static GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -31,7 +36,7 @@ pub struct CompiledBinding {
     pub trigger: Trigger,
     /// The hotkey also reaches the app in front.
     pub pass_through: bool,
-    /// Position in `shortcuts.bindings` (for logs).
+    /// Position in `shortcuts.bindings` (for logs); [`BUILTIN_SOURCE`] for the clipboard hotkey.
     pub source: usize,
     pub action: CompiledAction,
 }
@@ -47,6 +52,8 @@ pub enum CompiledAction {
     },
     SendHotkey(Chord),
     OpenUrl(String),
+    /// Built-in: open (or close) the clipboard history popup.
+    OpenClipboard,
 }
 
 impl CompiledAction {
@@ -56,6 +63,7 @@ impl CompiledAction {
             Self::Launch { .. } => "launch",
             Self::SendHotkey(_) => "send_hotkey",
             Self::OpenUrl(_) => "open_url",
+            Self::OpenClipboard => "open_clipboard",
         }
     }
 }
@@ -140,26 +148,55 @@ impl std::fmt::Display for SkipReason {
     }
 }
 
-/// Compiles the config section, logging a warning for every skipped binding.
-pub fn compile(shortcuts: &Shortcuts) -> CompiledBindings {
+/// Compiles the config sections, logging a warning for every skipped binding.
+pub fn compile(shortcuts: &Shortcuts, clipboard: &Clipboard) -> CompiledBindings {
     let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
-    let (compiled, skipped) = build(shortcuts, generation);
+    let (compiled, skipped) = build(shortcuts, clipboard, generation);
     for (index, reason) in skipped {
-        log::warn!("shortcut binding #{index} skipped: {reason}");
+        if index == BUILTIN_SOURCE {
+            log::warn!("clipboard hotkey skipped: {reason}");
+        } else {
+            log::warn!("shortcut binding #{index} skipped: {reason}");
+        }
     }
     if shortcuts.enabled {
-        log::info!("shortcuts: {} binding(s) active", compiled.entries.len());
+        let user = compiled
+            .entries
+            .iter()
+            .filter(|b| b.source != BUILTIN_SOURCE)
+            .count();
+        log::info!("shortcuts: {user} binding(s) active");
     }
     compiled
 }
 
-/// Pure part of [`compile`]: the table plus `(binding index, reason)` for each skipped entry.
-fn build(shortcuts: &Shortcuts, generation: u64) -> (CompiledBindings, Vec<(usize, SkipReason)>) {
+/// Pure part of [`compile`]: the table plus `(binding index, reason)` for each skipped entry
+/// ([`BUILTIN_SOURCE`] for the clipboard hotkey).
+fn build(
+    shortcuts: &Shortcuts,
+    clipboard: &Clipboard,
+    generation: u64,
+) -> (CompiledBindings, Vec<(usize, SkipReason)>) {
     let mut out = CompiledBindings {
         generation,
         entries: Vec::new(),
     };
     let mut skipped = Vec::new();
+    // First, so it wins over a shortcut with the same hotkey; independent of `shortcuts.enabled`.
+    if clipboard.enabled {
+        match clipboard.hotkey_text() {
+            None => skipped.push((BUILTIN_SOURCE, SkipReason::InvalidEntry)),
+            Some(key) => match compile_trigger(key) {
+                Ok(trigger) => out.entries.push(CompiledBinding {
+                    trigger,
+                    pass_through: false,
+                    source: BUILTIN_SOURCE,
+                    action: CompiledAction::OpenClipboard,
+                }),
+                Err(reason) => skipped.push((BUILTIN_SOURCE, reason)),
+            },
+        }
+    }
     if !shortcuts.enabled {
         return (out, skipped);
     }
@@ -196,13 +233,17 @@ fn build(shortcuts: &Shortcuts, generation: u64) -> (CompiledBindings, Vec<(usiz
     (out, skipped)
 }
 
-fn compile_one(key: &str, action: &Action) -> Result<(Trigger, CompiledAction), SkipReason> {
-    let trigger = parse_trigger(key).map_err(|e| match e {
+fn compile_trigger(key: &str) -> Result<Trigger, SkipReason> {
+    parse_trigger(key).map_err(|e| match e {
         TriggerError::CapsLock => SkipReason::CapsLockTrigger,
         TriggerError::ModifierKey => SkipReason::ModifierTrigger,
         TriggerError::Reserved => SkipReason::ReservedTrigger,
         e => SkipReason::BadTrigger(e),
-    })?;
+    })
+}
+
+fn compile_one(key: &str, action: &Action) -> Result<(Trigger, CompiledAction), SkipReason> {
+    let trigger = compile_trigger(key)?;
     let action = match action {
         Action::Launch(LaunchAction {
             path, args, cwd, ..
@@ -262,7 +303,7 @@ mod tests {
                 { "key": "G", "action": url("https://github.com") }
             ]),
         );
-        let (c, skipped) = build(&s, 7);
+        let (c, skipped) = build(&s, &Clipboard::default(), 7);
         assert!(skipped.is_empty(), "{skipped:?}");
         assert_eq!(c.generation, 7);
         assert_eq!(c.entries.len(), 3);
@@ -297,7 +338,7 @@ mod tests {
             false,
             json!([{ "key": "1", "action": url("https://a.b") }, "junk"]),
         );
-        let (c, skipped) = build(&s, 1);
+        let (c, skipped) = build(&s, &Clipboard::default(), 1);
         assert!(c.entries.is_empty());
         assert!(skipped.is_empty());
     }
@@ -314,7 +355,7 @@ mod tests {
                 { "key": "hyper+a", "action": url("https://fourth") }
             ]),
         );
-        let (c, skipped) = build(&s, 1);
+        let (c, skipped) = build(&s, &Clipboard::default(), 1);
         assert_eq!(c.entries.len(), 1);
         assert_eq!(c.entries[0].source, 1);
         assert_eq!(
@@ -346,7 +387,7 @@ mod tests {
                 { "key": "hyper+ctrl+k", "action": url("https://x") }
             ]),
         );
-        let (c, skipped) = build(&s, 1);
+        let (c, skipped) = build(&s, &Clipboard::default(), 1);
         assert_eq!(
             skipped,
             vec![
@@ -385,7 +426,7 @@ mod tests {
                 { "key": "9", "action": url(&format!("https://{}", "x".repeat(2040))) }
             ]),
         );
-        let (c, skipped) = build(&s, 1);
+        let (c, skipped) = build(&s, &Clipboard::default(), 1);
         assert_eq!(
             skipped,
             vec![
@@ -423,7 +464,7 @@ mod tests {
                                           "args": "--raw \"a b\"", "cwd": "%TEMP%" } }
             ]),
         );
-        let (c, _) = build(&s, 1);
+        let (c, _) = build(&s, &Clipboard::default(), 1);
         assert_eq!(
             c.entries[0].action,
             CompiledAction::Launch {
@@ -445,9 +486,54 @@ mod tests {
     #[test]
     fn generation_increases_on_every_compile() {
         let s = Shortcuts::default();
-        let a = compile(&s).generation;
-        let b = compile(&s).generation;
+        let a = compile(&s, &Clipboard::default()).generation;
+        let b = compile(&s, &Clipboard::default()).generation;
         assert!(b > a);
+    }
+
+    fn clipboard(enabled: bool, hotkey: serde_json::Value) -> Clipboard {
+        serde_json::from_value(json!({ "enabled": enabled, "hotkey": hotkey })).unwrap()
+    }
+
+    #[test]
+    fn clipboard_hotkey_is_a_first_builtin_entry() {
+        let s = shortcuts(
+            true,
+            json!([
+                { "key": "hyper+v", "action": url("https://loses") },
+                { "key": "1", "action": url("https://one") }
+            ]),
+        );
+        let (c, skipped) = build(&s, &clipboard(true, json!("hyper+v")), 1);
+        assert_eq!(skipped, vec![(0, SkipReason::Duplicate)]);
+        assert_eq!(c.entries.len(), 2);
+        assert_eq!(c.entries[0].source, BUILTIN_SOURCE);
+        assert_eq!(c.entries[0].action, CompiledAction::OpenClipboard);
+        assert_eq!(c.find_hyper(Key(0x56)), Some(0));
+        // Works with shortcuts off; Win+V is a normal hotkey.
+        let off = shortcuts(false, json!([]));
+        let (c, skipped) = build(&off, &clipboard(true, json!("win+v")), 1);
+        assert!(skipped.is_empty());
+        assert_eq!(c.find_normal(Mods::WIN, Key(0x56)), Some(0));
+        assert!(c.has_normal() && !c.has_hyper());
+        // Disabled feature: nothing.
+        let (c, _) = build(&off, &clipboard(false, json!("win+v")), 1);
+        assert!(c.entries.is_empty());
+    }
+
+    #[test]
+    fn bad_clipboard_hotkeys_are_skipped() {
+        let off = shortcuts(false, json!([]));
+        for (hotkey, reason) in [
+            (json!(3), SkipReason::InvalidEntry),
+            (json!(""), SkipReason::InvalidEntry),
+            (json!("win+l"), SkipReason::ReservedTrigger),
+            (json!("capslock"), SkipReason::CapsLockTrigger),
+        ] {
+            let (c, skipped) = build(&off, &clipboard(true, hotkey), 1);
+            assert!(c.entries.is_empty());
+            assert_eq!(skipped, vec![(BUILTIN_SOURCE, reason)]);
+        }
     }
 
     #[test]
@@ -456,7 +542,7 @@ mod tests {
             true,
             json!([{ "key": "secret-key-name", "action": url("https://a.b") }]),
         );
-        let (_, skipped) = build(&s, 1);
+        let (_, skipped) = build(&s, &Clipboard::default(), 1);
         assert!(!skipped[0].1.to_string().contains("secret"));
     }
 }

@@ -155,8 +155,8 @@ fn run(job: &Job, before: platform::Foreground) {
                 log::error!("shortcut #{i}: open_url of {url} failed: {e}");
             }
         }
-        CompiledAction::SendHotkey(_) => {
-            log::error!("shortcut #{i}: send_hotkey must run on the keyboard thread");
+        CompiledAction::SendHotkey(_) | CompiledAction::OpenClipboard => {
+            log::error!("shortcut #{i}: this action must run on the keyboard thread");
         }
     }
 }

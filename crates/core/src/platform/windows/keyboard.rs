@@ -68,6 +68,8 @@ const TRACE_PANIC: usize = 3;
 /// Posted by the hook callback when a shortcut fires: `wparam` is the binding index in the
 /// table, `lparam` the table generation.
 const WM_APP_ACTION: u32 = WM_APP + 3;
+/// Clipboard history: send Ctrl+V (the paste target is already in front).
+const WM_APP_PASTE: u32 = WM_APP + 4;
 
 /// The keyboard thread's window, for the hook callback (read with one atomic load).
 static KEYBOARD_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -431,23 +433,22 @@ impl Ctx {
         let Some(binding) = self.bindings.entries.get(index) else {
             return;
         };
-        log::info!(
-            "shortcut #{} fired ({})",
-            binding.source,
-            binding.action.type_name()
-        );
+        if binding.action == CompiledAction::OpenClipboard {
+            log::info!("clipboard hotkey fired");
+        } else {
+            log::info!(
+                "shortcut #{} fired ({})",
+                binding.source,
+                binding.action.type_name()
+            );
+        }
         match &binding.action {
             CompiledAction::SendHotkey(chord) => {
-                let buf = ENGINE.with_borrow_mut(|e| e.hotkey(chord));
-                let mods_down = ENGINE.with_borrow(Engine::modifiers_down);
-                let ok = input::send(&buf);
-                if ok || mods_down {
-                    input::set_modifiers_down(mods_down);
-                }
-                if !ok {
+                if !send_chord(chord) {
                     log::warn!("shortcut #{}: send_hotkey was not injected", binding.source);
                 }
             }
+            CompiledAction::OpenClipboard => super::tray::request_clipboard(),
             action => self.actions.submit(Job {
                 source: binding.source,
                 action: action.clone(),
@@ -482,6 +483,23 @@ impl Ctx {
         }
         log::debug!("{why}: state reset");
     }
+}
+
+/// Injects `chord` (releasing and re-pressing held or injected modifiers around it, like a
+/// `send_hotkey` shortcut). Returns whether it was injected.
+fn send_chord(chord: &kuality_protocol::Chord) -> bool {
+    let buf = ENGINE.with_borrow_mut(|e| e.hotkey(chord));
+    let mods_down = ENGINE.with_borrow(Engine::modifiers_down);
+    let ok = input::send(&buf);
+    if ok || mods_down {
+        input::set_modifiers_down(mods_down);
+    }
+    ok
+}
+
+/// Asks the keyboard thread to send Ctrl+V (clipboard history paste). Any thread.
+pub(crate) fn request_paste() {
+    post(WM_APP_PASTE, 0, 0);
 }
 
 /// Forces Hyper up and injects the release. Returns `false` if the injection failed.
@@ -580,6 +598,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_APP_ACTION => {
             with_ctx(|c| c.run_shortcut(wparam.0, lparam.0 as u64));
+            LRESULT(0)
+        }
+        WM_APP_PASTE => {
+            match kuality_protocol::parse_chord("ctrl+v") {
+                Ok(chord) if send_chord(&chord) => log::debug!("clipboard: pasted"),
+                _ => log::warn!("clipboard: Ctrl+V was not injected"),
+            }
             LRESULT(0)
         }
         WM_APP_TRACE => {

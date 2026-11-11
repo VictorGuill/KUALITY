@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use kuality_protocol::{CONFIG_VERSION, Config};
 
 use crate::actions::ActionWorker;
+use crate::clipboard::ClipboardService;
 use crate::config_store::changed_sections;
 use crate::hyperkey::KeyboardController;
 use crate::overlay::OverlayController;
@@ -32,12 +33,20 @@ const AT_ARG: &str = "--at";
 const HOVER_ARG: &str = "--hover";
 /// A hover does not start a second popup this soon after starting one.
 const TODO_START_GUARD: Duration = Duration::from_millis(500);
+/// Arguments that open the clipboard history popup; `--paste` tells it Enter pastes into the
+/// window that was in front (opened by the hotkey).
+const CLIPBOARD_ARG: &str = "--clipboard";
+const PASTE_ARG: &str = "--paste";
+/// The hotkey does not start a second clipboard popup this soon after starting one.
+const CLIPBOARD_START_GUARD: Duration = Duration::from_millis(500);
 
 /// State owned by the main thread.
 #[derive(Debug)]
 pub struct App<W: DirWatcher> {
     config: Config,
     config_path: PathBuf,
+    /// `clipboard-pins.bin`.
+    pins_path: PathBuf,
     reloads: Receiver<Box<Config>>,
     /// Pending to-do count whenever `todos.json` changes (watcher thread).
     todo_counts: Receiver<Option<usize>>,
@@ -50,6 +59,10 @@ pub struct App<W: DirWatcher> {
     live: LiveData,
     /// When the to-do popup was last started (it takes a moment to claim its mutex).
     todo_started: Option<Instant>,
+    /// Clipboard history, while `clipboard.enabled`.
+    clipboard: Option<ClipboardService>,
+    /// When the clipboard popup was last started.
+    clipboard_started: Option<Instant>,
     /// Tray "Pause" (runtime only, keyboard features only).
     paused: bool,
 }
@@ -60,6 +73,7 @@ impl<W: DirWatcher> App<W> {
     pub fn new(
         config: Config,
         config_path: PathBuf,
+        pins_path: PathBuf,
         reloads: Receiver<Box<Config>>,
         todo_counts: Receiver<Option<usize>>,
         watcher: Option<W>,
@@ -71,6 +85,7 @@ impl<W: DirWatcher> App<W> {
         let mut app = Self {
             config,
             config_path,
+            pins_path,
             reloads,
             todo_counts,
             watcher,
@@ -80,8 +95,11 @@ impl<W: DirWatcher> App<W> {
             updates,
             live: LiveData::default(),
             todo_started: None,
+            clipboard: None,
+            clipboard_started: None,
             paused: false,
         };
+        app.apply_clipboard(None);
         app.apply_keyboard(&app.config);
         app.update_live();
         if let Some(o) = &app.overlay {
@@ -172,6 +190,58 @@ impl<W: DirWatcher> App<W> {
         }
     }
 
+    /// Starts, updates or stops the clipboard history to match the config (`old`: the section
+    /// before a reload, `None` at start).
+    fn apply_clipboard(&mut self, old: Option<&kuality_protocol::Clipboard>) {
+        let new = &self.config.clipboard;
+        match (&mut self.clipboard, new.enabled) {
+            (None, true) => match ClipboardService::start(new, self.pins_path.clone()) {
+                Ok(s) => self.clipboard = Some(s),
+                Err(e) => log::error!("cannot start the clipboard history: {e}"),
+            },
+            (Some(_), false) => {
+                if let Some(mut s) = self.clipboard.take() {
+                    s.shutdown();
+                }
+                kuality_settings::close_clipboard_popup();
+                log::info!("clipboard history off; history cleared");
+            }
+            (Some(s), true) if old != Some(new) => s.apply(new),
+            _ => {}
+        }
+    }
+
+    /// The clipboard hotkey: close the popup if it is open, else open it (Enter pastes into the
+    /// window in front now).
+    fn on_clipboard(&mut self) {
+        if self.clipboard.is_none() {
+            return;
+        }
+        if kuality_settings::close_clipboard_popup()
+            || self
+                .clipboard_started
+                .is_some_and(|t| t.elapsed() < CLIPBOARD_START_GUARD)
+        {
+            log::debug!("clipboard popup closed");
+            return;
+        }
+        platform::set_paste_target(platform::foreground_window());
+        let args = [
+            CLIPBOARD_ARG.into(),
+            CORE_PID_ARG.into(),
+            std::process::id().to_string(),
+            PASTE_ARG.into(),
+        ];
+        let started = std::env::current_exe().and_then(|exe| platform::spawn_detached(&exe, &args));
+        match started {
+            Ok(()) => {
+                self.clipboard_started = Some(Instant::now());
+                log::debug!("started the clipboard popup");
+            }
+            Err(e) => log::error!("could not start the clipboard popup: {e}"),
+        }
+    }
+
     /// Takes the latest to-do count from the watcher and sends it to the overlay if it changed.
     fn update_live(&mut self) {
         let mut live = self.live;
@@ -205,6 +275,10 @@ impl<W: DirWatcher> App<W> {
             }
             Event::Todo(r) => {
                 self.on_todo(r);
+                ControlFlow::Continue(())
+            }
+            Event::Clipboard => {
+                self.on_clipboard();
                 ControlFlow::Continue(())
             }
             Event::TogglePause => {
@@ -241,6 +315,9 @@ impl<W: DirWatcher> App<W> {
                 }
                 if let Some(mut k) = self.keyboard.take() {
                     k.shutdown();
+                }
+                if let Some(mut c) = self.clipboard.take() {
+                    c.shutdown();
                 }
                 // After the keyboard thread: no new actions can arrive.
                 self.actions.shutdown(ACTIONS_SHUTDOWN_TIMEOUT);
@@ -285,7 +362,8 @@ impl<W: DirWatcher> App<W> {
         {
             u.set_enabled(new.updates.check);
         }
-        self.config = new;
+        let old = std::mem::replace(&mut self.config, new);
+        self.apply_clipboard(Some(&old.clipboard));
     }
 }
 
@@ -295,7 +373,7 @@ impl<W: DirWatcher> App<W> {
         let Some(k) = &self.keyboard else {
             return;
         };
-        let compiled = shortcuts::compile(&config.shortcuts);
+        let compiled = shortcuts::compile(&config.shortcuts, &config.clipboard);
         if compiled.has_hyper() && !config.hyperkey.enabled {
             log::warn!("Hyper shortcuts need Hyperkey (hyperkey.enabled) to work");
         }

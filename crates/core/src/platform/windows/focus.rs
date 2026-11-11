@@ -31,7 +31,7 @@ const TICK_MS: u32 = 50;
 
 /// The window in front when a shortcut fired (compared by value only, never dereferenced).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Foreground(isize);
+pub struct Foreground(pub(super) isize);
 
 /// The current foreground window. Callable from any thread.
 pub fn foreground_window() -> Foreground {
