@@ -13,12 +13,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use kuality_protocol::clipboard::{
     EntryKind, PinRecord, Request, Response, THUMB_PX, decode_pins, encode_pins,
 };
-use kuality_protocol::{Clipboard, store};
+use kuality_protocol::{Clipboard, store, unix_now};
 
 use crate::platform::{self, ClipboardMonitor, IpcServer, MemoryCipher, Putter, Reply};
 use history::{Added, Content, History, Skip};
@@ -28,12 +28,6 @@ use sealed::Plain;
 const STOP_TIMEOUT: Duration = Duration::from_secs(1);
 
 type SharedHistory = Arc<Mutex<History<MemoryCipher>>>;
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
 
 fn lock(h: &SharedHistory) -> MutexGuard<'_, History<MemoryCipher>> {
     h.lock().unwrap_or_else(|e| e.into_inner())
@@ -74,7 +68,7 @@ impl ClipboardService {
                     Content::Text(_) => "text",
                     Content::Image { .. } => "image",
                 };
-                match lock(&history).add(content, now()) {
+                match lock(&history).add(content, unix_now()) {
                     Added::New(id) => log::debug!("clipboard: recorded {kind} #{id}"),
                     Added::Moved(id) => log::debug!("clipboard: {kind} #{id} copied again"),
                     Added::Skipped(Skip::Empty) => {}
@@ -175,7 +169,7 @@ fn handle(history: &SharedHistory, putter: &Putter, pins_path: &Path, request: R
             if !putter.put(info.kind, data) {
                 return reply(Response::error("Could not put the entry on the clipboard."));
             }
-            lock(history).touch(id, now());
+            lock(history).touch(id, unix_now());
             log::info!("clipboard: entry #{id} put on the clipboard");
             Reply {
                 response: Response::ok(),

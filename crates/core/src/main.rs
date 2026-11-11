@@ -32,6 +32,7 @@ use actions::ActionWorker;
 use app::App;
 use config_store::{LoadStatus, ReloadOutcome, Reloader};
 use hyperkey::KeyboardController;
+use kuality_protocol::cli;
 use kuality_protocol::paths::{DataDir, DataDirSource};
 use overlay::OverlayController;
 use platform::{DirWatcher, SingleInstance, TrayIcon, Waker};
@@ -41,26 +42,20 @@ const INSTANCE_MUTEX: &str = r"Local\Kuality.Core";
 /// Changes to the config dir are grouped until it has been quiet for this long.
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
 
-/// First arguments that run something else than the core (`docs/specs/distribution.md`).
-const SETTINGS_ARG: &str = "--settings";
-const TODO_ARG: &str = "--todo";
-const CLIPBOARD_ARG: &str = "--clipboard";
-const STARTUP_ARG: &str = "--startup";
-const STARTUP_TASK_ARG: &str = "--startup-task";
-
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // The first argument selects what this process is (`docs/specs/distribution.md`).
     match args.first().map(String::as_str) {
         // Own process: the core never loads GPUI, and the window's memory is freed when it closes.
-        Some(SETTINGS_ARG) => kuality_settings::run(&args[1..]),
+        Some(cli::SETTINGS) => kuality_settings::run(&args[1..]),
         // The to-do popup: same reason (GPUI), only alive while it is open.
-        Some(TODO_ARG) => kuality_settings::run_todo(&args[1..]),
+        Some(cli::TODO) => kuality_settings::run_todo(&args[1..]),
         // The clipboard history popup (GPUI too).
-        Some(CLIPBOARD_ARG) => kuality_settings::run_clipboard(&args[1..]),
+        Some(cli::CLIPBOARD) => kuality_settings::run_clipboard(&args[1..]),
         // Start at logon: `--startup <off|on|normal|elevated>` (installer, scripts) and the
         // elevated helper it starts through UAC.
-        Some(STARTUP_ARG) => kuality_settings::startup::cli(&args[1..]),
-        Some(STARTUP_TASK_ARG) => kuality_settings::startup::task_cli(&args[1..]),
+        Some(cli::STARTUP) => kuality_settings::startup::cli(&args[1..]),
+        Some(cli::STARTUP_TASK) => kuality_settings::startup::task_cli(&args[1..]),
         _ => run_core(&args),
     }
 }

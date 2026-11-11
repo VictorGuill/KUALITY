@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use kuality_protocol::{CONFIG_VERSION, Config};
+use kuality_protocol::{CONFIG_VERSION, Config, cli};
 
 use crate::actions::ActionWorker;
 use crate::clipboard::ClipboardService;
@@ -21,22 +21,8 @@ use crate::{logging, shortcuts};
 /// How long quit waits for a running `launch`/`open_url` action.
 const ACTIONS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Arguments that open the settings window: a second process of this same exe. The pid tells it
-/// which core started it (it closes when that process ends).
-const SETTINGS_ARG: &str = "--settings";
-const CORE_PID_ARG: &str = "--core-pid";
-/// Arguments that open the to-do popup (`--at <x>,<y>`: anchor in screen pixels).
-const TODO_ARG: &str = "--todo";
-const AT_ARG: &str = "--at";
-/// `--hover <left>,<top>,<right>,<bottom>`: the popup shows on hover and closes when the mouse
-/// leaves this module rectangle (physical px) and the popup.
-const HOVER_ARG: &str = "--hover";
 /// A hover does not start a second popup this soon after starting one.
 const TODO_START_GUARD: Duration = Duration::from_millis(500);
-/// Arguments that open the clipboard history popup; `--paste` tells it Enter pastes into the
-/// window that was in front (opened by the hotkey).
-const CLIPBOARD_ARG: &str = "--clipboard";
-const PASTE_ARG: &str = "--paste";
 /// The hotkey does not start a second clipboard popup this soon after starting one.
 const CLIPBOARD_START_GUARD: Duration = Duration::from_millis(500);
 
@@ -118,8 +104,8 @@ impl<W: DirWatcher> App<W> {
             Ok(exe) => match platform::spawn_detached(
                 &exe,
                 &[
-                    SETTINGS_ARG.into(),
-                    CORE_PID_ARG.into(),
+                    cli::SETTINGS.into(),
+                    cli::CORE_PID.into(),
                     std::process::id().to_string(),
                 ],
             ) {
@@ -170,14 +156,14 @@ impl<W: DirWatcher> App<W> {
         }
         let m = r.module;
         let mut args = vec![
-            TODO_ARG.into(),
-            CORE_PID_ARG.into(),
+            cli::TODO.into(),
+            cli::CORE_PID.into(),
             std::process::id().to_string(),
-            AT_ARG.into(),
+            cli::AT.into(),
             format!("{},{}", m.x, r.taskbar_top),
         ];
         if r.trigger == TodoTrigger::Hover {
-            args.push(HOVER_ARG.into());
+            args.push(cli::HOVER.into());
             args.push(format!("{},{},{},{}", m.x, m.y, m.x + m.w, m.y + m.h));
         }
         let started = std::env::current_exe().and_then(|exe| platform::spawn_detached(&exe, &args));
@@ -391,10 +377,10 @@ impl<W: DirWatcher> App<W> {
 fn start_clipboard_popup() {
     platform::set_paste_target(platform::foreground_window());
     let args = [
-        CLIPBOARD_ARG.into(),
-        CORE_PID_ARG.into(),
+        cli::CLIPBOARD.into(),
+        cli::CORE_PID.into(),
         std::process::id().to_string(),
-        PASTE_ARG.into(),
+        cli::PASTE.into(),
     ];
     match std::env::current_exe().and_then(|exe| platform::spawn_detached(&exe, &args)) {
         Ok(()) => log::debug!("started the clipboard popup"),

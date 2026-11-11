@@ -1,9 +1,10 @@
 //! Types shared between the Kuality core, the settings app and (later) extensions.
 //!
 //! Contains the config file types, Kuality key codes, the data-dir rule, the atomic config
-//! write, Windows argument quoting, the `todos.json` types, and the clipboard history IPC and pins file
-//! formats.
+//! write, Windows argument quoting, the `todos.json` types, the clipboard history IPC and pins
+//! file formats, and the command line the processes of `kuality.exe` use between them.
 
+pub mod cli;
 pub mod clipboard;
 pub mod config;
 pub mod ipc;
@@ -28,3 +29,10 @@ pub use keys::{
     Chord, Key, KeyParseError, Mods, Trigger, TriggerError, parse_chord, parse_key, parse_trigger,
 };
 pub use todo::{MAX_TODO_TEXT, TodoItem, TodoList};
+
+/// Seconds since the Unix epoch (0 if the clock is before it).
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
