@@ -126,6 +126,21 @@ Done before Phase 4 (user request, 2026-11-09); see `docs/specs/todo.md`. Releas
 
 **Done when:** enabling To do shows `TO DO` at the bottom-left of the taskbar, a click opens the list, items can be added / checked / deleted, the count follows, and the list survives a restart.
 
+## Phase 9 — Clipboard history
+
+Done before Phase 4 (user request, 2026-11-11); see `docs/specs/clipboard.md`.
+
+- [x] Spec `docs/specs/clipboard.md`
+- [ ] `clipboard` config section, IPC frames and pins payload in `protocol`
+- [ ] Core: clipboard listener (text + images, private markers skipped), in-memory history encrypted with `CryptProtectMemory`
+- [ ] Pinned entries saved in `clipboard-pins.bin` (DPAPI), loaded at start
+- [ ] Named pipe server (current user only, own exe only) for the popup and Settings
+- [ ] Built-in hotkey `clipboard.hotkey` (default Hyper+V; Win+V replaces the Windows panel)
+- [ ] Popup `kuality.exe --clipboard`: search, list, preview, pin, delete; Enter pastes into the previous app, Shift+Enter copies
+- [ ] Settings: Clipboard tab (enable, hotkey, keep last N, images, open / clear / remove pins)
+
+**Done when:** with Clipboard on, Hyper+V opens the history, Enter pastes the chosen entry into the app that was in front, pinned entries survive a restart and unpinned ones do not, and `clipboard-pins.bin` holds no readable text.
+
 ## Future (unordered)
 
 - Hotkey / shortcut action to open the to-do list

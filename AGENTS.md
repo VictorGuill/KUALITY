@@ -28,7 +28,7 @@ Details: [docs/VISION.md](docs/VISION.md).
 ## How to work
 
 1. Open [docs/ROADMAP.md](docs/ROADMAP.md) and find the **current phase** (first one not completed). Work only on that phase unless the user says otherwise.
-2. If the phase has no spec in `docs/specs/` yet, write it first (short, concrete) and confirm it with the user.
+2. If the phase has no spec in `docs/specs/` yet, write it first (short, concrete). If the user already approved a plan for the phase (e.g. in plan mode), that counts as confirmation: write the spec and continue straight to the implementation. Otherwise confirm the spec with the user before coding.
 3. One branch per phase (`phase-N-short-name`), small focused commits.
 4. When you finish a task, tick its checkbox in `ROADMAP.md` in the same commit.
 5. If you make a new decision (library choice, behavior, format…), add a line to `DECISIONS.md`.
