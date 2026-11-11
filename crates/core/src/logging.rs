@@ -1,13 +1,18 @@
 //! Small `log` backend: one file in the logs dir (+ stderr in debug builds), with rotation.
 //!
-//! Lines are written with a single `write` call each and no buffering, so nothing is lost on
-//! a crash. The core logs very little when idle, so this costs nothing measurable.
+//! The calling thread only formats the line and queues it; the `kuality-log` thread writes it
+//! (one `write` call per line, no buffering). No thread ever waits for the disk or the console
+//! to log, which matters most for the keyboard thread: Windows drops a low-level hook whose
+//! thread answers too slowly. [`Log::flush`] waits until everything queued is written; quit, the
+//! panic hook and the crash filter call it, so nothing is lost there either.
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::time::Duration;
 
 use kuality_protocol::LogLevel;
 use log::{LevelFilter, Log, Metadata, Record};
@@ -20,6 +25,8 @@ pub const LOG_FILE: &str = "kuality.log";
 pub const OLD_LOG_FILE: &str = "kuality.old.log";
 /// The file is rotated while running once it grows past this size.
 pub const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+/// How long a flush waits for the writer thread (it may be the thread that panicked).
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Local wall-clock time, as provided by the platform layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,14 +130,80 @@ impl LogFile {
     }
 }
 
+/// What the logging threads send to the writer thread.
+enum Msg {
+    /// One formatted line.
+    Line(String),
+    /// Answer once every line queued before this one is written.
+    Flush(SyncSender<()>),
+}
+
+/// Writes one line to stderr (debug builds only: release builds have no console).
+fn write_stderr(line: &str) {
+    if cfg!(debug_assertions) {
+        let _ = io::stderr().write_all(line.as_bytes());
+    }
+}
+
+/// Body of the `kuality-log` thread: runs until every sender is gone.
+fn writer_main(rx: Receiver<Msg>, mut file: Option<LogFile>) {
+    for msg in rx {
+        match msg {
+            Msg::Line(line) => {
+                write_stderr(&line);
+                if let Some(f) = file.as_mut()
+                    && f.write_line(&line, MAX_LOG_BYTES).is_err()
+                {
+                    // Stop writing to a broken file rather than failing on every line.
+                    file = None;
+                }
+            }
+            Msg::Flush(done) => {
+                if let Some(f) = file.as_mut() {
+                    let _ = f.file.flush();
+                }
+                let _ = done.try_send(());
+            }
+        }
+    }
+}
+
+/// Starts the writer thread for `file` (`None`: stderr only).
+fn spawn_writer(file: Option<LogFile>) -> io::Result<Sender<Msg>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("kuality-log".into())
+        .spawn(move || writer_main(rx, file))?;
+    Ok(tx)
+}
+
+/// Waits until the writer has written everything queued so far (at most [`FLUSH_TIMEOUT`]).
+fn flush_writer(tx: &Sender<Msg>) {
+    let (done, wait) = mpsc::sync_channel(1);
+    if tx.send(Msg::Flush(done)).is_ok() {
+        let _ = wait.recv_timeout(FLUSH_TIMEOUT);
+    }
+}
+
 #[derive(Debug)]
 struct FileLogger {
-    file: Mutex<Option<LogFile>>,
+    /// Queue of the writer thread; `None` until [`init`] (lines then only reach stderr).
+    writer: Mutex<Option<Sender<Msg>>>,
 }
 
 static LOGGER: FileLogger = FileLogger {
-    file: Mutex::new(None),
+    writer: Mutex::new(None),
 };
+
+impl FileLogger {
+    /// A clone of the queue, so nothing is sent or awaited while the lock is held.
+    fn writer(&self) -> Option<Sender<Msg>> {
+        self.writer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
 
 impl Log for FileLogger {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
@@ -147,22 +220,20 @@ impl Log for FileLogger {
             record.target(),
             record.args(),
         );
-        if cfg!(debug_assertions) {
-            let _ = io::stderr().write_all(line.as_bytes());
-        }
-        let mut guard = self.file.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(f) = guard.as_mut()
-            && f.write_line(&line, MAX_LOG_BYTES).is_err()
-        {
-            // Stop writing to a broken file rather than failing on every line.
-            *guard = None;
+        match self.writer() {
+            Some(tx) => {
+                if let Err(mpsc::SendError(Msg::Line(line))) = tx.send(Msg::Line(line)) {
+                    // The writer thread is gone: do not lose the line in debug builds.
+                    write_stderr(&line);
+                }
+            }
+            None => write_stderr(&line),
         }
     }
 
     fn flush(&self) {
-        let mut guard = self.file.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(f) = guard.as_mut() {
-            let _ = f.file.flush();
+        if let Some(tx) = self.writer() {
+            flush_writer(&tx);
         }
     }
 }
@@ -170,7 +241,7 @@ impl Log for FileLogger {
 /// Installs the logger. With `rotate_on_start`, the previous log becomes `kuality.old.log`.
 ///
 /// The logger is always installed (stderr still works in debug builds); the returned error
-/// only means the log file could not be opened.
+/// only means the log file could not be opened or the writer thread could not be started.
 pub fn init(logs_dir: &Path, rotate_on_start: bool) -> io::Result<()> {
     // Ignore the error: it only happens if a logger was already set.
     let _ = log::set_logger(&LOGGER);
@@ -183,16 +254,33 @@ pub fn init(logs_dir: &Path, rotate_on_start: bool) -> io::Result<()> {
         }
         LogFile::open(logs_dir)
     })();
-    let mut guard = LOGGER.file.lock().unwrap_or_else(|e| e.into_inner());
-    match opened {
-        Ok(f) => {
-            *guard = Some(f);
-            Ok(())
+    let (file, open_error) = match opened {
+        Ok(f) => (Some(f), None),
+        Err(e) => (None, Some(e)),
+    };
+    let spawned = spawn_writer(file);
+    let mut guard = LOGGER.writer.lock().unwrap_or_else(|e| e.into_inner());
+    match spawned {
+        Ok(tx) => {
+            // A previous writer (if any) ends when its queue is dropped here.
+            *guard = Some(tx);
+            open_error.map_or(Ok(()), Err)
         }
         Err(e) => {
             *guard = None;
-            Err(e)
+            Err(open_error.unwrap_or(e))
         }
+    }
+}
+
+/// Flushes the log when dropped: hold one for as long as the process logs, so every way out of
+/// `main` writes what is still queued.
+#[derive(Debug)]
+pub struct FlushOnDrop;
+
+impl Drop for FlushOnDrop {
+    fn drop(&mut self) {
+        log::logger().flush();
     }
 }
 
@@ -259,6 +347,29 @@ mod tests {
             fs::read_to_string(dir.0.join(LOG_FILE)).unwrap(),
             "abcdefghij\n"
         );
+    }
+
+    #[test]
+    fn writer_thread_writes_queued_lines_in_order() {
+        let dir = TempDir::new("writer");
+        let tx = spawn_writer(Some(LogFile::open(&dir.0).unwrap())).unwrap();
+        for i in 0..50 {
+            tx.send(Msg::Line(format!("line {i}\n"))).unwrap();
+        }
+        // Returns only once all 50 lines are in the file.
+        flush_writer(&tx);
+        let text = fs::read_to_string(dir.0.join(LOG_FILE)).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 50);
+        assert_eq!(lines[0], "line 0");
+        assert_eq!(lines[49], "line 49");
+    }
+
+    #[test]
+    fn flush_does_not_hang_without_a_writer() {
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        flush_writer(&tx);
     }
 
     #[test]

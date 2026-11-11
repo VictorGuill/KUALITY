@@ -31,6 +31,8 @@ pub fn install_crash_guard() {
 
 unsafe extern "system" fn exception_filter(info: *const EXCEPTION_POINTERS) -> i32 {
     input::emergency_release();
+    // Log lines are written by another thread: give it a moment before the process dies.
+    log::logger().flush();
     let prev = PREVIOUS_FILTER.load(Ordering::SeqCst);
     if prev != 0 {
         // SAFETY: `prev` was stored from a valid `LPTOP_LEVEL_EXCEPTION_FILTER` function.

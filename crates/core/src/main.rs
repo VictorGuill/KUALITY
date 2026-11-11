@@ -78,6 +78,7 @@ fn run_core(args: &[String]) -> ExitCode {
         Ok(Some(guard)) => Ok(guard),
         Ok(None) => {
             let _ = logging::init(&data_dir.logs_dir(), false);
+            let _flush = logging::FlushOnDrop;
             log::info!(
                 "another instance is already running; this one (pid {}) exits",
                 std::process::id()
@@ -88,6 +89,8 @@ fn run_core(args: &[String]) -> ExitCode {
     };
 
     let log_result = logging::init(&data_dir.logs_dir(), true);
+    // Lines are written by another thread: every return below must wait for it.
+    let _flush = logging::FlushOnDrop;
     logging::install_panic_hook();
     // Runs before the logging hook: releases any modifiers Hyperkey holds down.
     platform::install_crash_guard();
@@ -248,6 +251,5 @@ fn run_core(args: &[String]) -> ExitCode {
     tray.run(move |event| app.handle(event));
 
     log::info!("bye");
-    log::logger().flush();
     ExitCode::SUCCESS
 }
