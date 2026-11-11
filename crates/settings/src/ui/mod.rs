@@ -1,6 +1,7 @@
 //! The settings window (GPUI + gpui-component). One view owns the document, the open editor and
 //! the key recorder; each tab lives in its own module.
 
+mod clipboard;
 mod controls;
 mod general;
 mod hyperkey;
@@ -42,7 +43,12 @@ pub enum CoreLink {
 }
 
 // Lucide icons beyond gpui-component's default set, embedded one by one.
-gpui_kit::assets::icon_assets!(ExtraIcons, [AppWindow, Keyboard, ListTodo, Trash]);
+gpui_kit::assets::icon_assets!(
+    ExtraIcons,
+    [
+        AppWindow, Clipboard, Keyboard, ListTodo, Pin, PinOff, Trash, Type
+    ]
+);
 
 /// gpui-component's default icons plus [`ExtraIcons`].
 pub(crate) struct AppAssets;
@@ -98,15 +104,17 @@ pub(crate) enum Tab {
     Hyperkey,
     Shortcuts,
     Todo,
+    Clipboard,
 }
 
 impl Tab {
-    const ALL: [Tab; 5] = [
+    const ALL: [Tab; 6] = [
         Tab::General,
         Tab::Widgets,
         Tab::Hyperkey,
         Tab::Shortcuts,
         Tab::Todo,
+        Tab::Clipboard,
     ];
 
     fn label(self) -> &'static str {
@@ -116,6 +124,7 @@ impl Tab {
             Tab::Hyperkey => "Hyperkey",
             Tab::Shortcuts => "Shortcuts",
             Tab::Todo => "To do",
+            Tab::Clipboard => "Clipboard",
         }
     }
 
@@ -126,6 +135,7 @@ impl Tab {
             Tab::Hyperkey => Icon::new(IconName::ArrowUp),
             Tab::Shortcuts => Icon::new(IconName::SquareTerminal),
             Tab::Todo => Icon::new(gpui_kit::assets::IconName::ListTodo),
+            Tab::Clipboard => Icon::new(gpui_kit::assets::IconName::Clipboard),
         }
     }
 }
@@ -148,6 +158,8 @@ pub(crate) enum RecordTarget {
     Trigger(shortcuts::Row),
     /// The chord of the picker.s "Send keys" page.
     Chord,
+    /// The clipboard history hotkey (Clipboard tab).
+    ClipboardHotkey,
 }
 
 struct ActiveRecording {
@@ -180,6 +192,12 @@ pub struct SettingsWindow {
     pub(crate) updates: general::UpdatesView,
     /// Label input of the To do tab (created on first render).
     pub(crate) todo_label: Option<todo::LabelField>,
+    /// The core this window is attached to (Clipboard tab buttons talk to its pipe).
+    pub(crate) core_pid: Option<u32>,
+    /// "Remove all pins" was clicked once (the next click confirms).
+    pub(crate) clipboard_confirm_pins: bool,
+    /// Result of the last Clipboard tab button.
+    pub(crate) clipboard_note: Option<clipboard::PipeNote>,
     _poll: Task<()>,
     _subs: Vec<Subscription>,
 }
@@ -192,6 +210,10 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let doc = Document::load(config_path);
+        let core_pid = match &core {
+            CoreLink::Attached(core) => Some(core.pid),
+            CoreLink::Missing(_) => None,
+        };
         let core_missing = match core {
             CoreLink::Attached(core) => {
                 match core.watch() {
@@ -287,6 +309,9 @@ impl SettingsWindow {
             startup: general::StartupView::default(),
             updates: general::UpdatesView::default(),
             todo_label: None,
+            core_pid,
+            clipboard_confirm_pins: false,
+            clipboard_note: None,
             _poll: poll,
             _subs: subs,
         }
@@ -407,7 +432,7 @@ impl SettingsWindow {
     ) {
         self.cancel_recording(cx);
         let mode = match target {
-            RecordTarget::Trigger(_) => Mode::Trigger,
+            RecordTarget::Trigger(_) | RecordTarget::ClipboardHotkey => Mode::Trigger,
             RecordTarget::Chord => Mode::Chord,
         };
         let (recorder, rx) = match KeyRecorder::start(mode) {
@@ -612,6 +637,7 @@ impl Render for SettingsWindow {
             Tab::Hyperkey => self.render_hyperkey(window, cx).into_any_element(),
             Tab::Shortcuts => self.render_shortcuts(window, cx).into_any_element(),
             Tab::Todo => self.render_todo(window, cx).into_any_element(),
+            Tab::Clipboard => self.render_clipboard(cx).into_any_element(),
         };
         let banner = self.render_banner(cx);
         h_flex()

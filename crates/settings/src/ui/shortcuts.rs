@@ -185,6 +185,7 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) {
         match target {
+            RecordTarget::ClipboardHotkey => self.apply_clipboard_hotkey(text, cx),
             RecordTarget::Chord => {
                 if let Some(p) = self.picker.as_ref() {
                     p.view.update(cx, |p, cx| p.set_keys(text, window, cx));
@@ -737,6 +738,15 @@ impl SettingsWindow {
             if duplicate && enabled {
                 out.push(warning_text(
                     "Another shortcut uses this hotkey: only the first one works.",
+                    cx,
+                ));
+            }
+            if enabled
+                && model::clipboard_hotkey_conflict(&self.doc.config)
+                    .is_some_and(|t| parse_trigger(key) == Ok(t))
+            {
+                out.push(warning_text(
+                    "The clipboard history uses this hotkey: this shortcut does not run.",
                     cx,
                 ));
             }

@@ -658,6 +658,22 @@ pub fn hotkey_label(text: &str) -> Option<String> {
     })
 }
 
+/// The clipboard history hotkey when the history is on and an enabled shortcut uses the same
+/// hotkey (the clipboard one wins).
+pub fn clipboard_hotkey_conflict(config: &kuality_protocol::Config) -> Option<Trigger> {
+    let c = &config.clipboard;
+    if !c.enabled {
+        return None;
+    }
+    let trigger = parse_trigger(c.hotkey_text()?).ok()?;
+    config
+        .shortcuts
+        .bindings
+        .iter()
+        .any(|e| matches!(e, BindingEntry::Valid(b) if b.enabled && parse_trigger(&b.key) == Ok(trigger)))
+        .then_some(trigger)
+}
+
 /// The hotkey needs Hyperkey (a Hyper hotkey, bare keys included).
 pub fn is_hyper_hotkey(text: &str) -> bool {
     parse_trigger(text).is_ok_and(|t| t.hyper)

@@ -7,6 +7,7 @@
 //! elevated scheduled task), shared by the window and the `--startup` command line.
 
 mod apps;
+mod clipboard;
 mod model;
 mod platform;
 mod recorder;
@@ -102,6 +103,56 @@ pub fn run_todo(args: &[String]) -> ExitCode {
         core,
     );
     ExitCode::SUCCESS
+}
+
+/// Runs the clipboard history popup until it closes
+/// (`kuality.exe --clipboard [--core-pid <n>] [--paste]`, `docs/specs/clipboard.md`). `--paste`:
+/// opened by the hotkey, so Enter pastes into the window that was in front. Never starts the core.
+pub fn run_clipboard(args: &[String]) -> ExitCode {
+    init_logging();
+    let _instance = match platform::Instance::acquire_clipboard() {
+        Ok(Some(i)) => Some(i),
+        // One is open (or opening): the core toggles it, nothing to do here.
+        Ok(None) => return ExitCode::SUCCESS,
+        Err(e) => {
+            log::warn!("single-instance check failed: {e}");
+            None
+        }
+    };
+    let core = match core_pid_arg(args.iter().cloned()) {
+        Some(pid) => match platform::CoreProcess::open(pid) {
+            Some(core) => Some(core),
+            None => {
+                log::info!("Kuality (pid {pid}) is no longer running; not opening");
+                return ExitCode::SUCCESS;
+            }
+        },
+        None => platform::find_core(),
+    };
+    clipboard::run(core, args.iter().any(|a| a == "--paste"));
+    ExitCode::SUCCESS
+}
+
+/// Starts the clipboard history popup from the settings window (Enter copies).
+pub(crate) fn open_clipboard_popup(core_pid: Option<u32>) {
+    let started = std::env::current_exe().and_then(|exe| {
+        let dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("--clipboard").current_dir(dir);
+        if let Some(pid) = core_pid {
+            cmd.arg(CORE_PID_ARG).arg(pid.to_string());
+        }
+        cmd.spawn()
+    });
+    if let Err(e) = started {
+        log::error!("cannot start the clipboard popup: {e}");
+    }
+}
+
+/// Closes the clipboard history popup if it runs (the core toggles it with the hotkey).
+/// Returns `false` when none runs.
+pub fn close_clipboard_popup() -> bool {
+    platform::close_clipboard_popup()
 }
 
 /// Starts the to-do popup without an anchor (Settings → To do → "Open to-do list"): bottom-left

@@ -11,11 +11,11 @@ use std::time::{Duration, Instant};
 use futures_channel::oneshot;
 use kuality_protocol::Key;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows::Win32::Foundation::POINT;
 use windows::Win32::Foundation::{COLORREF, SIZE};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, WPARAM,
 };
+use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
@@ -29,6 +29,7 @@ use windows::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
 use windows::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcessId, GetCurrentThreadId, INFINITE, OpenMutexW, OpenProcess,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
@@ -42,10 +43,11 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, EnumWindows, FindWindowW, GetCursorPos, GetForegroundWindow,
-    GetMessageW, GetWindowTextW, GetWindowThreadProcessId, HC_ACTION, IsIconic, IsWindowVisible,
-    KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, PostMessageW, PostQuitMessage, PostThreadMessageW,
-    SW_RESTORE, SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow, TranslateMessage,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_CLOSE, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
+    GetMessageW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HC_ACTION, IsIconic,
+    IsWindowVisible, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, PostMessageW, PostQuitMessage,
+    PostThreadMessageW, SW_RESTORE, SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow,
+    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_CLOSE, WM_KEYDOWN,
+    WM_SYSKEYDOWN, WM_TIMER,
 };
 use windows::core::{BOOL, Interface as _, PCWSTR, PWSTR, w};
 
@@ -62,6 +64,10 @@ pub const TODO_WINDOW_TITLE: &str = "Kuality To-do";
 const TODO_MUTEX: &str = r"Local\Kuality.Todo";
 /// Held by a to-do popup while it is only shown on hover (until it is clicked).
 const TODO_PEEK_MUTEX: &str = r"Local\Kuality.TodoPeek";
+/// Title of the clipboard history popup, used by the core to find and close it.
+pub const CLIPBOARD_WINDOW_TITLE: &str = "Kuality Clipboard";
+/// Held by the clipboard history popup while it runs.
+const CLIPBOARD_MUTEX: &str = r"Local\Kuality.Clipboard";
 const CORE_MUTEX: &str = r"Local\Kuality.Core";
 /// Class of the core's hidden main window (owns the tray icon).
 const CORE_WINDOW_CLASS: PCWSTR = w!("Kuality.Core");
@@ -104,6 +110,11 @@ impl Instance {
     /// `None` if another to-do popup is already running.
     pub fn acquire_todo() -> io::Result<Option<Self>> {
         Self::acquire_named(TODO_MUTEX)
+    }
+
+    /// `None` if another clipboard popup is already running.
+    pub fn acquire_clipboard() -> io::Result<Option<Self>> {
+        Self::acquire_named(CLIPBOARD_MUTEX)
     }
 
     /// Marks the to-do popup as "shown on hover" while held.
@@ -266,6 +277,90 @@ pub fn todo_popup_running() -> bool {
 /// Whether the running to-do popup is only shown on hover (not clicked yet).
 pub fn todo_popup_peeking() -> bool {
     mutex_exists(TODO_PEEK_MUTEX)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Clipboard history popup.
+
+/// Closes the running clipboard popup. Returns `false` when none runs. While one is still
+/// starting (mutex, no window yet), nothing is done and `true` is returned.
+pub fn close_clipboard_popup() -> bool {
+    if !mutex_exists(CLIPBOARD_MUTEX) {
+        return false;
+    }
+    if let Some(hwnd) = find_own_window(CLIPBOARD_WINDOW_TITLE) {
+        // SAFETY: posting never blocks; a stale handle only makes it fail.
+        let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+    }
+    true
+}
+
+/// Center of the foreground window (physical px): the popup opens on its monitor.
+pub fn foreground_center() -> Option<(i32, i32)> {
+    let mut r = RECT::default();
+    // SAFETY: plain queries into a local.
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_invalid() {
+            return None;
+        }
+        GetWindowRect(hwnd, &mut r).ok()?;
+    }
+    Some(((r.left + r.right) / 2, (r.top + r.bottom) / 2))
+}
+
+/// Why a pipe request failed.
+#[derive(Debug)]
+pub enum PipeError {
+    /// No pipe: the core is not running or its clipboard history is off.
+    NotRunning,
+    Other(String),
+}
+
+impl std::fmt::Display for PipeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotRunning => f.write_str("Kuality's clipboard history is not running."),
+            Self::Other(e) => f.write_str(e),
+        }
+    }
+}
+
+/// Sends one request to the core's pipe and reads the reply. Checks that the pipe is served by
+/// process `core_pid`.
+pub fn pipe_request(
+    core_pid: u32,
+    request: kuality_protocol::clipboard::Request,
+) -> Result<(kuality_protocol::clipboard::Response, Vec<u8>), PipeError> {
+    use std::os::windows::io::AsRawHandle;
+    const ERROR_PIPE_BUSY: i32 = 231;
+    let name = kuality_protocol::ipc::pipe_name(core_pid);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut file = loop {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&name)
+        {
+            Ok(f) => break f,
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(PipeError::NotRunning),
+            Err(e) => return Err(PipeError::Other(e.to_string())),
+        }
+    };
+    let mut server = 0u32;
+    // SAFETY: the handle belongs to `file` and stays open for the call.
+    let checked = unsafe { GetNamedPipeServerProcessId(HANDLE(file.as_raw_handle()), &mut server) };
+    if checked.is_err() || server != core_pid {
+        return Err(PipeError::Other(
+            "The clipboard pipe is not served by Kuality.".into(),
+        ));
+    }
+    let io_error = |e: io::Error| PipeError::Other(e.to_string());
+    kuality_protocol::ipc::write_frame(&mut file, &request, &[]).map_err(io_error)?;
+    kuality_protocol::ipc::read_frame(&mut file).map_err(io_error)
 }
 
 /// The mouse position in physical screen pixels.
