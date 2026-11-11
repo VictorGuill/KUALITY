@@ -12,6 +12,8 @@ pub const APP_DIR_NAME: &str = "Kuality";
 pub const CONFIG_FILE: &str = "config.json";
 /// To-do items file name inside the data dir.
 pub const TODO_FILE: &str = "todos.json";
+/// Pinned clipboard entries (DPAPI-encrypted) inside the data dir.
+pub const CLIPBOARD_PINS_FILE: &str = "clipboard-pins.bin";
 /// Logs folder name inside the data dir.
 pub const LOGS_DIR: &str = "logs";
 
@@ -66,6 +68,10 @@ impl DataDir {
         self.path.join(TODO_FILE)
     }
 
+    pub fn clipboard_pins_file(&self) -> PathBuf {
+        self.path.join(CLIPBOARD_PINS_FILE)
+    }
+
     pub fn logs_dir(&self) -> PathBuf {
         self.path.join(LOGS_DIR)
     }
@@ -86,6 +92,10 @@ mod tests {
         assert_eq!(d.config_file(), roaming.join("Kuality").join("config.json"));
         assert_eq!(d.logs_dir(), roaming.join("Kuality").join("logs"));
         assert_eq!(d.todo_file(), roaming.join("Kuality").join("todos.json"));
+        assert_eq!(
+            d.clipboard_pins_file(),
+            roaming.join("Kuality").join("clipboard-pins.bin")
+        );
     }
 
     #[test]

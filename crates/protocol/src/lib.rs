@@ -1,9 +1,12 @@
 //! Types shared between the Kuality core, the settings app and (later) extensions.
 //!
 //! Contains the config file types, Kuality key codes, the data-dir rule, the atomic config
-//! write, Windows argument quoting and the `todos.json` types.
+//! write, Windows argument quoting, the `todos.json` types, and the clipboard history IPC and pins file
+//! formats.
 
+pub mod clipboard;
 pub mod config;
+pub mod ipc;
 pub mod keys;
 pub mod paths;
 pub mod quote;
@@ -13,8 +16,9 @@ pub mod test_util;
 pub mod todo;
 
 pub use config::{
-    Action, Anchor, BarModule, BarModuleEntry, BarWidget, Binding, BindingEntry, CONFIG_VERSION,
-    Color, CommonItem, Config, DEFAULT_BAR_GAP, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE,
+    Action, Anchor, BarModule, BarModuleEntry, BarWidget, Binding, BindingEntry,
+    CLIPBOARD_ENTRIES_RANGE, CONFIG_VERSION, Clipboard, Color, CommonItem, Config, DEFAULT_BAR_GAP,
+    DEFAULT_CLIPBOARD_ENTRIES, DEFAULT_CLIPBOARD_HOTKEY, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE,
     DEFAULT_TODO_LABEL, Dimension, FontWeight, General, HyperModifiers, Hyperkey, LaunchAction,
     LaunchArgs, Length, Lenient, LogLevel, MAX_URL_LEN, NewItems, OpenUrlAction, Origin,
     SendHotkeyAction, Shortcuts, TextAlign, TextWidget, Todo, TodoModule, Updates, WidgetEntry,

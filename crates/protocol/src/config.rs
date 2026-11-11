@@ -25,6 +25,7 @@ pub struct Config {
     pub widgets: Widgets,
     pub updates: Updates,
     pub todo: Todo,
+    pub clipboard: Clipboard,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -39,6 +40,7 @@ impl Default for Config {
             widgets: Widgets::default(),
             updates: Updates::default(),
             todo: Todo::default(),
+            clipboard: Clipboard::default(),
             extra: Extra::new(),
         }
     }
@@ -100,6 +102,62 @@ pub struct Todo {
     pub new_items: Lenient<NewItems>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// Default `clipboard.hotkey`.
+pub const DEFAULT_CLIPBOARD_HOTKEY: &str = "hyper+v";
+/// Default `clipboard.max_entries`.
+pub const DEFAULT_CLIPBOARD_ENTRIES: u32 = 100;
+/// Runtime range of `clipboard.max_entries`.
+pub const CLIPBOARD_ENTRIES_RANGE: std::ops::RangeInclusive<u32> = 10..=1000;
+
+/// `clipboard` section (see `docs/specs/clipboard.md`). The history itself is never written
+/// to this file (memory only; pinned entries live in the encrypted `clipboard-pins.bin`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Clipboard {
+    pub enabled: bool,
+    /// Opens the history: a trigger with the Shortcuts syntax (`hyper+v`, `win+v`…).
+    pub hotkey: Lenient<String>,
+    /// Unpinned entries kept (clamped to [`CLIPBOARD_ENTRIES_RANGE`] at runtime).
+    pub max_entries: Lenient<u32>,
+    /// Record images too (text is always recorded).
+    pub images: bool,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+impl Default for Clipboard {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hotkey: Lenient::Valid(DEFAULT_CLIPBOARD_HOTKEY.into()),
+            max_entries: Lenient::Valid(DEFAULT_CLIPBOARD_ENTRIES),
+            images: true,
+            extra: Extra::new(),
+        }
+    }
+}
+
+impl Clipboard {
+    /// `max_entries` clamped to its range (the default when invalid).
+    pub fn entries_limit(&self) -> u32 {
+        let (min, max) = (
+            *CLIPBOARD_ENTRIES_RANGE.start(),
+            *CLIPBOARD_ENTRIES_RANGE.end(),
+        );
+        self.max_entries
+            .valid()
+            .map_or(DEFAULT_CLIPBOARD_ENTRIES, |n| (*n).clamp(min, max))
+    }
+
+    /// The hotkey text, or `None` when it is invalid (not a string) or empty.
+    pub fn hotkey_text(&self) -> Option<&str> {
+        self.hotkey
+            .valid()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+    }
 }
 
 /// `"top" | "bottom"`.
@@ -805,6 +863,31 @@ mod tests {
         assert!(c.widgets.items.is_empty());
         assert!(!c.todo.enabled);
         assert_eq!(c.todo.new_items, Lenient::Valid(NewItems::Top));
+        assert!(!c.clipboard.enabled);
+        assert_eq!(c.clipboard.hotkey_text(), Some("hyper+v"));
+        assert_eq!(c.clipboard.entries_limit(), 100);
+        assert!(c.clipboard.images);
+    }
+
+    #[test]
+    fn clipboard_section_values() {
+        let c = Config::from_json(
+            br#"{ "clipboard": { "enabled": true, "hotkey": 5, "max_entries": 5000, "x": 1 } }"#,
+        )
+        .unwrap();
+        assert!(c.clipboard.enabled);
+        assert_eq!(c.clipboard.hotkey, Lenient::Invalid(json!(5)));
+        assert_eq!(c.clipboard.hotkey_text(), None);
+        assert_eq!(c.clipboard.entries_limit(), 1000);
+        assert_eq!(c.clipboard.extra["x"], json!(1));
+        let back = serde_json::to_value(&c).unwrap();
+        assert_eq!(back["clipboard"]["hotkey"], json!(5), "invalid value kept");
+        let c = Config::from_json(br#"{ "clipboard": { "max_entries": "many", "hotkey": " " } }"#)
+            .unwrap();
+        assert_eq!(c.clipboard.entries_limit(), 100);
+        assert_eq!(c.clipboard.hotkey_text(), None);
+        let c = Config::from_json(br#"{ "clipboard": { "max_entries": 1 } }"#).unwrap();
+        assert_eq!(c.clipboard.entries_limit(), 10);
     }
 
     #[test]
@@ -851,6 +934,9 @@ mod tests {
         expected["hyperkey"]["modifiers"] = json!("none");
         expected["updates"] = json!({ "check": true });
         expected["todo"] = json!({ "enabled": false, "new_items": "top" });
+        expected["clipboard"] = json!({
+            "enabled": false, "hotkey": "hyper+v", "max_entries": 100, "images": true
+        });
         assert_eq!(back, expected);
     }
 
@@ -863,7 +949,8 @@ mod tests {
             "shortcuts": { "enabled": false, "bindings": [] },
             "widgets": { "enabled": false, "hide_on_fullscreen": true, "items": [] },
             "updates": { "check": true },
-            "todo": { "enabled": false, "new_items": "top" }
+            "todo": { "enabled": false, "new_items": "top" },
+            "clipboard": { "enabled": false, "hotkey": "hyper+v", "max_entries": 100, "images": true }
         });
         assert_eq!(serde_json::to_value(Config::default()).unwrap(), expected);
     }
