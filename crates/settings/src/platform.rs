@@ -36,6 +36,9 @@ use windows::Win32::System::Threading::{
     QueryFullProcessImageNameW, SYNCHRONIZATION_SYNCHRONIZE, WaitForSingleObject,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    INPUT, INPUT_0, INPUT_MOUSE, MOUSEINPUT, SendInput,
+};
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, FOLDERID_AppsFolder, FOLDERID_RoamingAppData, IEnumShellItems, IShellItem,
     IShellItemImageFactory, KF_FLAG_DEFAULT, SHGetKnownFolderItem, SHGetKnownFolderPath, SIGDN,
@@ -445,10 +448,44 @@ pub fn popup_window_setup(window: &impl HasWindowHandle, activate: bool) {
             &corners as *const _ as *const std::ffi::c_void,
             size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
         );
-        if activate {
-            // The core allowed it (AllowSetForegroundWindow) before starting this process.
-            let _ = SetForegroundWindow(hwnd);
+    }
+    if activate {
+        force_foreground(hwnd);
+    }
+}
+
+/// Brings this process's popup to the front. Returns whether it is in front.
+///
+/// The core's `AllowSetForegroundWindow` grant ends at the next input, and the user releases
+/// the hotkey while this process starts, so it is often gone by now. An empty mouse event makes
+/// this process the source of the last input, which lets it set the foreground itself (same
+/// technique as the core's launched apps, `docs/DECISIONS.md` "Foreground for launched apps").
+pub fn bring_to_front(window: &impl HasWindowHandle) -> bool {
+    let Ok(handle) = window.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::Win32(h) = handle.as_raw() else {
+        return false;
+    };
+    force_foreground(HWND(h.hwnd.get() as *mut std::ffi::c_void))
+}
+
+fn force_foreground(hwnd: HWND) -> bool {
+    // SAFETY: plain calls; a stale handle only makes them fail. The input has no movement and
+    // no buttons.
+    unsafe {
+        if GetForegroundWindow() == hwnd {
+            return true;
         }
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT::default(),
+            },
+        };
+        SendInput(&[input], size_of::<INPUT>() as i32);
+        let _ = SetForegroundWindow(hwnd);
+        GetForegroundWindow() == hwnd
     }
 }
 

@@ -24,6 +24,10 @@ const WIDTH: f32 = 720.0;
 const HEIGHT: f32 = 460.0;
 /// Focus changes right after opening are ignored (the window may not be active yet).
 const ACTIVATION_GRACE: Duration = Duration::from_millis(400);
+/// While the popup is not in front yet, it retries taking the foreground this often…
+const FOREGROUND_RETRY: Duration = Duration::from_millis(100);
+/// …this many times (the user may still be releasing the hotkey).
+const FOREGROUND_TRIES: u32 = 15;
 /// Width of the list column in DIPs.
 const LIST_WIDTH: f32 = 300.0;
 
@@ -230,6 +234,20 @@ impl ClipboardPopup {
                 Err(e) => log::error!("cannot watch the Kuality process: {e}"),
             }
         }
+        // Opened by a hotkey, the window may appear without the focus (Windows' foreground
+        // lock): keep asking for it until it is in front.
+        cx.spawn_in(window, async move |_, cx| {
+            for _ in 0..FOREGROUND_TRIES {
+                cx.background_executor().timer(FOREGROUND_RETRY).await;
+                let active = cx.update(|window, _| {
+                    window.is_window_active() || platform::bring_to_front(window)
+                });
+                if active.unwrap_or(true) {
+                    break;
+                }
+            }
+        })
+        .detach();
         let subs = vec![
             cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, _, cx| {
                 if let InputEvent::Change = ev {
