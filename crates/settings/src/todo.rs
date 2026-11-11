@@ -7,48 +7,35 @@
 //! (then it behaves as if opened by a click).
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::empty::{Empty, EmptyHeader, EmptyTitle};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
+use gpui_kit::component::label::Label;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use kuality_protocol::{Config, NewItems, TodoList, store};
+use kuality_protocol::{Config, NewItems, TodoList, cli, store, unix_now};
 
-use crate::platform::{self, TODO_WINDOW_TITLE};
-use crate::ui::{AppAssets, style};
+use crate::platform::{self, ScreenRect, TODO_WINDOW_TITLE};
+use crate::ui::window::{self, ACTIVATION_GRACE};
 
 /// Popup size in DIPs.
 const WIDTH: f32 = 340.0;
 const HEIGHT: f32 = 440.0;
 /// Space between the popup and the taskbar / screen edges, in DIPs.
 const MARGIN: f32 = 8.0;
-/// Focus changes right after opening are ignored (the window may not be active yet).
-const ACTIVATION_GRACE: Duration = Duration::from_millis(400);
 /// A peek closes when the mouse has been away from the module and the popup this long.
 const PEEK_LEAVE_GRACE: Duration = Duration::from_millis(300);
 /// How often a peek checks the mouse position.
 const PEEK_POLL: Duration = Duration::from_millis(100);
-
-/// A screen rectangle in physical pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScreenRect {
-    pub left: i32,
-    pub top: i32,
-    pub right: i32,
-    pub bottom: i32,
-}
-
-impl ScreenRect {
-    pub fn contains(&self, (x, y): (i32, i32)) -> bool {
-        x >= self.left && x < self.right && y >= self.top && y < self.bottom
-    }
-}
 
 /// The popup was opened by the mouse resting on the module (`--hover`).
 pub struct Peek {
@@ -93,7 +80,7 @@ pub fn place_popup(
 
 /// `--at <x>,<y>`: the anchor the core passes (physical screen pixels).
 pub fn anchor_arg(args: &[String]) -> Option<(i32, i32)> {
-    match numbers_arg(args, "--at")?[..] {
+    match numbers_arg(args, cli::AT)?[..] {
         [x, y] => Some((x, y)),
         _ => None,
     }
@@ -102,7 +89,7 @@ pub fn anchor_arg(args: &[String]) -> Option<(i32, i32)> {
 /// `--hover <left>,<top>,<right>,<bottom>`: opened by the mouse resting on the module at this
 /// screen rectangle (physical pixels).
 pub fn hover_arg(args: &[String]) -> Option<ScreenRect> {
-    match numbers_arg(args, "--hover")?[..] {
+    match numbers_arg(args, cli::HOVER)?[..] {
         [left, top, right, bottom] if left < right && top < bottom => Some(ScreenRect {
             left,
             top,
@@ -125,12 +112,6 @@ fn numbers_arg(args: &[String], name: &str) -> Option<Vec<i32>> {
         return value.split(',').map(|n| n.trim().parse().ok()).collect();
     }
     None
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 /// Reads `todos.json`: a missing file is an empty list; an invalid one is an error (the popup
@@ -162,24 +143,25 @@ pub fn run(
     core: Option<platform::CoreProcess>,
 ) {
     let at_top = new_items_at_top(&config_path);
-    gpui_kit::application()
-        .with_assets(AppAssets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
+    // Whether the popup takes the focus: a peek does not take it from the window being used.
+    let activate = peek.is_none();
+    // Filled by `options` (GPUI is up by then), used to build the view.
+    let peek_state = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let for_view = peek_state.clone();
+    window::run_window(
+        "to-do popup",
+        move |cx| {
             // Screen queries only after GPUI made the process DPI aware (physical pixels).
             let monitor = platform::monitor_at(anchor);
+            let size = size(px(WIDTH), px(HEIGHT));
             // Physical position and size, when the monitor is known.
             let placed = monitor.map(|m| {
                 let (x, y) = place_popup(anchor, m.work, m.scale, (WIDTH, HEIGHT));
-                let (w, h) = (
-                    (WIDTH * m.scale).round() as i32,
-                    (HEIGHT * m.scale).round() as i32,
-                );
                 ScreenRect {
                     left: x,
                     top: y,
-                    right: x + w,
-                    bottom: y + h,
+                    right: x + (WIDTH * m.scale).round() as i32,
+                    bottom: y + (HEIGHT * m.scale).round() as i32,
                 }
             });
             let peek = peek.map(|p| PeekState {
@@ -192,53 +174,25 @@ pub fn run(
             {
                 // The mouse already left while this process started.
                 log::debug!("mouse left before the to-do popup opened; not opening");
-                cx.quit();
-                return;
+                return None;
             }
-            let (bounds, display_id) = match (monitor, placed) {
-                (Some(m), Some(r)) => {
-                    let origin = point(px(r.left as f32 / m.scale), px(r.top as f32 / m.scale));
-                    (
-                        Bounds::new(origin, size(px(WIDTH), px(HEIGHT))),
-                        Some(DisplayId::new(m.id)),
-                    )
-                }
-                _ => (
-                    Bounds::centered(None, size(px(WIDTH), px(HEIGHT)), cx),
-                    None,
-                ),
-            };
-            let activate = peek.is_none();
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(TODO_WINDOW_TITLE.into()),
-                    appears_transparent: true,
-                    ..Default::default()
-                }),
-                kind: WindowKind::PopUp,
-                is_movable: false,
-                is_resizable: false,
-                is_minimizable: false,
-                // A peek does not take the focus from the window being used.
-                focus: activate,
-                show: true,
+            *peek_state.borrow_mut() = peek;
+            let (bounds, display_id) =
+                window::popup_bounds(monitor, placed.map(|r| (r.left, r.top)), size, cx);
+            Some(window::popup_options(
+                TODO_WINDOW_TITLE,
+                "Kuality.Todo",
+                bounds,
                 display_id,
-                app_id: Some("Kuality.Todo".into()),
-                ..Default::default()
-            };
-            let opened = gpui_kit::open_window(options, cx, |window, cx| {
-                style::apply(window, cx);
-                platform::popup_window_setup(window, activate);
-                cx.new(|cx| TodoPopup::new(todo_path, at_top, peek, core, window, cx))
-            });
-            if let Err(e) = opened {
-                log::error!("cannot open the to-do popup: {e}");
-                cx.quit();
-                return;
-            }
-            cx.on_window_closed(|cx, _| cx.quit()).detach();
-        });
+                activate,
+            ))
+        },
+        move |window| platform::popup_window_setup(window, activate),
+        move |window, cx| {
+            let peek = for_view.borrow_mut().take();
+            TodoPopup::new(todo_path, at_top, peek, core, window, cx)
+        },
+    );
 }
 
 struct TodoPopup {
@@ -274,17 +228,10 @@ impl TodoPopup {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Add a task…"));
         input.update(cx, |s, cx| s.focus(window, cx));
         if let Some(core) = core {
-            match core.watch() {
-                Ok(exited) => cx
-                    .spawn(async move |_, cx| {
-                        if exited.await.is_ok() {
-                            log::info!("Kuality exited; closing the to-do popup");
-                            cx.update(|cx| cx.quit());
-                        }
-                    })
-                    .detach(),
-                Err(e) => log::error!("cannot watch the Kuality process: {e}"),
-            }
+            window::watch_core(core, cx, |_, cx| {
+                log::info!("Kuality exited; closing the to-do popup");
+                cx.quit();
+            });
         }
         let subs = vec![
             cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| {
@@ -303,9 +250,6 @@ impl TodoPopup {
                     log::debug!("to-do popup lost focus; closing");
                     cx.quit();
                 }
-            }),
-            cx.observe_window_appearance(window, |_, window, cx| {
-                style::apply(window, cx);
             }),
         ];
         if peek.is_some() {
@@ -376,14 +320,14 @@ impl TodoPopup {
             return;
         }
         let text = self.input.read(cx).value().to_string();
-        if self.list.add(&text, self.at_top, now()).is_some() {
+        if self.list.add(&text, self.at_top, unix_now()).is_some() {
             self.input.update(cx, |s, cx| s.set_value("", window, cx));
             self.save(cx);
         }
     }
 
     fn set_done(&mut self, id: u64, done: bool, cx: &mut Context<Self>) {
-        if !self.read_only() && self.list.set_done(id, done, now()) {
+        if !self.read_only() && self.list.set_done(id, done, unix_now()) {
             self.save(cx);
         }
     }
@@ -408,7 +352,7 @@ impl TodoPopup {
                     .gap_2()
                     .px_2()
                     .py_1p5()
-                    .rounded(px(style::RADIUS))
+                    .rounded(cx.theme().radius)
                     .hover(move |s| s.bg(hover))
                     .child(
                         Checkbox::new(("todo-done", id))
@@ -481,20 +425,17 @@ impl Render for TodoPopup {
                 h_flex()
                     .justify_between()
                     .px_1()
+                    .child(Label::new("To do").text_base().font_semibold())
                     .child(
-                        div()
-                            .text_base()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("To do"),
-                    )
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        match pending {
+                        Label::new(match pending {
                             _ if ro => String::new(),
                             0 => "All done".to_string(),
                             1 => "1 left".to_string(),
                             n => format!("{n} left"),
-                        },
-                    )),
+                        })
+                        .text_xs()
+                        .text_color(theme.muted_foreground),
+                    ),
             )
             .child(
                 Input::new(&self.input)
@@ -506,28 +447,26 @@ impl Render for TodoPopup {
                     .disabled(ro),
             )
             .when_some(error, |this, e| {
-                this.child(div().px_1().text_xs().text_color(theme.danger).child(e))
+                this.child(Label::new(e).px_1().text_xs().text_color(theme.danger))
             })
-            .child(
+            .child(if rows.is_empty() && !ro {
+                Empty::new()
+                    .flex_1()
+                    .header(EmptyHeader::new().title(EmptyTitle::new().child("Nothing to do")))
+                    .into_any_element()
+            } else {
                 div()
-                    .id("todo-list")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .child(if rows.is_empty() && !ro {
-                        div()
-                            .pt_8()
-                            .w_full()
-                            .flex()
-                            .justify_center()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child("Nothing to do")
-                            .into_any_element()
-                    } else {
-                        v_flex().gap_0p5().children(rows).into_any_element()
-                    }),
-            )
+                    .child(
+                        v_flex()
+                            .size_full()
+                            .gap_0p5()
+                            .overflow_y_scrollbar()
+                            .children(rows),
+                    )
+                    .into_any_element()
+            })
     }
 }
 

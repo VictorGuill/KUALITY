@@ -5,8 +5,12 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::group_box::{GroupBox, GroupBoxVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::label::Label;
 use gpui_kit::component::popover::Popover;
+use gpui_kit::component::separator::Separator;
+use gpui_kit::component::setting::{SettingGroup, SettingPage};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _,
@@ -16,10 +20,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use kuality_protocol::{Action, Binding, BindingEntry, parse_trigger};
 
-use super::controls::{
-    add_button, divider, hint_text, hyper_keycap, keycaps, list_header, section, setting_row,
-    warning_text,
-};
+use super::controls::{self, Weak, add_button, block_item, hint_text, switch_item, warning_text};
 use super::picker::{ActionPicker, PickerEvent, kind_icon};
 use super::{RecordTarget, SettingsWindow};
 use crate::model::{self, ActionKind, Choice};
@@ -71,7 +72,6 @@ pub(crate) struct OpenPicker {
     _sub: Subscription,
 }
 
-const HOTKEY_WIDTH: f32 = 160.;
 const SWITCH_WIDTH: f32 = 52.;
 /// The … and delete buttons at the end of a row.
 const TAIL_WIDTH: f32 = 60.;
@@ -389,11 +389,40 @@ impl SettingsWindow {
 
     // --- Rendering -----------------------------------------------------------------------
 
-    pub(super) fn render_shortcuts(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(super) fn shortcuts_page(&self, weak: &Weak, _cx: &mut Context<Self>) -> SettingPage {
+        let ro = self.read_only();
+        SettingPage::new("Shortcuts")
+            .icon(IconName::SquareTerminal)
+            .group(
+                SettingGroup::new().item(
+                    switch_item(
+                        "Enable shortcuts",
+                        weak,
+                        |w| w.doc.config.shortcuts.enabled,
+                        |w, on, cx| {
+                            w.doc.config.shortcuts.enabled = on;
+                            w.changed(cx);
+                        },
+                    )
+                    .description(
+                        "Run an action with a hotkey: Hyper (CapsLock) + a key, or a combination \
+                         such as Ctrl+Alt+K.",
+                    )
+                    .disabled(ro),
+                ),
+            )
+            .group(
+                SettingGroup::new().title("Hotkeys").item(
+                    block_item(weak, |this, window, cx| {
+                        this.render_shortcut_list(window, cx)
+                    })
+                    .keywords(["shortcut", "hotkey", "action", "app", "keys", "website"]),
+                ),
+            )
+    }
+
+    /// The "Add" button, the notes and the table.
+    fn render_shortcut_list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let ro = self.read_only();
         let s = &self.doc.config.shortcuts;
         // Only Hyper hotkeys need Hyperkey; a draft is still being set up.
@@ -401,82 +430,46 @@ impl SettingsWindow {
             |e| matches!(e, BindingEntry::Valid(b) if b.enabled && model::is_hyper_hotkey(&b.key)),
         );
         let hyper_off = !self.doc.config.hyperkey.enabled && needs_hyper;
-        let enabled = Switch::new("shortcuts-enabled")
-            .accessibility_label("Enable shortcuts")
-            .checked(s.enabled)
-            .disabled(ro)
-            .on_click(cx.listener(|this, on: &bool, _, cx| {
-                this.doc.config.shortcuts.enabled = *on;
-                this.changed(cx);
-            }));
-        let count = s.bindings.len();
-        let section_off = !s.enabled;
+        let (off, count) = (!s.enabled, s.bindings.len());
+        let has_draft = self.draft.is_some();
         let mut rows: Vec<Row> = (0..count).map(Row::Saved).collect();
-        if self.draft.is_some() {
+        if has_draft {
             rows.push(Row::Draft);
         }
-        let has_draft = self.draft.is_some();
         let table = (!rows.is_empty()).then(|| self.render_table(&rows, window, cx));
         v_flex()
-            .gap_4()
+            .gap_3()
             .child(
-                section(cx).child(setting_row(
-                    "Enable shortcuts",
-                    Some(
-                        "Run an action with a hotkey: Hyper (CapsLock) + a key, or a combination \
-                     such as Ctrl+Alt+K."
-                            .into(),
-                    ),
-                    enabled,
-                    cx,
-                )),
-            )
-            .when(hyper_off, |this| {
-                this.child(
-                    h_flex()
-                        .gap_3()
-                        .items_center()
-                        .child(hyper_keycap())
-                        .child(warning_text(
-                            "Hyper shortcuts only work while Hyperkey is enabled.",
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .child(match (rows.is_empty(), off) {
+                        (true, _) => hint_text(
+                            "No shortcuts yet. Add one: press its hotkey, then choose what it \
+                             does.",
                             cx,
-                        ))
-                        .child(
-                            Button::new("enable-hyperkey")
-                                .small()
-                                .secondary()
-                                .label("Enable Hyperkey")
-                                .disabled(ro)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.doc.config.hyperkey.enabled = true;
-                                    this.changed(cx);
-                                })),
                         ),
+                        (_, true) => warning_text(
+                            "Shortcuts are off: turn on \"Enable shortcuts\" to use them.",
+                            cx,
+                        ),
+                        _ => hint_text("The first shortcut with a hotkey wins.", cx),
+                    })
+                    .child(add_button(
+                        "add-binding",
+                        "Add shortcut",
+                        ro || has_draft,
+                        cx,
+                        |this, window, cx| this.add_binding(window, cx),
+                    )),
+            )
+            .children(hyper_off.then(|| {
+                controls::hyper_off_row(
+                    "enable-hyperkey",
+                    "Hyper shortcuts only work while Hyperkey is enabled.",
+                    cx,
                 )
-            })
-            .child(list_header(
-                "Shortcuts",
-                add_button(
-                    "add-binding",
-                    "Add shortcut",
-                    ro || has_draft,
-                    cx,
-                    |this, window, cx| this.add_binding(window, cx),
-                ),
-                cx,
-            ))
-            .when(section_off && count > 0, |this| {
-                this.child(warning_text(
-                    "Shortcuts are off: turn on \"Enable shortcuts\" to use them.",
-                    cx,
-                ))
-            })
-            .when(rows.is_empty(), |this| {
-                this.child(hint_text(
-                    "No shortcuts yet. Add one: press its hotkey, then choose what it does.",
-                    cx,
-                ))
-            })
+            }))
             .children(table)
     }
 
@@ -488,8 +481,6 @@ impl SettingsWindow {
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let header = h_flex()
-            .px_5()
-            .py_2()
             .gap_3()
             .text_xs()
             .font_medium()
@@ -501,17 +492,22 @@ impl SettingsWindow {
                     .min_w_0()
                     .gap_3()
                     .child(grow(div(), NAME_GROW).child("Name"))
-                    .child(div().w(px(HOTKEY_WIDTH)).flex_none().child("Hotkey"))
+                    .child(
+                        div()
+                            .w(px(controls::HOTKEY_WIDTH))
+                            .flex_none()
+                            .child("Hotkey"),
+                    )
                     .child(grow(div(), ACTION_GROW).child("Action")),
             )
             .child(div().w(px(TAIL_WIDTH)).flex_none());
-        let mut table = section(cx).child(header);
+        let mut table = v_flex().gap_2().child(header);
         for &row in rows {
             table = table
-                .child(divider(cx))
+                .child(Separator::horizontal())
                 .child(self.render_row(row, window, cx));
         }
-        table.into_any_element()
+        GroupBox::new().outline().child(table).into_any_element()
     }
 
     fn render_row(&mut self, row: Row, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -536,8 +532,6 @@ impl SettingsWindow {
             Row::Saved(i) => match &self.doc.config.shortcuts.bindings[i] {
                 BindingEntry::Invalid(_) => {
                     return h_flex()
-                        .px_5()
-                        .py_2()
                         .gap_3()
                         .items_center()
                         .child(div().w(px(SWITCH_WIDTH)).flex_none())
@@ -616,8 +610,6 @@ impl SettingsWindow {
             Row::Draft => div().into_any_element(),
         };
         h_flex()
-            .px_5()
-            .py_2()
             .gap_3()
             .items_start()
             .child(
@@ -703,7 +695,7 @@ impl SettingsWindow {
         action: Option<&Action>,
         recording: bool,
         cx: &App,
-    ) -> Vec<Div> {
+    ) -> Vec<Label> {
         let mut out = Vec::new();
         if recording {
             if let Some((_, why)) = self
@@ -774,31 +766,18 @@ impl SettingsWindow {
         key: &str,
         recording: bool,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let caps = (!recording).then(|| model::hotkey_caps(key)).flatten();
-        let button = Button::new(("hotkey", row.id()))
-            .w_full()
-            .when(recording, |b| b.primary())
-            .when(!recording, |b| b.outline())
-            .accessibility_label(format!("Hotkey of {}", row.name()))
-            .when_some(model::hotkey_label(key).filter(|_| !recording), |b, l| {
-                b.tooltip(l)
-            })
-            .disabled(self.read_only())
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.toggle_hotkey_recording(row, window, cx)
-            }));
-        let button = match caps {
-            Some(caps) => button.child(keycaps(&caps, cx)),
-            None => button
-                .icon(Icon::new(gpui_kit::assets::IconName::Keyboard))
-                .label(if recording {
-                    "Press a hotkey…"
-                } else {
-                    "Record hotkey"
-                }),
-        };
-        div().w(px(HOTKEY_WIDTH)).flex_none().child(button)
+    ) -> Button {
+        controls::hotkey_button(
+            ("hotkey", row.id()),
+            key,
+            recording,
+            format!("Hotkey of {}", row.name()),
+            cx,
+        )
+        .disabled(self.read_only())
+        .on_click(
+            cx.listener(move |this, _, window, cx| this.toggle_hotkey_recording(row, window, cx)),
+        )
     }
 
     fn action_button(

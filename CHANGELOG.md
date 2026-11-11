@@ -8,6 +8,19 @@ All notable changes to Kuality. Versions follow [Semantic Versioning](https://se
 
 - **Clipboard history** — Settings → **Clipboard** → Enable keeps what you copy (text and images). Press **Hyper + V** (or record any hotkey, for example **Win + V** to replace the Windows clipboard history) to open it: type to search, ↑/↓ to choose, **Enter** pastes into the app you were in, **Shift+Enter** only copies. **Ctrl+P** pins an entry so it survives restarts, **Ctrl+Delete** removes it.
 - **Private by design** — the history stays in memory only and encrypted; pinned entries are saved encrypted for your Windows account. Passwords copied from password managers that mark them private are never recorded.
+- **Search in Settings** — the Settings window has a search field: type a word ("hotkey", "startup"…) to find a setting in any tab.
+
+### Changed
+
+- **New look** — Settings, the to-do list and the clipboard history now use the standard look of the UI toolkit (colors, corners and font), light or dark with Windows. This prepares choosing and customizing themes later.
+- **Action picker** — when choosing what a shortcut does, "Open website…", "Send keys…", "Open file or folder…" and "Run program…" are listed first, then your apps; typing searches both.
+- **Widget colors** — a color picker next to the color field of a widget.
+
+### Fixed
+
+- Editing settings no longer interrupts a held Hyper key: the keyboard hook is only restarted when Hyperkey, shortcuts or the clipboard hotkey change (before, on every saved change).
+- Copying large images uses far less memory for a moment (no full uncompressed copies), and starting with pinned images is faster.
+- A clipboard history window that stopped responding could block the history for the next one; requests now time out.
 
 ## [1.0.0-beta.4] - 2026-11-10
 

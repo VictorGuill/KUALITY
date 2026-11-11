@@ -17,6 +17,7 @@ mod ui;
 
 use std::process::ExitCode;
 
+use kuality_protocol::cli;
 use kuality_protocol::paths::{DataDir, DataDirSource};
 
 #[cfg(not(windows))]
@@ -39,11 +40,7 @@ pub fn run(args: &[String]) -> ExitCode {
             None
         }
     };
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let data_dir = DataDir::resolve(&exe_dir, platform::roaming_app_data_dir());
+    let data_dir = data_dir();
     if data_dir.source == DataDirSource::Fallback {
         log::warn!("could not resolve %APPDATA%, using the exe directory");
     }
@@ -54,6 +51,16 @@ pub fn run(args: &[String]) -> ExitCode {
     };
     ui::run(data_dir.config_file(), core);
     ExitCode::SUCCESS
+}
+
+/// Where `config.json` and `todos.json` live: next to the exe for a portable copy, else in
+/// `%APPDATA%\\Kuality` (the same rule as the core).
+fn data_dir() -> DataDir {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    DataDir::resolve(&exe_dir, platform::roaming_app_data_dir())
 }
 
 /// Runs the to-do popup until it closes (`kuality.exe --todo [--core-pid <n>] [--at <x>,<y>]`,
@@ -69,11 +76,7 @@ pub fn run_todo(args: &[String]) -> ExitCode {
             None
         }
     };
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let data_dir = DataDir::resolve(&exe_dir, platform::roaming_app_data_dir());
+    let data_dir = data_dir();
     let core = match core_pid_arg(args.iter().cloned()) {
         Some(pid) => match platform::CoreProcess::open(pid) {
             Some(core) => Some(core),
@@ -129,7 +132,7 @@ pub fn run_clipboard(args: &[String]) -> ExitCode {
         },
         None => platform::find_core(),
     };
-    clipboard::run(core, args.iter().any(|a| a == "--paste"));
+    clipboard::run(core, args.iter().any(|a| a == cli::PASTE));
     ExitCode::SUCCESS
 }
 
@@ -138,9 +141,9 @@ pub(crate) fn open_clipboard_popup(core_pid: Option<u32>) {
     let started = std::env::current_exe().and_then(|exe| {
         let dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         let mut cmd = std::process::Command::new(&exe);
-        cmd.arg("--clipboard").current_dir(dir);
+        cmd.arg(cli::CLIPBOARD).current_dir(dir);
         if let Some(pid) = core_pid {
-            cmd.arg(CORE_PID_ARG).arg(pid.to_string());
+            cmd.arg(cli::CORE_PID).arg(pid.to_string());
         }
         cmd.spawn()
     });
@@ -161,7 +164,7 @@ pub(crate) fn open_todo_popup() {
     let started = std::env::current_exe().and_then(|exe| {
         let dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         std::process::Command::new(&exe)
-            .arg("--todo")
+            .arg(cli::TODO)
             .current_dir(dir)
             .spawn()
     });
@@ -192,17 +195,17 @@ pub fn close_todo_popup() -> bool {
     platform::close_todo_popup()
 }
 
-/// Argument the core passes with its pid when it opens this window (after `--settings`).
-const CORE_PID_ARG: &str = "--core-pid";
-
 /// `--core-pid <n>` from the command line, if present and valid.
 fn core_pid_arg(args: impl IntoIterator<Item = String>) -> Option<u32> {
     let mut args = args.into_iter();
     while let Some(a) = args.next() {
-        if a == CORE_PID_ARG {
+        if a == cli::CORE_PID {
             return args.next()?.parse().ok();
         }
-        if let Some(v) = a.strip_prefix("--core-pid=") {
+        if let Some(v) = a
+            .strip_prefix(cli::CORE_PID)
+            .and_then(|v| v.strip_prefix('='))
+        {
             return v.parse().ok();
         }
     }

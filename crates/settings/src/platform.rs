@@ -56,7 +56,6 @@ use windows::core::{BOOL, Interface as _, PCWSTR, PWSTR, w};
 
 use crate::apps::{AppInfo, ICON_PX, RawIcon, straight_alpha};
 use crate::recorder::{Mode, Outcome, Recording};
-use crate::todo::ScreenRect;
 
 /// Window title, also used by a second instance to find the first one.
 pub const WINDOW_TITLE: &str = "Kuality Settings";
@@ -84,7 +83,7 @@ fn own_exe_name() -> OsString {
         .unwrap_or_else(|| "kuality.exe".into())
 }
 
-fn wide(s: &str) -> Vec<u16> {
+pub(crate) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
@@ -385,6 +384,21 @@ fn mutex_exists(mutex: &str) -> bool {
             }
             Err(_) => false,
         }
+    }
+}
+
+/// A screen rectangle in physical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+impl ScreenRect {
+    pub fn contains(&self, (x, y): (i32, i32)) -> bool {
+        x >= self.left && x < self.right && y >= self.top && y < self.bottom
     }
 }
 

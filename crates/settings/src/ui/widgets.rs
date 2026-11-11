@@ -6,12 +6,19 @@ use std::collections::BTreeMap;
 use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::collapsible::Collapsible;
+use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
+use gpui_kit::component::form::{Field, v_form};
+use gpui_kit::component::group_box::{GroupBox, GroupBoxVariants as _};
 use gpui_kit::component::input::{
     Input, InputEvent, InputState, NumberInput, Textarea, TextareaState,
 };
+use gpui_kit::component::label::Label;
+use gpui_kit::component::separator::Separator;
+use gpui_kit::component::setting::{SettingGroup, SettingPage};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+    Disableable as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -22,8 +29,8 @@ use kuality_protocol::{
 
 use super::SettingsWindow;
 use super::controls::{
-    self, INVALID_IN_FILE, add_button, divider, field, hint_text, list_header, section,
-    setting_row, warning_text,
+    self, INVALID_IN_FILE, Note, Weak, add_button, block_item, field, hint_text, switch_item,
+    warning_text,
 };
 use crate::model::{self, Unit};
 
@@ -175,25 +182,17 @@ fn module_label(m: &BarModuleEntry) -> String {
     }
 }
 
-/// Inputs of the expanded text widget.
+/// Inputs of the expanded widget.
 pub(crate) struct WidgetEditor {
     pub index: usize,
-    /// Text widgets only.
+    /// Text widgets only (multi-line).
     text: Option<Entity<TextareaState>>,
-    /// Bars only.
-    gap: Option<Entity<InputState>>,
-    id: Entity<InputState>,
-    x: Entity<InputState>,
-    y: Entity<InputState>,
-    width: Entity<InputState>,
-    height: Entity<InputState>,
-    font_family: Entity<InputState>,
-    font_size: Entity<InputState>,
-    color: Entity<InputState>,
-    x_unit: Unit,
-    y_unit: Unit,
-    width_unit: Unit,
-    height_unit: Unit,
+    /// The single-line inputs, by field (`Gap` only for bars).
+    inputs: BTreeMap<WField, Entity<InputState>>,
+    /// Unit of `X`, `Y`, `Width` and `Height`.
+    units: BTreeMap<WField, Unit>,
+    /// The color picker next to the `Color` input (it writes its choice into that input).
+    color_picker: Entity<ColorPickerState>,
     /// Messages per field: input errors and invalid values read from the file.
     errors: BTreeMap<WField, String>,
     _subs: Vec<Subscription>,
@@ -206,6 +205,26 @@ impl WidgetEditor {
             .filter(|e| e.as_str() != INVALID_IN_FILE)
             .count()
     }
+
+    fn input(&self, f: WField) -> Option<&Entity<InputState>> {
+        self.inputs.get(&f)
+    }
+
+    fn unit(&self, f: WField) -> Unit {
+        self.units.get(&f).copied().unwrap_or(Unit::Px)
+    }
+
+    /// The note under field `f`, if any.
+    fn note(&self, f: WField) -> Option<Note> {
+        self.errors.get(&f).map(|e| Note::error(e.clone()))
+    }
+}
+
+/// How a single-line input of the editor is set up.
+enum InputKind {
+    Line(&'static str),
+    /// A number with +/- buttons, optionally limited to a range.
+    Number(Option<(f64, f64)>),
 }
 
 /// Raw JSON of an invalid value, as text for its input.
@@ -239,6 +258,29 @@ fn dimension_text(d: &Lenient<Dimension>) -> (String, Unit, bool) {
     }
 }
 
+/// A config color for the color picker, and back (8 bits per channel).
+fn to_hsla(c: Color) -> Hsla {
+    let f = |v: u8| f32::from(v) / 255.;
+    Rgba {
+        r: f(c.r),
+        g: f(c.g),
+        b: f(c.b),
+        a: f(c.a),
+    }
+    .into()
+}
+
+fn from_hsla(color: Hsla) -> Color {
+    let c = Rgba::from(color);
+    let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+    Color {
+        a: byte(c.a),
+        r: byte(c.r),
+        g: byte(c.g),
+        b: byte(c.b),
+    }
+}
+
 fn color_hex(c: Color) -> String {
     if c.a == 255 {
         format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
@@ -259,7 +301,7 @@ impl SettingsWindow {
         self.widget_item_mut(index).map(style_mut)
     }
 
-    /// Expands widget `index` (collapses it if it is already open).
+    /// Expands widget `index`: creates its inputs from the config.
     pub(super) fn open_widget(
         &mut self,
         index: usize,
@@ -277,21 +319,37 @@ impl SettingsWindow {
                 errors.insert(f, INVALID_IN_FILE.to_string());
             }
         };
-        let (x, x_unit, ok) = length_text(&t.common.x);
-        mark(WField::X, ok);
-        let (y, y_unit, ok) = length_text(&t.common.y);
-        mark(WField::Y, ok);
-        let (w, width_unit, ok) = dimension_text(&t.common.width);
-        mark(WField::Width, ok);
-        let (h, height_unit, ok) = dimension_text(&t.common.height);
-        mark(WField::Height, ok);
-        let font_size = match &t.font_size {
+        let number = |f: WField, v: &Lenient<f64>, mark: &mut dyn FnMut(WField, bool)| match v {
             Lenient::Valid(v) => model::format_number(*v),
             Lenient::Invalid(v) => {
-                mark(WField::FontSize, false);
+                mark(f, false);
                 raw_text(v)
             }
         };
+        let mut units = BTreeMap::new();
+        // Field, initial text and kind of every single-line input.
+        let mut lines: Vec<(WField, String, InputKind)> =
+            vec![(WField::Id, t.common.id.clone(), InputKind::Line("#index"))];
+        for (f, (text, unit, ok)) in [
+            (WField::X, length_text(&t.common.x)),
+            (WField::Y, length_text(&t.common.y)),
+            (WField::Width, dimension_text(&t.common.width)),
+            (WField::Height, dimension_text(&t.common.height)),
+        ] {
+            mark(f, ok);
+            units.insert(f, unit);
+            lines.push((f, text, InputKind::Number(None)));
+        }
+        lines.push((
+            WField::FontFamily,
+            t.font_family.clone(),
+            InputKind::Line("Segoe UI Variable Text"),
+        ));
+        lines.push((
+            WField::FontSize,
+            number(WField::FontSize, &t.font_size, &mut mark),
+            InputKind::Number(Some(model::FONT_SIZE_RANGE)),
+        ));
         let color = match &t.color {
             Lenient::Valid(None) => String::new(),
             Lenient::Valid(Some(c)) => color_hex(*c),
@@ -300,36 +358,20 @@ impl SettingsWindow {
                 raw_text(v)
             }
         };
+        lines.push((WField::Color, color, InputKind::Line("#RRGGBB")));
         mark(WField::Anchor, t.common.anchor.valid().is_some());
         mark(WField::Origin, t.common.origin.valid().is_some());
         mark(WField::Weight, t.font_weight.valid().is_some());
-        let gap_text = match &t.kind {
-            SnapKind::Text { align, .. } => {
-                mark(WField::Align, align.valid().is_some());
-                None
-            }
-            SnapKind::Bar { gap, .. } => Some(match gap {
-                Lenient::Valid(v) => model::format_number(*v),
-                Lenient::Invalid(v) => {
-                    mark(WField::Gap, false);
-                    raw_text(v)
-                }
-            }),
-        };
+        match &t.kind {
+            SnapKind::Text { align, .. } => mark(WField::Align, align.valid().is_some()),
+            SnapKind::Bar { gap, .. } => lines.push((
+                WField::Gap,
+                number(WField::Gap, gap, &mut mark),
+                InputKind::Number(Some(model::GAP_RANGE)),
+            )),
+        }
 
-        let line = |value: String,
-                    placeholder: &'static str,
-                    window: &mut Window,
-                    cx: &mut Context<Self>| {
-            cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder(placeholder)
-                    .default_value(value)
-            })
-        };
-        let number = |value: String, window: &mut Window, cx: &mut Context<Self>| {
-            cx.new(|cx| InputState::new(window, cx).step(1.0).default_value(value))
-        };
+        let mut subs = Vec::new();
         let text = match &t.kind {
             SnapKind::Text { text, .. } => Some(cx.new(|cx| {
                 let mut s = TextareaState::new(window, cx).default_value(text.clone());
@@ -338,31 +380,6 @@ impl SettingsWindow {
             })),
             SnapKind::Bar { .. } => None,
         };
-        let gap = gap_text.map(|g| {
-            cx.new(|cx| {
-                InputState::new(window, cx)
-                    .step(1.0)
-                    .min(model::GAP_RANGE.0)
-                    .max(model::GAP_RANGE.1)
-                    .default_value(g)
-            })
-        });
-        let id = line(t.common.id.clone(), "#index", window, cx);
-        let x = number(x, window, cx);
-        let y = number(y, window, cx);
-        let width = number(w, window, cx);
-        let height = number(h, window, cx);
-        let font_family = line(t.font_family.clone(), "Segoe UI Variable Text", window, cx);
-        let font_size = cx.new(|cx| {
-            InputState::new(window, cx)
-                .step(1.0)
-                .min(model::FONT_SIZE_RANGE.0)
-                .max(model::FONT_SIZE_RANGE.1)
-                .default_value(font_size)
-        });
-        let color = line(color, "#RRGGBB", window, cx);
-
-        let mut subs = Vec::new();
         if let Some(text) = &text {
             subs.push(
                 cx.subscribe_in(text, window, |this, _, ev: &InputEvent, window, cx| {
@@ -372,27 +389,18 @@ impl SettingsWindow {
                 }),
             );
         }
-        if let Some(gap) = &gap {
-            subs.push(
-                cx.subscribe_in(gap, window, |this, _, ev: &InputEvent, window, cx| {
-                    if matches!(ev, InputEvent::Change) {
-                        this.widget_field_changed(WField::Gap, window, cx);
-                    }
-                }),
-            );
-        }
-        for (input, f) in [
-            (&id, WField::Id),
-            (&x, WField::X),
-            (&y, WField::Y),
-            (&width, WField::Width),
-            (&height, WField::Height),
-            (&font_family, WField::FontFamily),
-            (&font_size, WField::FontSize),
-            (&color, WField::Color),
-        ] {
+        let mut inputs = BTreeMap::new();
+        for (f, value, kind) in lines {
+            let input = cx.new(|cx| {
+                let state = InputState::new(window, cx).default_value(value);
+                match kind {
+                    InputKind::Line(placeholder) => state.placeholder(placeholder),
+                    InputKind::Number(None) => state.step(1.0),
+                    InputKind::Number(Some((min, max))) => state.step(1.0).min(min).max(max),
+                }
+            });
             subs.push(cx.subscribe_in(
-                input,
+                &input,
                 window,
                 move |this, _, ev: &InputEvent, window, cx| {
                     if matches!(ev, InputEvent::Change) {
@@ -400,23 +408,40 @@ impl SettingsWindow {
                     }
                 },
             ));
+            inputs.insert(f, input);
         }
+        let color_picker = cx.new(|cx| {
+            let state = ColorPickerState::new(window, cx);
+            match t.color {
+                Lenient::Valid(Some(c)) => state.default_value(to_hsla(c)),
+                _ => state,
+            }
+        });
+        // A color chosen in the picker goes through the hex input, like a typed one.
+        subs.push(cx.subscribe_in(
+            &color_picker,
+            window,
+            |this, _, ev: &ColorPickerEvent, window, cx| {
+                let ColorPickerEvent::Change(Some(color)) = ev else {
+                    return;
+                };
+                let hex = color_hex(from_hsla(*color));
+                let input = this
+                    .widget_editor
+                    .as_ref()
+                    .and_then(|ed| ed.input(WField::Color).cloned());
+                if let Some(input) = input {
+                    input.update(cx, |s, cx| s.set_value(hex, window, cx));
+                    this.widget_field_changed(WField::Color, window, cx);
+                }
+            },
+        ));
         self.widget_editor = Some(WidgetEditor {
             index,
             text,
-            gap,
-            id,
-            x,
-            y,
-            width,
-            height,
-            font_family,
-            font_size,
-            color,
-            x_unit,
-            y_unit,
-            width_unit,
-            height_unit,
+            inputs,
+            units,
+            color_picker,
             errors,
             _subs: subs,
         });
@@ -424,112 +449,88 @@ impl SettingsWindow {
     }
 
     /// Reads the changed input, validates it and stores it if valid.
-    fn widget_field_changed(&mut self, f: WField, _window: &mut Window, cx: &mut Context<Self>) {
+    fn widget_field_changed(&mut self, f: WField, window: &mut Window, cx: &mut Context<Self>) {
         if self.read_only() {
             return;
         }
         let Some(ed) = self.widget_editor.as_ref() else {
             return;
         };
-        let index = ed.index;
-        let value = |e: &Entity<InputState>| e.read(cx).value().to_string();
-        let text = match f {
-            WField::Text => match &ed.text {
-                Some(t) => t.read(cx).value().to_string(),
-                None => return,
-            },
-            WField::Gap => match &ed.gap {
-                Some(g) => value(g),
-                None => return,
-            },
-            WField::Id => value(&ed.id),
-            WField::X => value(&ed.x),
-            WField::Y => value(&ed.y),
-            WField::Width => value(&ed.width),
-            WField::Height => value(&ed.height),
-            WField::FontFamily => value(&ed.font_family),
-            WField::FontSize => value(&ed.font_size),
-            WField::Color => value(&ed.color),
+        let (index, unit) = (ed.index, ed.unit(f));
+        let text = match (f, &ed.text, ed.input(f)) {
+            (WField::Text, Some(text), _) => text.read(cx).value().to_string(),
+            (_, _, Some(input)) => input.read(cx).value().to_string(),
             _ => return,
         };
-        let (x_unit, y_unit, w_unit, h_unit) =
-            (ed.x_unit, ed.y_unit, ed.width_unit, ed.height_unit);
         let Some(t) = self.style_mut(index) else {
             return;
         };
-        let result: Result<(), String> = match f {
+        // A valid color typed in the input, to show in the color picker.
+        let mut picked = None;
+        let result: Result<(), &'static str> = match f {
             WField::Text => {
                 if let Some(s) = t.text {
                     *s = text;
                 }
                 Ok(())
             }
-            WField::Gap => model::parse_gap(&text)
-                .map(|v| {
-                    if let Some(g) = t.gap {
-                        *g = Lenient::Valid(v);
-                    }
-                })
-                .map_err(Into::into),
             WField::Id => {
                 t.common.id = text;
                 Ok(())
             }
-            WField::X => model::parse_number(&text)
-                .map(|v| t.common.x = Lenient::Valid(x_unit.make(v)))
-                .map_err(Into::into),
-            WField::Y => model::parse_number(&text)
-                .map(|v| t.common.y = Lenient::Valid(y_unit.make(v)))
-                .map_err(Into::into),
-            WField::Width => {
-                if matches!(t.common.width, Lenient::Valid(Dimension::Auto)) {
+            WField::X | WField::Y => model::parse_number(&text).map(|v| {
+                let length = if f == WField::X {
+                    &mut t.common.x
+                } else {
+                    &mut t.common.y
+                };
+                *length = Lenient::Valid(unit.make(v));
+            }),
+            WField::Width | WField::Height => {
+                let size = if f == WField::Width {
+                    &mut t.common.width
+                } else {
+                    &mut t.common.height
+                };
+                // "Auto" ignores the number until it is unticked.
+                if matches!(size, Lenient::Valid(Dimension::Auto)) {
                     Ok(())
                 } else {
                     model::parse_size(&text)
-                        .map(|v| t.common.width = Lenient::Valid(Dimension::Length(w_unit.make(v))))
-                        .map_err(Into::into)
-                }
-            }
-            WField::Height => {
-                if matches!(t.common.height, Lenient::Valid(Dimension::Auto)) {
-                    Ok(())
-                } else {
-                    model::parse_size(&text)
-                        .map(|v| {
-                            t.common.height = Lenient::Valid(Dimension::Length(h_unit.make(v)))
-                        })
-                        .map_err(Into::into)
+                        .map(|v| *size = Lenient::Valid(Dimension::Length(unit.make(v))))
                 }
             }
             WField::FontFamily => model::validate_font_family(&text)
-                .map(|()| *t.font_family = text.trim().to_string())
-                .map_err(Into::into),
-            WField::FontSize => model::parse_font_size(&text)
-                .map(|v| *t.font_size = Lenient::Valid(v))
-                .map_err(Into::into),
-            WField::Color => {
-                if matches!(*t.color, Lenient::Valid(None)) {
-                    Ok(())
-                } else {
-                    model::parse_color(&text)
-                        .map(|c| *t.color = Lenient::Valid(Some(c)))
-                        .map_err(Into::into)
-                }
+                .map(|()| *t.font_family = text.trim().to_string()),
+            WField::FontSize => {
+                model::parse_font_size(&text).map(|v| *t.font_size = Lenient::Valid(v))
             }
-            _ => Ok(()),
+            WField::Gap => model::parse_gap(&text).map(|v| {
+                if let Some(g) = t.gap {
+                    *g = Lenient::Valid(v);
+                }
+            }),
+            // "Theme color" ignores the hex value until it is unticked.
+            WField::Color if matches!(*t.color, Lenient::Valid(None)) => Ok(()),
+            WField::Color => model::parse_color(&text).map(|c| {
+                *t.color = Lenient::Valid(Some(c));
+                picked = Some(c);
+            }),
+            // Choices are set by `widget_choice`.
+            WField::Anchor | WField::Origin | WField::Weight | WField::Align => Ok(()),
         };
-        let ok = result.is_ok();
         if let Some(ed) = self.widget_editor.as_mut() {
             match result {
-                Ok(()) => {
-                    ed.errors.remove(&f);
-                }
-                Err(e) => {
-                    ed.errors.insert(f, e);
-                }
+                Ok(()) => ed.errors.remove(&f),
+                Err(e) => ed.errors.insert(f, e.to_string()),
+            };
+            if let Some(color) = picked {
+                // `set_value` does not report a change back, so there is no loop.
+                ed.color_picker
+                    .update(cx, |p, cx| p.set_value(to_hsla(color), window, cx));
             }
         }
-        if ok {
+        if result.is_ok() {
             self.changed(cx);
         } else {
             cx.notify();
@@ -552,81 +553,71 @@ impl SettingsWindow {
 
     fn set_unit(&mut self, f: WField, unit: Unit, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ed) = self.widget_editor.as_mut() {
-            match f {
-                WField::X => ed.x_unit = unit,
-                WField::Y => ed.y_unit = unit,
-                WField::Width => ed.width_unit = unit,
-                WField::Height => ed.height_unit = unit,
-                _ => {}
-            }
+            ed.units.insert(f, unit);
         }
         self.widget_field_changed(f, window, cx);
     }
 
-    fn set_auto(&mut self, f: WField, auto: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Ticks or unticks "Auto" of `Width` / `Height`, or "Theme color" of `Color`: `value` is
+    /// what the field holds while it is on, `fallback` the text put in its input when it is
+    /// turned off with nothing valid there.
+    fn set_automatic(
+        &mut self,
+        f: WField,
+        on: bool,
+        fallback: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(ed) = self.widget_editor.as_ref() else {
             return;
         };
-        let index = ed.index;
-        let input = if f == WField::Width {
-            ed.width.clone()
-        } else {
-            ed.height.clone()
-        };
+        let (index, input) = (ed.index, ed.input(f).cloned());
         if let Some(t) = self.style_mut(index) {
-            let dim = if f == WField::Width {
-                &mut t.common.width
-            } else {
-                &mut t.common.height
-            };
-            if auto {
-                *dim = Lenient::Valid(Dimension::Auto);
-            } else {
-                // Leave Auto with a placeholder value the field then validates.
-                *dim = Lenient::Valid(Dimension::Length(kuality_protocol::Length::Px(0.0)));
+            // Off: a placeholder value the input then replaces with what it holds.
+            match f {
+                WField::Width | WField::Height => {
+                    let size = if f == WField::Width {
+                        &mut t.common.width
+                    } else {
+                        &mut t.common.height
+                    };
+                    *size = Lenient::Valid(if on {
+                        Dimension::Auto
+                    } else {
+                        Dimension::Length(kuality_protocol::Length::Px(0.0))
+                    });
+                }
+                WField::Color => {
+                    let white = Color {
+                        a: 255,
+                        r: 255,
+                        g: 255,
+                        b: 255,
+                    };
+                    *t.color = Lenient::Valid((!on).then_some(white));
+                }
+                _ => return,
             }
         }
         if let Some(ed) = self.widget_editor.as_mut() {
             ed.errors.remove(&f);
         }
-        if !auto && model::parse_size(&input.read(cx).value()).is_err() {
-            input.update(cx, |s, cx| s.set_value("100", window, cx));
-        }
-        if auto {
+        if on {
             self.changed(cx);
-        } else {
-            self.widget_field_changed(f, window, cx);
-        }
-    }
-
-    fn set_theme_color(&mut self, theme: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(ed) = self.widget_editor.as_ref() else {
             return;
-        };
-        let (index, input) = (ed.index, ed.color.clone());
-        if let Some(t) = self.style_mut(index) {
-            *t.color = if theme {
-                Lenient::Valid(None)
-            } else {
-                Lenient::Valid(Some(Color {
-                    a: 255,
-                    r: 255,
-                    g: 255,
-                    b: 255,
-                }))
+        }
+        if let Some(input) = input {
+            let text = input.read(cx).value();
+            let valid = match f {
+                WField::Color => model::parse_color(&text).is_ok(),
+                _ => model::parse_size(&text).is_ok(),
             };
+            if !valid {
+                input.update(cx, |s, cx| s.set_value(fallback, window, cx));
+            }
         }
-        if let Some(ed) = self.widget_editor.as_mut() {
-            ed.errors.remove(&WField::Color);
-        }
-        if !theme && model::parse_color(&input.read(cx).value()).is_err() {
-            input.update(cx, |s, cx| s.set_value("#FFFFFF", window, cx));
-        }
-        if theme {
-            self.changed(cx);
-        } else {
-            self.widget_field_changed(WField::Color, window, cx);
-        }
+        self.widget_field_changed(f, window, cx);
     }
 
     fn add_widget(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -703,73 +694,78 @@ impl SettingsWindow {
         self.changed(cx);
     }
 
-    pub(super) fn render_widgets(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(super) fn widgets_page(&self, weak: &Weak, _cx: &mut Context<Self>) -> SettingPage {
         let ro = self.read_only();
-        let w = &self.doc.config.widgets;
-        let enabled = Switch::new("widgets-enabled")
-            .accessibility_label("Show taskbar widgets")
-            .checked(w.enabled)
-            .disabled(ro)
-            .on_click(cx.listener(|this, on: &bool, _, cx| {
-                this.doc.config.widgets.enabled = *on;
-                this.changed(cx);
-            }));
-        let fullscreen = Switch::new("widgets-fullscreen")
-            .accessibility_label("Hide when a fullscreen app is in front")
-            .checked(w.hide_on_fullscreen)
-            .disabled(ro)
-            .on_click(cx.listener(|this, on: &bool, _, cx| {
-                this.doc.config.widgets.hide_on_fullscreen = *on;
-                this.changed(cx);
-            }));
-        let section_off = !w.enabled;
-        let count = w.items.len();
-        let mut rows: Vec<AnyElement> = Vec::new();
-        for index in 0..count {
-            rows.push(self.render_widget_row(index, window, cx));
-        }
+        SettingPage::new("Widgets")
+            .icon(IconName::PanelBottom)
+            .group(
+                SettingGroup::new()
+                    .item(
+                        switch_item(
+                            "Show taskbar widgets",
+                            weak,
+                            |w| w.doc.config.widgets.enabled,
+                            |w, on, cx| {
+                                w.doc.config.widgets.enabled = on;
+                                w.changed(cx);
+                            },
+                        )
+                        .description("Draw the widgets below on top of the Windows taskbar.")
+                        .disabled(ro),
+                    )
+                    .item(
+                        switch_item(
+                            "Hide when a fullscreen app is in front",
+                            weak,
+                            |w| w.doc.config.widgets.hide_on_fullscreen,
+                            |w, on, cx| {
+                                w.doc.config.widgets.hide_on_fullscreen = on;
+                                w.changed(cx);
+                            },
+                        )
+                        .disabled(ro),
+                    ),
+            )
+            .group(SettingGroup::new().title("Items").item(
+                block_item(weak, |this, window, cx| this.render_widget_list(window, cx)).keywords(
+                    [
+                        "widget", "text", "bar", "position", "anchor", "font", "color", "size",
+                    ],
+                ),
+            ))
+    }
+
+    /// The "Add" button, the notes and one card per widget.
+    fn render_widget_list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let ro = self.read_only();
+        let widgets = &self.doc.config.widgets;
+        let (off, count) = (!widgets.enabled, widgets.items.len());
+        let rows: Vec<AnyElement> = (0..count)
+            .map(|index| self.render_widget_row(index, window, cx))
+            .collect();
         v_flex()
-            .gap_4()
+            .gap_3()
             .child(
-                section(cx)
-                    .child(setting_row(
-                        "Show taskbar widgets",
-                        Some("Draw the widgets below on top of the Windows taskbar.".into()),
-                        enabled,
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .child(match (count, off) {
+                        (0, _) => hint_text("No widgets yet. Add a text widget to start.", cx),
+                        (_, true) => warning_text(
+                            "Taskbar widgets are off: turn on \"Show taskbar widgets\" to see \
+                             them.",
+                            cx,
+                        ),
+                        _ => hint_text("Shown on every taskbar.", cx),
+                    })
+                    .child(add_button(
+                        "add-widget",
+                        "Add text widget",
+                        ro,
                         cx,
-                    ))
-                    .child(divider(cx))
-                    .child(setting_row(
-                        "Hide when a fullscreen app is in front",
-                        None,
-                        fullscreen,
-                        cx,
+                        |this, window, cx| this.add_widget(window, cx),
                     )),
             )
-            .child(list_header(
-                "Widgets",
-                add_button(
-                    "add-widget",
-                    "Add text widget",
-                    ro,
-                    cx,
-                    |this, window, cx| this.add_widget(window, cx),
-                ),
-                cx,
-            ))
-            .when(section_off && count > 0, |this| {
-                this.child(warning_text(
-                    "Taskbar widgets are off: turn on \"Show taskbar widgets\" to see them.",
-                    cx,
-                ))
-            })
-            .when(count == 0, |this| {
-                this.child(hint_text("No widgets yet. Add a text widget to start.", cx))
-            })
             .children(rows)
     }
 
@@ -797,11 +793,10 @@ impl SettingsWindow {
             }));
         let item = match entry {
             WidgetEntry::Unknown(v) => {
-                return section(cx)
+                return GroupBox::new()
+                    .outline()
                     .child(
                         h_flex()
-                            .px_5()
-                            .py_2()
                             .gap_3()
                             .justify_between()
                             .child(hint_text(
@@ -871,8 +866,6 @@ impl SettingsWindow {
             }));
         let header = h_flex()
             .id(("widget-row", index))
-            .px_5()
-            .py_2()
             .gap_3()
             .items_center()
             .child(toggle)
@@ -880,7 +873,7 @@ impl SettingsWindow {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_sm().truncate().child(title))
+                    .child(Label::new(title).text_sm().truncate())
                     .child(hint_text(
                         if t.common.id.is_empty() {
                             format!("#{index}")
@@ -895,13 +888,22 @@ impl SettingsWindow {
             })
             .child(expand)
             .child(delete);
-        let mut card = section(cx).child(header);
-        if open {
-            card = card
-                .child(divider(cx))
-                .child(self.render_widget_editor(&t, window, cx));
-        }
-        card.into_any_element()
+        // The editor exists only while the card is open (its inputs belong to that widget).
+        let editor = open.then(|| {
+            v_flex()
+                .gap_4()
+                .child(Separator::horizontal())
+                .child(self.render_widget_editor(&t, window, cx))
+        });
+        GroupBox::new()
+            .outline()
+            .child(
+                Collapsible::new()
+                    .open(open)
+                    .child(header)
+                    .when_some(editor, |c, editor| c.content(div().pt_4().child(editor))),
+            )
+            .into_any_element()
     }
 
     fn render_widget_editor(
@@ -915,54 +917,41 @@ impl SettingsWindow {
         };
         let ro = self.read_only();
         let duplicate = model::duplicate_widget_id(&self.doc.config.widgets.items, ed.index);
-        let (text, gap, id, x, y, width, height, family, size, color) = (
-            ed.text.clone(),
-            ed.gap.clone(),
-            ed.id.clone(),
-            ed.x.clone(),
-            ed.y.clone(),
-            ed.width.clone(),
-            ed.height.clone(),
-            ed.font_family.clone(),
-            ed.font_size.clone(),
-            ed.color.clone(),
-        );
-        let (xu, yu, wu, hu) = (ed.x_unit, ed.y_unit, ed.width_unit, ed.height_unit);
-        let errors: BTreeMap<WField, String> = ed.errors.clone();
         let width_auto = matches!(t.common.width, Lenient::Valid(Dimension::Auto));
         let height_auto = matches!(t.common.height, Lenient::Valid(Dimension::Auto));
         let theme_color = matches!(t.color, Lenient::Valid(None));
-
-        let unit_group = |id: &'static str, f: WField, unit: Unit, cx: &mut Context<Self>| {
+        let number = |f: WField| {
+            ed.input(f)
+                .map(|input| NumberInput::new(input).small().w(px(130.)).disabled(ro))
+        };
+        let line = |f: WField| {
+            ed.input(f)
+                .map(|input| Input::new(input).small().disabled(ro))
+        };
+        let unit_choice = |id: &'static str, f: WField, cx: &mut Context<Self>| {
             controls::segmented(
                 id,
                 &UNITS,
-                Some(unit),
+                Some(ed.unit(f)),
                 ro,
                 cx,
                 move |this, u, window, cx| this.set_unit(f, u, window, cx),
             )
         };
-        let length_field = |label: &'static str,
-                            f: WField,
-                            input: Entity<InputState>,
-                            unit: Unit,
-                            unit_id: &'static str,
-                            cx: &mut Context<Self>| {
+        // "X" / "Y": a number and its unit.
+        let length_field = |label: &'static str, f: WField, id, cx: &mut Context<Self>| {
             field(
                 label,
                 h_flex()
                     .gap_2()
-                    .child(NumberInput::new(&input).small().w(px(130.)).disabled(ro))
-                    .child(unit_group(unit_id, f, unit, cx)),
-                errors.get(&f).map(String::as_str),
-                cx,
+                    .children(number(f))
+                    .child(unit_choice(id, f, cx)),
+                ed.note(f),
             )
         };
+        // "Width" / "Height": "Auto", or a number and its unit.
         let size_field = |label: &'static str,
                           f: WField,
-                          input: Entity<InputState>,
-                          unit: Unit,
                           auto: bool,
                           ids: (&'static str, &'static str),
                           cx: &mut Context<Self>| {
@@ -977,19 +966,13 @@ impl SettingsWindow {
                             .checked(auto)
                             .disabled(ro)
                             .on_click(cx.listener(move |this, on: &bool, window, cx| {
-                                this.set_auto(f, *on, window, cx)
+                                this.set_automatic(f, *on, "100", window, cx)
                             })),
                     )
-                    .when(!auto, |this| {
-                        this.child(NumberInput::new(&input).small().w(px(130.)).disabled(ro))
-                            .child(unit_group(ids.1, f, unit, cx))
+                    .when(!auto, |row| {
+                        row.children(number(f)).child(unit_choice(ids.1, f, cx))
                     }),
-                if auto {
-                    None
-                } else {
-                    errors.get(&f).map(String::as_str)
-                },
-                cx,
+                ed.note(f).filter(|_| !auto),
             )
         };
 
@@ -1032,119 +1015,123 @@ impl SettingsWindow {
                 this.widget_choice(WField::Weight, cx, |t| *t.font_weight = Lenient::Valid(v))
             },
         );
-        let align = match &t.kind {
-            SnapKind::Text { align, .. } => Some(controls::segmented(
-                "align",
-                &ALIGNS,
-                align.valid().copied(),
-                ro,
-                cx,
-                |this, v, _, cx| {
-                    this.widget_choice(WField::Align, cx, |t| {
-                        if let Some(a) = t.align {
-                            *a = Lenient::Valid(v);
-                        }
-                    })
-                },
-            )),
-            SnapKind::Bar { .. } => None,
-        };
-        let modules = match &t.kind {
-            SnapKind::Bar { modules, .. } => Some(self.render_bar_modules(modules, cx)),
-            SnapKind::Text { .. } => None,
-        };
-        let empty_text = matches!(&t.kind, SnapKind::Text { text, .. } if text.trim().is_empty());
-        let swatch = match t.color {
-            Lenient::Valid(Some(c)) => Some(
-                div()
-                    .size_5()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(rgba(u32::from_be_bytes([c.r, c.g, c.b, c.a]))),
+
+        // What the widget shows: its text, or the modules of a bar.
+        let content = match &t.kind {
+            SnapKind::Text { text, .. } => field(
+                "Text",
+                div().children(ed.text.as_ref().map(|s| Textarea::new(s).disabled(ro))),
+                ed.note(WField::Text).or_else(|| {
+                    text.trim()
+                        .is_empty()
+                        .then(|| Note::hint("Empty text: the widget is not shown."))
+                }),
             ),
-            _ => None,
+            SnapKind::Bar { modules, .. } => self.bar_modules_field(modules, cx),
         };
+        // Text widgets align their text; bars space their modules.
+        let last_style_field = match &t.kind {
+            SnapKind::Text { align, .. } => field(
+                "Align (inside the widget box)",
+                controls::segmented(
+                    "align",
+                    &ALIGNS,
+                    align.valid().copied(),
+                    ro,
+                    cx,
+                    |this, v, _, cx| {
+                        this.widget_choice(WField::Align, cx, |t| {
+                            if let Some(a) = t.align {
+                                *a = Lenient::Valid(v);
+                            }
+                        })
+                    },
+                ),
+                ed.note(WField::Align),
+            ),
+            SnapKind::Bar { .. } => field(
+                "Space between modules (px)",
+                div().children(number(WField::Gap)),
+                ed.note(WField::Gap),
+            ),
+        };
+        let color = field(
+            "Color",
+            h_flex()
+                .gap_2()
+                .child(
+                    Checkbox::new("theme-color")
+                        .label("Theme color")
+                        .accessibility_label("Theme color")
+                        .checked(theme_color)
+                        .disabled(ro)
+                        .on_click(cx.listener(|this, on: &bool, window, cx| {
+                            this.set_automatic(WField::Color, *on, "#FFFFFF", window, cx)
+                        })),
+                )
+                .when(!theme_color, |row| {
+                    row.children(line(WField::Color).map(|i| i.w(px(130.))))
+                        .child(
+                            ColorPicker::new(&ed.color_picker)
+                                .small()
+                                .accessibility_label("Pick a color"),
+                        )
+                }),
+            if theme_color {
+                Some(Note::hint(
+                    "Light or dark text, chosen from the taskbar behind the widget.",
+                ))
+            } else {
+                ed.note(WField::Color)
+            },
+        );
+        let id = field(
+            "Id",
+            div().children(line(WField::Id)),
+            ed.note(WField::Id).or_else(|| {
+                duplicate.then(|| Note::warning("Only the first item with this id is shown"))
+            }),
+        );
+        let heading = |text: &'static str| Label::new(text).text_sm().font_semibold();
 
         v_flex()
-            .px_5()
-            .py_4()
             .gap_4()
-            .when_some(text, |this, text| {
-                this.child(field(
-                    "Text",
-                    Textarea::new(&text).disabled(ro),
-                    errors.get(&WField::Text).map(String::as_str),
-                    cx,
-                ))
-            })
-            .when(empty_text, |this| {
-                this.child(hint_text("Empty text: the widget is not shown.", cx))
-            })
-            .children(modules)
+            .child(v_form().columns(2).child(content.col_span(2)).child(id))
+            .child(heading("Position"))
             .child(
-                h_flex()
-                    .gap_4()
-                    .items_start()
+                v_form()
+                    .columns(2)
                     .child(
                         field(
-                            "Id",
-                            Input::new(&id).small().disabled(ro),
-                            errors.get(&WField::Id).map(String::as_str),
-                            cx,
+                            "Anchor (point of the taskbar)",
+                            anchor,
+                            ed.note(WField::Anchor),
                         )
-                        .w(px(220.)),
+                        .col_span(2),
                     )
-                    .when(duplicate, |this| {
-                        this.child(div().pt_5().child(warning_text(
-                            "Only the first item with this id is shown",
-                            cx,
-                        )))
-                    }),
-            )
-            .child(div().text_sm().font_semibold().child("Position"))
-            .child(field(
-                "Anchor (point of the taskbar)",
-                anchor,
-                errors.get(&WField::Anchor).map(String::as_str),
-                cx,
-            ))
-            .child(
-                h_flex()
-                    .gap_6()
-                    .flex_wrap()
                     .child(length_field(
                         "X (from the anchor, + = right)",
                         WField::X,
-                        x,
-                        xu,
                         "x-unit",
                         cx,
                     ))
                     .child(length_field(
                         "Y (from the top edge, + = down)",
                         WField::Y,
-                        y,
-                        yu,
                         "y-unit",
                         cx,
-                    )),
-            )
-            .child(field(
-                "Origin (point of the widget placed at X, Y)",
-                v_flex().gap_1().children(origin_rows),
-                errors.get(&WField::Origin).map(String::as_str),
-                cx,
-            ))
-            .child(
-                h_flex()
-                    .gap_6()
-                    .flex_wrap()
+                    ))
+                    .child(
+                        field(
+                            "Origin (point of the widget placed at X, Y)",
+                            v_flex().gap_1().children(origin_rows),
+                            ed.note(WField::Origin),
+                        )
+                        .col_span(2),
+                    )
                     .child(size_field(
                         "Width",
                         WField::Width,
-                        width,
-                        wu,
                         width_auto,
                         ("width-auto", "width-unit"),
                         cx,
@@ -1152,107 +1139,42 @@ impl SettingsWindow {
                     .child(size_field(
                         "Height",
                         WField::Height,
-                        height,
-                        hu,
                         height_auto,
                         ("height-auto", "height-unit"),
                         cx,
                     )),
             )
-            .child(div().text_sm().font_semibold().child("Text style"))
+            .child(heading("Text style"))
             .child(
-                h_flex()
-                    .gap_4()
-                    .items_start()
-                    .flex_wrap()
-                    .child(
-                        field(
-                            "Font",
-                            Input::new(&family).small().disabled(ro),
-                            errors.get(&WField::FontFamily).map(String::as_str),
-                            cx,
-                        )
-                        .w(px(240.)),
-                    )
+                v_form()
+                    .columns(2)
+                    .child(field(
+                        "Font",
+                        div().children(line(WField::FontFamily)),
+                        ed.note(WField::FontFamily),
+                    ))
                     .child(field(
                         "Size",
-                        NumberInput::new(&size).small().w(px(130.)).disabled(ro),
-                        errors.get(&WField::FontSize).map(String::as_str),
-                        cx,
-                    )),
+                        div().children(number(WField::FontSize)),
+                        ed.note(WField::FontSize),
+                    ))
+                    .child(field("Weight", weight, ed.note(WField::Weight)))
+                    .child(last_style_field)
+                    .child(color.col_span(2)),
             )
-            .child(field(
-                "Weight",
-                weight,
-                errors.get(&WField::Weight).map(String::as_str),
-                cx,
-            ))
-            .when_some(align, |this, align| {
-                this.child(field(
-                    "Align (inside the widget box)",
-                    align,
-                    errors.get(&WField::Align).map(String::as_str),
-                    cx,
-                ))
-            })
-            .when_some(gap, |this, gap| {
-                this.child(field(
-                    "Space between modules (px)",
-                    NumberInput::new(&gap).small().w(px(130.)).disabled(ro),
-                    errors.get(&WField::Gap).map(String::as_str),
-                    cx,
-                ))
-            })
-            .child(field(
-                "Color",
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Checkbox::new("theme-color")
-                            .label("Theme color")
-                            .accessibility_label("Theme color")
-                            .checked(theme_color)
-                            .disabled(ro)
-                            .on_click(cx.listener(|this, on: &bool, window, cx| {
-                                this.set_theme_color(*on, window, cx)
-                            })),
-                    )
-                    .when(!theme_color, |this| {
-                        this.child(Input::new(&color).small().w(px(130.)).disabled(ro))
-                            .children(swatch)
-                    }),
-                if theme_color {
-                    None
-                } else {
-                    errors.get(&WField::Color).map(String::as_str)
-                },
-                cx,
-            ))
-            .when(theme_color, |this| {
-                this.child(hint_text(
-                    "Light or dark text, chosen from the taskbar behind the widget.",
-                    cx,
-                ))
-            })
             .into_any_element()
     }
 
     /// Bar editor: which modules the bar shows (only "To do" exists for now).
-    fn render_bar_modules(
-        &mut self,
-        modules: &[BarModuleEntry],
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn bar_modules_field(&self, modules: &[BarModuleEntry], cx: &mut Context<Self>) -> Field {
         let ro = self.read_only();
         let has_todo = modules
             .iter()
             .any(|m| matches!(m, BarModuleEntry::Known(BarModule::Todo(_))));
-        let todo_off = !self.doc.config.todo.enabled;
-        let unknown: Vec<String> = modules
+        let unknown = modules
             .iter()
             .filter(|m| matches!(m, BarModuleEntry::Unknown(_)))
-            .map(module_label)
-            .collect();
+            .map(|m| hint_text(module_label(m), cx));
         field(
             "Modules (left to right)",
             v_flex()
@@ -1265,16 +1187,10 @@ impl SettingsWindow {
                         .disabled(ro)
                         .on_click(cx.listener(|this, on: &bool, _, cx| this.set_bar_todo(*on, cx))),
                 )
-                .when(has_todo && todo_off, |this| {
-                    this.child(warning_text(
-                        "To do is off: turn it on in the To do tab to show this module.",
-                        cx,
-                    ))
-                })
-                .children(unknown.into_iter().map(|u| hint_text(u, cx))),
-            None,
-            cx,
+                .children(unknown),
+            (has_todo && !self.doc.config.todo.enabled).then(|| {
+                Note::warning("To do is off: turn it on in the To do tab to show this module.")
+            }),
         )
-        .into_any_element()
     }
 }

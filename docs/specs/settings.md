@@ -9,7 +9,7 @@ Deferred (stay in the roadmap, not in this phase): named-pipe IPC, drag-to-place
 ## Behavior (user-visible)
 
 - A left click on the tray icon (or Enter/Space on it), tray menu **Settings** and widget right-click **Settings** open the window. A second launch brings the open window to the front.
-- Centered window, title **Kuality Settings**, ~900×620 (min 720×480), resizable, follows Windows light/dark. Sidebar on the left with tabs **General**, **Widgets**, **Hyperkey**, **Shortcuts** (DECISIONS order, deferred tabs left out); the content area scrolls.
+- Centered window, title **Kuality Settings**, ~900×620 (min 720×480), resizable, follows Windows light/dark. Sidebar on the left with tabs **General**, **Widgets**, **Hyperkey**, **Shortcuts** (DECISIONS order, deferred tabs left out); the content area scrolls. *(2026-11-11: the window is gpui-component's `Settings`: a search field above the tabs filters every setting by its title and description, and the titled groups of a tab are listed under it.)*
 - **Auto-save, no Save button**: every valid change is written to `config.json` 300 ms after the last edit; the core reloads it. Opening the window never rewrites the file.
 - Invalid input shows a red message under the field and is **not** saved; the file keeps the last valid value of that field. Other fields still save.
 - Status line at the bottom of the content panel: `Saved` / `Saving…` / `1 field not saved` / `Could not write config.json: <error>`; plus `Kuality is not running — changes apply when it starts` when the core mutex does not exist.
@@ -157,7 +157,8 @@ crates/core/src/app.rs            OpenSettings launches the exe, fallback to the
 - UI state per field is a GPUI `InputState` entity; on every change the value is validated, and if valid applied to the model's `Config`, then a 300 ms save timer is (re)started.
 - The core-running check is `OpenMutexW(SYNCHRONIZE, "Local\Kuality.Core")`, polled with the 1 s timer.
 - Theme: gpui-component theme synced to the system appearance and re-synced when it changes.
-- Look (`ui/style.rs`): Kuality's overrides on top of that theme after every sync — radius 8 (controls) / 12 (panel, cards, popovers), Segoe UI Variable Text when installed, its own dark/light palette. The sidebar sits on the window background without a border; the tab content is a rounded panel inset 8 px from the window edges; cards have 20 px side padding and inset dividers; segmented choices are buttons on a rounded track. The native title bar is painted in the window background color (DWM caption and text color).
+- Look (`ui/style.rs`): the kit theme as it comes, following the Windows light / dark mode; nothing is overridden. The native title bar is painted in the theme's background color (DWM caption and text color). *(2026-11-11, "Kit first" in DECISIONS; before: own palette, radius 8 / 12, Segoe UI Variable Text and a floating content panel.)*
+- Structure (2026-11-11): `ui/mod.rs` builds one `SettingPage` per tab on every render; `ui/controls.rs` binds setting items to the window (`switch_item`, `dropdown_item`, `control_item` for a row with its own control, `block_item` for a full-width block, `notes_item` for hints and warnings). `ui/window.rs` opens the one GPUI window of the process (also for the two popups).
 
 ### Dependencies
 

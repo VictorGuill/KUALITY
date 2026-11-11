@@ -87,7 +87,7 @@ Done before Phase 4 and scoped to the settings that already exist (Phases 0–3)
 
 - [ ] Named pipe IPC with the core (live commands, state the file cannot carry) *(2026-11-11: the pipe exists for the clipboard history; settings changes still go through `config.json`)*
 - [ ] Drag-to-place mode for widgets
-- [ ] Appearance and Extensions tabs (Extensions with Phase 7)
+- [ ] Appearance and Extensions tabs (Extensions with Phase 7) *(2026-11-11: Appearance = choosing / customizing a gpui-component theme; the window already uses the kit theme untouched, see DECISIONS "Kit first")*
 - [x] Autostart / Run elevated toggles in the General tab (with Phase 6)
 
 ## Phase 6 — Startup & distribution ✅

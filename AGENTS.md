@@ -68,5 +68,6 @@ Runtime files: `%APPDATA%\Kuality\config.json`, `todos.json` (to-do items), `cli
 For a throwaway setup, create an empty file `target\debug\portable`: config and logs then live in `target\debug\`.
 To quit a running core from a script, close it gracefully (`taskkill /IM kuality.exe`, without `/F`).
 Startup tests: in debug builds set `KUALITY_STARTUP_NAME=Kuality-test` so the Run value / scheduled task use a test name instead of the real `Kuality` entry.
+Clipboard popup: in debug builds set `KUALITY_CLIPBOARD_SAMPLE=1` to open it with made-up entries (no core, nothing copied).
 Update tests: in debug builds set `KUALITY_UPDATE_AS_VERSION=1.0.0-alpha` so the core and settings window see the published releases as newer (a dev copy only opens the release page, never installs).
 There is one executable: `kuality.exe` is the core, `kuality.exe --settings` the settings window (tray / widget "Settings" start it as a second process), `kuality.exe --todo` the to-do popup (a click on the taskbar's `TO DO`), `kuality.exe --clipboard` the clipboard history popup (the clipboard hotkey); only one settings window and one popup of each kind run at a time.

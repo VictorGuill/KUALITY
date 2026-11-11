@@ -32,14 +32,12 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 use windows::core::{BSTR, HRESULT, Interface as _, PCWSTR, PWSTR, w};
 
+use crate::platform::wide;
+
 use super::{
     Entry, Error, RUN_KEY, RunStep, State, TaskState, TaskStep, entry_name, plan, run_command,
     task_name, task_sddl, task_xml,
 };
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
 
 fn check(r: WIN32_ERROR) -> io::Result<()> {
     if r == ERROR_SUCCESS {
@@ -88,7 +86,7 @@ pub(super) fn set(want: Entry) -> Result<(), Error> {
         run_elevated(
             &exe,
             &[
-                "--startup-task".into(),
+                kuality_protocol::cli::STARTUP_TASK.into(),
                 step.as_arg().into(),
                 "--user".into(),
                 sid,

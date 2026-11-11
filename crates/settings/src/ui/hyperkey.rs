@@ -1,12 +1,15 @@
 //! Hyperkey tab.
 
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Disableable as _, h_flex, v_flex};
+use gpui_kit::component::setting::{SettingGroup, SettingPage};
+use gpui_kit::component::{IconName, h_flex};
 use gpui_kit::*;
 use kuality_protocol::HyperModifiers;
 
 use super::SettingsWindow;
-use super::controls::{self, divider, hint_text, hyper_keycap, section, setting_row, text_keycap};
+use super::controls::{
+    self, Note, Weak, block_item, control_item, hint_text, hyper_keycap, notes_item, switch_item,
+    text_keycap,
+};
 
 /// Options of the "Apps see" control.
 const MODIFIERS: [(HyperModifiers, &str); 3] = [
@@ -15,72 +18,37 @@ const MODIFIERS: [(HyperModifiers, &str); 3] = [
     (HyperModifiers::CtrlShiftAltWin, "Ctrl+Shift+Alt+Win"),
 ];
 
+/// The modifier keys Hyper presses for apps.
+fn modifier_names(modifiers: HyperModifiers) -> &'static [&'static str] {
+    match modifiers {
+        HyperModifiers::None => &[],
+        HyperModifiers::CtrlShiftAlt => &["Ctrl", "Shift", "Alt"],
+        HyperModifiers::CtrlShiftAltWin => &["Ctrl", "Shift", "Alt", "Win"],
+    }
+}
+
 impl SettingsWindow {
-    pub(super) fn render_hyperkey(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let h = &self.doc.config.hyperkey;
-        let (enabled, modifiers) = (h.enabled, h.modifiers);
+    pub(super) fn hyperkey_page(&self, weak: &Weak, _cx: &mut Context<Self>) -> SettingPage {
+        let modifiers = self.doc.config.hyperkey.modifiers;
         let ro = self.read_only();
-        let toggle = Switch::new("hyperkey-enabled")
-            .accessibility_label("Enable Hyperkey")
-            .checked(enabled)
-            .disabled(ro)
-            .on_click(cx.listener(|this, on: &bool, _, cx| {
-                this.doc.config.hyperkey.enabled = *on;
-                this.changed(cx);
-            }));
-        let picker = controls::segmented(
-            "hyperkey-modifiers",
-            &MODIFIERS,
-            Some(modifiers),
-            ro,
-            cx,
-            |this, m, _, cx| {
-                this.doc.config.hyperkey.modifiers = m;
-                this.changed(cx);
-            },
-        );
-        let names: &[&str] = match modifiers {
-            HyperModifiers::None => &[],
-            HyperModifiers::CtrlShiftAlt => &["Ctrl", "Shift", "Alt"],
-            HyperModifiers::CtrlShiftAltWin => &["Ctrl", "Shift", "Alt", "Win"],
-        };
+        let names = modifier_names(modifiers);
         let description = if modifiers.injects() {
             format!("Hold CapsLock to press {}.", names.join("+"))
         } else {
             "Hold CapsLock + a key to run a Kuality shortcut.".to_owned()
         };
-        // `[CapsLock] → [✦] = [Ctrl] [Shift] [Alt] [Win]`: what holding CapsLock presses.
-        let mut legend = h_flex()
-            .gap_1()
-            .items_center()
-            .child(text_keycap("CapsLock", cx))
-            .child(hint_text("→", cx))
-            .child(hyper_keycap());
-        if modifiers.injects() {
-            legend = legend.child(hint_text("=", cx));
-            for k in names {
-                legend = legend.child(text_keycap(*k, cx));
-            }
-        }
-        let mut notes = vec![hint_text(
+        let mut notes = vec![Note::hint(
             "While enabled, CapsLock does not toggle caps. Hyper is shown as the star key.",
-            cx,
         )];
         if modifiers.includes_win() {
-            notes.push(hint_text(
+            notes.push(Note::hint(
                 "The Office key shortcut (Ctrl+Shift+Alt+Win alone) is disabled while Hyperkey is \
                  on.",
-                cx,
             ));
         }
-        notes.push(hint_text(
+        notes.push(Note::hint(
             "Tray → Pause turns it off temporarily. Hyper shortcuts need it; shortcuts with \
              Ctrl, Alt, Shift or Win do not.",
-            cx,
         ));
         let modifiers_hint = match modifiers {
             HyperModifiers::None => {
@@ -94,23 +62,59 @@ impl SettingsWindow {
             }
             HyperModifiers::CtrlShiftAltWin => "Apps can bind Hyper themselves.",
         };
-        v_flex().gap_4().child(
-            section(cx)
-                .child(setting_row(
-                    "Enable Hyperkey",
-                    Some(description.into()),
-                    toggle,
-                    cx,
-                ))
-                .child(v_flex().px_5().pb_4().gap_2().child(legend).children(notes))
-                .child(divider(cx))
-                .child(setting_row(
-                    "Apps see",
-                    Some("What other apps receive while CapsLock is held.".into()),
-                    picker,
-                    cx,
-                ))
-                .child(v_flex().px_5().pb_4().child(hint_text(modifiers_hint, cx))),
+
+        let enable = switch_item(
+            "Enable Hyperkey",
+            weak,
+            |w| w.doc.config.hyperkey.enabled,
+            |w, on, cx| {
+                w.doc.config.hyperkey.enabled = on;
+                w.changed(cx);
+            },
         )
+        .description(description)
+        .disabled(ro);
+        // `[CapsLock] → [✦] = [Ctrl] [Shift] [Alt] [Win]`: what holding CapsLock presses.
+        let legend = block_item(weak, |this, _, cx| {
+            let names = modifier_names(this.doc.config.hyperkey.modifiers);
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(text_keycap("CapsLock"))
+                .child(hint_text("→", cx))
+                .child(hyper_keycap(cx))
+                .children((!names.is_empty()).then(|| hint_text("=", cx)))
+                .children(names.iter().map(|k| text_keycap(*k)))
+        });
+        let apps_see = control_item("Apps see", weak, |this, _, cx| {
+            controls::segmented(
+                "hyperkey-modifiers",
+                &MODIFIERS,
+                Some(this.doc.config.hyperkey.modifiers),
+                this.read_only(),
+                cx,
+                |this, m, _, cx| {
+                    this.doc.config.hyperkey.modifiers = m;
+                    this.changed(cx);
+                },
+            )
+        })
+        .description("What other apps receive while CapsLock is held.")
+        .disabled(ro);
+
+        SettingPage::new("Hyperkey")
+            .icon(IconName::ArrowUp)
+            .group(
+                SettingGroup::new()
+                    .item(enable)
+                    .item(legend)
+                    .items(notes_item(notes)),
+            )
+            .group(
+                SettingGroup::new()
+                    .title("Modifiers")
+                    .item(apps_see)
+                    .items(notes_item(vec![Note::hint(modifiers_hint)])),
+            )
     }
 }

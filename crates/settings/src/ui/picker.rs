@@ -1,28 +1,31 @@
-//! The action picker of the Shortcuts tab: a popover with a search box, the installed apps
-//! (with icons) and, pinned below them, the other actions. Each other action opens a small
-//! page of its own. The picker only reports a [`Choice`]; the window applies it.
-
-use std::ops::Range;
+//! The action picker of the Shortcuts tab: a popover with a searchable list (gpui-component's
+//! `List`) of the actions that need a value ("Open website…") and the installed apps (with
+//! icons). An action with a value opens a small form of its own. The picker only reports a
+//! [`Choice`]; the window applies it.
 
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::base::actions::Cancel;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
+use gpui_kit::component::collapsible::Collapsible;
+use gpui_kit::component::empty::{Empty, EmptyDescription, EmptyHeader, EmptyTitle};
+use gpui_kit::component::form::{Form, v_form};
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
+use gpui_kit::component::label::Label;
+use gpui_kit::component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, StyledExt as _, h_flex, v_flex,
 };
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use kuality_protocol::{Action, LaunchArgs};
 
-use super::controls::{field, hint_text};
+use super::controls::{Note, field, hint_text};
 use crate::apps::{self, Catalog};
 use crate::model::{self, ActionKind, Choice};
 
 /// Width of the popover.
 pub const PICKER_WIDTH: f32 = 440.;
-const LIST_HEIGHT: f32 = 264.;
-const ROW_HEIGHT: f32 = 32.;
+/// Height of the list (search field included).
+const LIST_HEIGHT: f32 = 380.;
 
 #[derive(Debug, Clone)]
 pub enum PickerEvent {
@@ -43,7 +46,7 @@ enum Page {
     RunProgram,
 }
 
-/// The other actions, pinned under the apps.
+/// The actions that need a value, listed before the apps.
 const OTHER: [(Page, &str, Lucide); 4] = [
     (Page::Website, "Open website…", Lucide::Globe),
     (Page::SendKeys, "Send keys…", Lucide::Keyboard),
@@ -62,17 +65,200 @@ pub fn kind_icon(kind: ActionKind) -> Lucide {
     }
 }
 
-pub struct ActionPicker {
+/// A group of rows of the list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Group {
+    /// Indices into [`OTHER`].
+    Actions,
+    /// Indices into the catalog.
+    Apps,
+}
+
+/// What a row of the list stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Row {
+    Action(Page),
+    /// The app's id.
+    App(String),
+}
+
+/// The list's content: the actions and apps matching the search.
+struct Entries {
     catalog: Entity<Catalog>,
-    /// The action being replaced (its unknown fields are kept by the window).
-    page: Page,
-    search: Entity<InputState>,
-    /// Indices into the catalog matching the search, best first.
-    results: Vec<usize>,
-    /// Keyboard selection: `0..results.len()` are apps, then the [`OTHER`] entries.
-    highlight: usize,
-    scroll: UniformListScrollHandle,
+    query: String,
+    /// Groups with at least one match (so the first row is always the first section's).
+    sections: Vec<(Group, Vec<usize>)>,
+    /// The app of the action being replaced (marked in the list).
     current_app: Option<String>,
+}
+
+impl Entries {
+    fn refilter(&mut self, cx: &App) {
+        let query = self.query.trim().to_lowercase();
+        let actions: Vec<usize> = (0..OTHER.len())
+            .filter(|&i| query.is_empty() || OTHER[i].1.to_lowercase().contains(&query))
+            .collect();
+        let catalog = self.catalog.read(cx);
+        let apps = apps::search(catalog.apps().iter().map(|a| a.name.as_str()), &self.query);
+        self.sections = [(Group::Actions, actions), (Group::Apps, apps)]
+            .into_iter()
+            .filter(|(_, rows)| !rows.is_empty())
+            .collect();
+    }
+
+    fn row(&self, ix: IndexPath, cx: &App) -> Option<Row> {
+        let (group, rows) = self.sections.get(ix.section)?;
+        let &index = rows.get(ix.row)?;
+        match group {
+            Group::Actions => OTHER.get(index).map(|&(page, _, _)| Row::Action(page)),
+            Group::Apps => {
+                let app = self.catalog.read(cx).apps().get(index)?;
+                Some(Row::App(app.id.clone()))
+            }
+        }
+    }
+
+    /// Where the app of the action being replaced is shown.
+    fn current_app_path(&self, cx: &App) -> Option<IndexPath> {
+        let app = self.catalog.read(cx).find(self.current_app.as_deref()?)?;
+        self.sections
+            .iter()
+            .enumerate()
+            .find_map(|(section, (group, rows))| {
+                (*group == Group::Apps)
+                    .then(|| rows.iter().position(|&r| r == app))
+                    .flatten()
+                    .map(|row| IndexPath::default().section(section).row(row))
+            })
+    }
+}
+
+impl ListDelegate for Entries {
+    type Item = ListItem;
+
+    fn perform_search(
+        &mut self,
+        query: &str,
+        _: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) -> Task<()> {
+        self.query = query.to_string();
+        self.refilter(cx);
+        Task::ready(())
+    }
+
+    fn sections_count(&self, _: &App) -> usize {
+        self.sections.len().max(1)
+    }
+
+    fn items_count(&self, section: usize, _: &App) -> usize {
+        self.sections.get(section).map_or(0, |(_, rows)| rows.len())
+    }
+
+    fn render_item(
+        &mut self,
+        ix: IndexPath,
+        _: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) -> Option<ListItem> {
+        let (group, rows) = self.sections.get(ix.section)?;
+        let &index = rows.get(ix.row)?;
+        let muted = cx.theme().muted_foreground;
+        let (icon, label, trailing) = match group {
+            Group::Actions => {
+                let &(_, label, icon) = OTHER.get(index)?;
+                (
+                    Icon::new(icon)
+                        .size_5()
+                        .text_color(muted)
+                        .into_any_element(),
+                    SharedString::from(label),
+                    Some(IconName::ChevronRight),
+                )
+            }
+            Group::Apps => {
+                let catalog = self.catalog.read(cx);
+                let app = catalog.apps().get(index)?;
+                let icon = match catalog.icon(index) {
+                    Some(image) => img(image).size_5().flex_none().into_any_element(),
+                    None => Icon::new(Lucide::AppWindow)
+                        .size_5()
+                        .text_color(muted)
+                        .into_any_element(),
+                };
+                let current = self.current_app.as_deref() == Some(app.id.as_str());
+                (
+                    icon,
+                    SharedString::from(app.name.clone()),
+                    current.then_some(IconName::Check),
+                )
+            }
+        };
+        Some(
+            ListItem::new(("picker-row", ix.section * 100_000 + ix.row))
+                .accessibility_label(label.clone())
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(icon)
+                        .child(Label::new(label).flex_1().min_w_0().truncate().text_sm())
+                        .children(trailing.map(|icon| Icon::new(icon).small().text_color(muted))),
+                ),
+        )
+    }
+
+    fn render_section_header(
+        &mut self,
+        section: usize,
+        _: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) -> Option<impl IntoElement> {
+        let (group, _) = self.sections.get(section)?;
+        Some(
+            Label::new(match group {
+                Group::Actions => "Actions",
+                Group::Apps => "Applications",
+            })
+            .px_3()
+            .pt_2()
+            .pb_1()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground),
+        )
+    }
+
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) -> impl IntoElement {
+        let catalog = self.catalog.read(cx);
+        let description = match &catalog.error {
+            Some(e) => format!("Could not list the installed apps: {e}"),
+            None if !catalog.loaded => "Loading apps…".to_string(),
+            None => "No app or action has that name.".to_string(),
+        };
+        Empty::new().size_full().header(
+            EmptyHeader::new()
+                .title(EmptyTitle::new().child("No matches"))
+                .description(EmptyDescription::new().child(description)),
+        )
+    }
+
+    fn set_selected_index(
+        &mut self,
+        _: Option<IndexPath>,
+        _: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) {
+        cx.notify();
+    }
+}
+
+pub struct ActionPicker {
+    page: Page,
+    list: Entity<ListState<Entries>>,
     url: Entity<InputState>,
     keys: Entity<InputState>,
     file: Entity<InputState>,
@@ -91,6 +277,7 @@ pub struct ActionPicker {
 impl EventEmitter<PickerEvent> for ActionPicker {}
 
 impl ActionPicker {
+    /// `action`: the one being replaced (its unknown fields are kept by the window).
     pub fn new(
         action: Option<&Action>,
         catalog: Entity<Catalog>,
@@ -140,7 +327,6 @@ impl ActionPicker {
         };
         let advanced = !args.trim().is_empty() || !cwd.trim().is_empty();
         let args_initial = args.clone();
-        let search = input(String::new(), "Search apps and actions", window, cx);
         let url = input(url, "https://github.com", window, cx);
         let keys = input(keys, "win+1", window, cx);
         let file = input(file, r"C:\Users\me\Documents", window, cx);
@@ -148,25 +334,43 @@ impl ActionPicker {
         let args = input(args, "Arguments (one command line)", window, cx);
         let cwd = input(cwd, "Default: the program's folder", window, cx);
 
+        let list = cx.new(|cx| {
+            let mut entries = Entries {
+                catalog: catalog.clone(),
+                query: String::new(),
+                sections: Vec::new(),
+                current_app,
+            };
+            entries.refilter(cx);
+            ListState::new(entries, window, cx).searchable(true)
+        });
+        // Start on the app the shortcut opens now, else on the first row.
+        list.update(cx, |list, cx| {
+            let current = list.delegate().current_app_path(cx);
+            list.set_selected_index(Some(current.unwrap_or_default()), window, cx);
+            if let Some(ix) = current {
+                list.scroll_to_item(ix, ScrollStrategy::Center, window, cx);
+            }
+        });
+
         let mut subs = vec![
+            // The apps (then their icons) arrive in the background.
             cx.observe(&catalog, |this: &mut Self, _, cx| {
-                this.refilter(cx);
-                cx.notify();
+                this.list.update(cx, |list, cx| {
+                    list.delegate_mut().refilter(cx);
+                    cx.notify();
+                });
             }),
-            cx.subscribe_in(
-                &search,
-                window,
-                |this, _, ev: &InputEvent, window, cx| match ev {
-                    InputEvent::Change => {
-                        this.highlight = 0;
-                        this.refilter(cx);
-                        this.scroll.scroll_to_item(0, ScrollStrategy::Top);
-                        cx.notify();
+            cx.subscribe_in(&list, window, |this, list, ev: &ListEvent, window, cx| {
+                // Enter or a click on a row.
+                if let ListEvent::Confirm(ix) = ev {
+                    match list.read(cx).delegate().row(*ix, cx) {
+                        Some(Row::App(id)) => cx.emit(PickerEvent::Picked(Choice::App(id))),
+                        Some(Row::Action(page)) => this.open_page(page, window, cx),
+                        None => {}
                     }
-                    InputEvent::PressEnter { .. } => this.activate(this.highlight, window, cx),
-                    _ => {}
-                },
-            ),
+                }
+            }),
         ];
         for input in [&url, &keys, &file, &program, &args, &cwd] {
             subs.push(cx.subscribe_in(
@@ -182,14 +386,9 @@ impl ActionPicker {
                 },
             ));
         }
-        let mut this = Self {
-            catalog,
+        Self {
             page,
-            search,
-            results: Vec::new(),
-            highlight: 0,
-            scroll: UniformListScrollHandle::new(),
-            current_app,
+            list,
             url,
             keys,
             file,
@@ -202,36 +401,13 @@ impl ActionPicker {
             recording: false,
             error: None,
             _subs: subs,
-        };
-        this.refilter(cx);
-        if let Some(i) = this.current_app_position(cx) {
-            this.highlight = i;
-            this.scroll.scroll_to_item(i, ScrollStrategy::Center);
         }
-        this
-    }
-
-    fn current_app_position(&self, cx: &App) -> Option<usize> {
-        let id = self.current_app.as_deref()?;
-        let index = self.catalog.read(cx).find(id)?;
-        self.results.iter().position(|&r| r == index)
-    }
-
-    fn refilter(&mut self, cx: &App) {
-        let query = self.search.read(cx).value().to_string();
-        let catalog = self.catalog.read(cx);
-        self.results = apps::search(catalog.apps().iter().map(|a| a.name.as_str()), &query);
-        self.highlight = self.highlight.min(self.entry_count().saturating_sub(1));
-    }
-
-    fn entry_count(&self) -> usize {
-        self.results.len() + OTHER.len()
     }
 
     /// Moves the keyboard focus to the page's main field.
     pub fn focus_page(&self, window: &mut Window, cx: &mut App) {
         let input = match self.page {
-            Page::List => &self.search,
+            Page::List => return self.list.update(cx, |list, cx| list.focus(window, cx)),
             Page::Website => &self.url,
             Page::SendKeys => &self.keys,
             Page::OpenFile => &self.file,
@@ -273,40 +449,12 @@ impl ActionPicker {
         self.page == Page::SendKeys
     }
 
-    fn activate(&mut self, entry: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(&app) = self.results.get(entry) {
-            let id = self.catalog.read(cx).apps().get(app).map(|a| a.id.clone());
-            if let Some(id) = id {
-                cx.emit(PickerEvent::Picked(Choice::App(id)));
-            }
-        } else if let Some(&(page, _, _)) = OTHER.get(entry - self.results.len()) {
-            self.open_page(page, window, cx);
-        }
-    }
-
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.page == Page::List {
             cx.emit(PickerEvent::Close);
         } else {
             self.open_page(Page::List, window, cx);
         }
-    }
-
-    fn move_highlight(&mut self, down: bool, cx: &mut Context<Self>) {
-        let n = self.entry_count();
-        if n == 0 {
-            return;
-        }
-        self.highlight = if down {
-            (self.highlight + 1) % n
-        } else {
-            (self.highlight + n - 1) % n
-        };
-        if self.highlight < self.results.len() {
-            self.scroll
-                .scroll_to_item(self.highlight, ScrollStrategy::Nearest);
-        }
-        cx.notify();
     }
 
     fn value(&self, input: &Entity<InputState>, cx: &App) -> String {
@@ -396,127 +544,6 @@ impl ActionPicker {
 
     // --- Rendering -----------------------------------------------------------------------
 
-    fn render_app_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let catalog = self.catalog.read(cx);
-        let current = self.current_app.as_deref().and_then(|id| catalog.find(id));
-        let theme = cx.theme();
-        let (accent, muted) = (theme.accent, theme.muted_foreground);
-        let rows: Vec<_> = range
-            .filter_map(|entry| {
-                let &app = self.results.get(entry)?;
-                let info = catalog.apps().get(app)?;
-                Some((entry, app, info.name.clone(), catalog.icon(app)))
-            })
-            .collect();
-        rows.into_iter()
-            .map(|(entry, app, name, icon)| {
-                let icon = match icon {
-                    Some(image) => img(image).size(px(20.)).flex_none().into_any_element(),
-                    None => Icon::new(Lucide::AppWindow)
-                        .size(px(20.))
-                        .text_color(muted)
-                        .into_any_element(),
-                };
-                h_flex()
-                    .id(("app", app))
-                    .w_full()
-                    .h(px(ROW_HEIGHT))
-                    .px_2()
-                    .gap_2()
-                    .rounded(cx.theme().radius)
-                    .text_sm()
-                    .cursor_pointer()
-                    .when(entry == self.highlight, |this| this.bg(accent))
-                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                        if this.highlight != entry {
-                            this.highlight = entry;
-                            cx.notify();
-                        }
-                    }))
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.activate(entry, window, cx)),
-                    )
-                    .child(icon)
-                    .child(div().flex_1().min_w_0().truncate().child(name))
-                    .when(current == Some(app), |this| {
-                        this.child(Icon::new(IconName::Check).small().text_color(muted))
-                    })
-                    .into_any_element()
-            })
-            .collect()
-    }
-
-    fn render_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let catalog = self.catalog.read(cx);
-        let (loaded, error, any_apps) = (
-            catalog.loaded,
-            catalog.error.clone(),
-            !catalog.apps().is_empty(),
-        );
-        let theme = cx.theme();
-        let (accent, muted, border) = (theme.accent, theme.muted_foreground, theme.border);
-        let apps: AnyElement = if !self.results.is_empty() {
-            uniform_list(
-                "apps",
-                self.results.len(),
-                cx.processor(|this, range, _window, cx| this.render_app_rows(range, cx)),
-            )
-            .track_scroll(&self.scroll)
-            .h(px(LIST_HEIGHT))
-            .into_any_element()
-        } else {
-            let text = match (&error, loaded, any_apps) {
-                (Some(e), _, _) => format!("Could not list the installed apps: {e}"),
-                (None, false, _) => "Loading apps…".to_string(),
-                (None, true, false) => "No apps found.".to_string(),
-                (None, true, true) => "No app matches.".to_string(),
-            };
-            v_flex()
-                .h(px(LIST_HEIGHT))
-                .items_center()
-                .justify_center()
-                .child(hint_text(text, cx))
-                .into_any_element()
-        };
-        let first_other = self.results.len();
-        let others = OTHER.iter().enumerate().map(|(i, &(_, label, icon))| {
-            let entry = first_other + i;
-            h_flex()
-                .id(("other", i))
-                .w_full()
-                .h(px(ROW_HEIGHT))
-                .px_2()
-                .gap_2()
-                .rounded(cx.theme().radius)
-                .text_sm()
-                .cursor_pointer()
-                .when(entry == self.highlight, |this| this.bg(accent))
-                .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                    if this.highlight != entry {
-                        this.highlight = entry;
-                        cx.notify();
-                    }
-                }))
-                .on_click(cx.listener(move |this, _, window, cx| this.activate(entry, window, cx)))
-                .child(Icon::new(icon).size(px(20.)).text_color(muted))
-                .child(div().flex_1().child(label))
-                .child(Icon::new(IconName::ChevronRight).small().text_color(muted))
-        });
-        v_flex()
-            .gap_1()
-            .child(
-                Input::new(&self.search)
-                    .prefix(Icon::new(IconName::Search).small().text_color(muted))
-                    .cleanable(true),
-            )
-            .child(section_label("Applications", cx))
-            .child(apps)
-            .child(div().h(px(1.)).bg(border).my_1())
-            .child(section_label("Other actions", cx))
-            .children(others)
-            .into_any_element()
-    }
-
     fn page_header(&self, title: &'static str, cx: &mut Context<Self>) -> Div {
         h_flex()
             .gap_2()
@@ -532,7 +559,7 @@ impl ActionPicker {
                         cx.listener(|this, _, window, cx| this.open_page(Page::List, window, cx)),
                     ),
             )
-            .child(div().text_sm().font_semibold().child(title))
+            .child(Label::new(title).text_sm().font_semibold())
     }
 
     fn save_row(&self, cx: &mut Context<Self>) -> Div {
@@ -545,163 +572,163 @@ impl ActionPicker {
         )
     }
 
-    fn render_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let error = self.error.clone();
-        let body = match self.page {
-            Page::List => return self.render_list(cx),
-            Page::Website => v_flex()
-                .gap_3()
-                .child(self.page_header("Open website", cx))
-                .child(field(
-                    "Address",
-                    Input::new(&self.url),
-                    error.as_deref(),
-                    cx,
-                ))
-                .child(hint_text(
-                    "https:, mailto:, ms-settings: or any other link. https:// is added when \
-                     missing.",
-                    cx,
-                )),
-            Page::SendKeys => {
-                let recording = self.recording;
-                let keys = self.keys.read(cx).value().to_string();
-                let preview = if model::validate_chord(&keys).is_ok() {
-                    model::chord_label(&keys)
-                } else {
-                    String::new()
-                };
-                v_flex()
-                    .gap_3()
-                    .child(self.page_header("Send keys", cx))
+    /// An input with a "Browse…" button next to it.
+    fn with_browse(
+        &self,
+        input: &Entity<InputState>,
+        id: &'static str,
+        target: Browse,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        h_flex()
+            .gap_2()
+            .child(div().flex_1().child(Input::new(input)))
+            .child(browse_button(id, "Browse…", target, cx))
+    }
+
+    /// The form of an action that needs a value.
+    fn render_form(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let error = self.error.clone().map(Note::error);
+        let (title, form, hint) = match self.page {
+            Page::List => return div().into_any_element(),
+            Page::Website => (
+                "Open website",
+                v_form().child(field("Address", Input::new(&self.url), error)),
+                "https:, mailto:, ms-settings: or any other link. https:// is added when missing.",
+            ),
+            Page::SendKeys => (
+                "Send keys",
+                self.send_keys_form(error, cx),
+                "Like win+1, ctrl+shift+esc or volume_mute: up to 4 modifiers and one key.",
+            ),
+            Page::OpenFile => (
+                "Open file or folder",
+                v_form()
+                    .child(field("Path", Input::new(&self.file), error))
                     .child(
-                        Button::new("record-chord")
-                            .when(recording, |b| b.primary())
-                            .when(!recording, |b| b.outline())
-                            .icon(Lucide::Keyboard)
-                            .label(if recording {
-                                "Press the keys… (Esc to cancel)"
-                            } else {
-                                "Record keys"
-                            })
-                            .accessibility_label("Record keys")
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(if recording {
-                                    PickerEvent::StopRecording
-                                } else {
-                                    PickerEvent::RecordKeys
-                                })
-                            })),
-                    )
-                    .when(!preview.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .font_medium()
-                                .child(format!("Sends {preview}")),
+                        field(
+                            "",
+                            h_flex()
+                                .gap_2()
+                                .child(browse_button(
+                                    "browse-file",
+                                    "Choose file…",
+                                    Browse::File,
+                                    cx,
+                                ))
+                                .child(browse_button(
+                                    "browse-folder",
+                                    "Choose folder…",
+                                    Browse::Folder,
+                                    cx,
+                                )),
+                            None,
                         )
-                    })
-                    .child(field(
-                        "Or type them",
-                        // Clicking the field to type stops the listening recorder.
-                        div()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    if this.recording {
-                                        cx.emit(PickerEvent::StopRecording);
-                                    }
-                                }),
-                            )
-                            .child(Input::new(&self.keys)),
-                        error.as_deref(),
-                        cx,
-                    ))
-                    .child(hint_text(
-                        "Like win+1, ctrl+shift+esc or volume_mute: up to 4 modifiers and one key.",
-                        cx,
-                    ))
-            }
-            Page::OpenFile => v_flex()
-                .gap_3()
-                .child(self.page_header("Open file or folder", cx))
-                .child(field("Path", Input::new(&self.file), error.as_deref(), cx))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(browse_button(
-                            "browse-file",
-                            "Choose file…",
-                            Browse::File,
-                            cx,
-                        ))
-                        .child(browse_button(
-                            "browse-folder",
-                            "Choose folder…",
-                            Browse::Folder,
-                            cx,
-                        )),
-                )
-                .child(hint_text(
-                    "Opens with its default app. %VARIABLES% are expanded when the shortcut runs.",
-                    cx,
+                        .label_indent(false),
+                    ),
+                "Opens with its default app. %VARIABLES% are expanded when the shortcut runs.",
+            ),
+            Page::RunProgram => (
+                "Run program",
+                v_form().child(field(
+                    "Program",
+                    self.with_browse(&self.program, "browse-program", Browse::Program, cx),
+                    error,
                 )),
-            Page::RunProgram => {
-                let advanced = self.advanced;
-                v_flex()
-                    .gap_3()
-                    .child(self.page_header("Run program", cx))
-                    .child(field(
-                        "Program",
-                        h_flex()
-                            .gap_2()
-                            .child(div().flex_1().child(Input::new(&self.program)))
-                            .child(browse_button(
-                                "browse-program",
-                                "Browse…",
-                                Browse::Program,
-                                cx,
-                            )),
-                        error.as_deref(),
-                        cx,
-                    ))
-                    // In a row so the toggle sits on the left instead of stretching.
-                    .child(
-                        h_flex().child(
-                            Button::new("advanced")
-                                .small()
-                                .ghost()
-                                .icon(if advanced {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .label("Advanced")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.advanced = !this.advanced;
-                                    cx.notify();
-                                })),
-                        ),
-                    )
-                    .when(advanced, |this| {
-                        this.child(field("Arguments", Input::new(&self.args), None, cx))
-                            .child(field(
-                                "Working folder",
-                                h_flex()
-                                    .gap_2()
-                                    .child(div().flex_1().child(Input::new(&self.cwd)))
-                                    .child(browse_button("browse-cwd", "Browse…", Browse::Cwd, cx)),
-                                None,
-                                cx,
-                            ))
-                            .child(hint_text(
-                                "%VARIABLES% are expanded when the shortcut runs.",
-                                cx,
-                            ))
-                    })
-            }
+                "%VARIABLES% are expanded when the shortcut runs.",
+            ),
         };
-        body.child(self.save_row(cx)).into_any_element()
+        let advanced = (self.page == Page::RunProgram).then(|| self.render_advanced(cx));
+        v_flex()
+            .gap_3()
+            .p_3()
+            .child(self.page_header(title, cx))
+            .child(form)
+            .children(advanced)
+            .child(hint_text(hint, cx))
+            .child(self.save_row(cx))
+            .into_any_element()
+    }
+
+    /// "Send keys": the recorder button, what it recorded and the field to type them instead.
+    fn send_keys_form(&self, error: Option<Note>, cx: &mut Context<Self>) -> Form {
+        let recording = self.recording;
+        let keys = self.keys.read(cx).value().to_string();
+        let preview = model::validate_chord(&keys)
+            .is_ok()
+            .then(|| Note::hint(format!("Sends {}", model::chord_label(&keys))));
+        let record = Button::new("record-chord")
+            .icon(Lucide::Keyboard)
+            .label(if recording {
+                "Press the keys… (Esc to cancel)"
+            } else {
+                "Record keys"
+            })
+            .accessibility_label("Record keys")
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(if recording {
+                    PickerEvent::StopRecording
+                } else {
+                    PickerEvent::RecordKeys
+                })
+            }));
+        let record = if recording {
+            record.primary()
+        } else {
+            record.outline()
+        };
+        v_form()
+            .child(field("", record, preview).label_indent(false))
+            .child(field(
+                "Or type them",
+                // Clicking the field to type stops the listening recorder.
+                div()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            if this.recording {
+                                cx.emit(PickerEvent::StopRecording);
+                            }
+                        }),
+                    )
+                    .child(Input::new(&self.keys)),
+                error,
+            ))
+    }
+
+    /// "Run program": arguments and working folder, folded away until needed.
+    fn render_advanced(&self, cx: &mut Context<Self>) -> Collapsible {
+        let open = self.advanced;
+        Collapsible::new()
+            .open(open)
+            // In a row so the toggle sits on the left instead of stretching.
+            .child(
+                h_flex().child(
+                    Button::new("advanced")
+                        .small()
+                        .ghost()
+                        .icon(if open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .label("Advanced")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.advanced = !this.advanced;
+                            cx.notify();
+                        })),
+                ),
+            )
+            .content(
+                v_form()
+                    .pt_3()
+                    .child(field("Arguments", Input::new(&self.args), None))
+                    .child(field(
+                        "Working folder",
+                        self.with_browse(&self.cwd, "browse-cwd", Browse::Cwd, cx),
+                        None,
+                    )),
+            )
     }
 }
 
@@ -721,7 +748,6 @@ fn browse_button(
 ) -> Button {
     Button::new(id)
         .small()
-        .secondary()
         .icon(match target {
             Browse::File | Browse::Program => IconName::File,
             Browse::Folder | Browse::Cwd => IconName::Folder,
@@ -730,36 +756,20 @@ fn browse_button(
         .on_click(cx.listener(move |this, _, window, cx| this.browse(target, window, cx)))
 }
 
-fn section_label(text: &'static str, cx: &App) -> Div {
-    div()
-        .px_2()
-        .pt_1()
-        .text_xs()
-        .font_medium()
-        .text_color(cx.theme().muted_foreground)
-        .child(text)
-}
-
 impl Render for ActionPicker {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = match self.page {
+            Page::List => div()
+                .h(px(LIST_HEIGHT))
+                .child(List::new(&self.list).search_placeholder("Search apps and actions"))
+                .into_any_element(),
+            _ => self.render_form(cx),
+        };
         v_flex()
             .id("action-picker")
             .w(px(PICKER_WIDTH))
-            // Up/Down move the list selection instead of the search caret.
-            .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
-                if this.page == Page::List {
-                    cx.stop_propagation();
-                    this.move_highlight(false, cx);
-                }
-            }))
-            .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
-                if this.page == Page::List {
-                    cx.stop_propagation();
-                    this.move_highlight(true, cx);
-                }
-            }))
-            // Esc: back to the list from a page, else close. The input binds Escape, the popover
-            // binds Cancel; whichever arrives, it is handled here first.
+            // Esc: back to the list from a form, else close. The input binds Escape, the list
+            // and the popover bind Cancel; whichever arrives, it is handled here first.
             .capture_action(cx.listener(|this, _: &Escape, window, cx| {
                 cx.stop_propagation();
                 this.escape(window, cx)
@@ -768,6 +778,6 @@ impl Render for ActionPicker {
                 cx.stop_propagation();
                 this.escape(window, cx)
             }))
-            .child(self.render_page(cx))
+            .child(content)
     }
 }

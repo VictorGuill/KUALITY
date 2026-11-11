@@ -1,5 +1,6 @@
 //! The settings window (GPUI + gpui-component). One view owns the document, the open editor and
-//! the key recorder; each tab lives in its own module.
+//! the key recorder; each tab is a page of gpui-component's `Settings` and lives in its own
+//! module.
 
 mod clipboard;
 mod controls;
@@ -10,15 +11,15 @@ mod shortcuts;
 pub(crate) mod style;
 mod todo;
 mod widgets;
+pub(crate) mod window;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use gpui_kit::component::StyledExt as _;
-use gpui_kit::component::sidebar::{Sidebar, SidebarMenu, SidebarMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
-use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::component::setting::Settings;
+use gpui_kit::component::status_bar::StatusBar;
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
 
 use crate::apps::{self, Catalog};
@@ -32,6 +33,8 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// A recording ends by itself after this long.
 const RECORD_TIMEOUT: Duration = Duration::from_secs(10);
+/// Width of the sidebar with the tabs.
+const SIDEBAR_WIDTH: f32 = 210.;
 
 /// How this window is tied to the core process.
 #[derive(Debug)]
@@ -42,39 +45,12 @@ pub enum CoreLink {
     Missing(String),
 }
 
-// Lucide icons beyond gpui-component's default set, embedded one by one.
-gpui_kit::assets::icon_assets!(
-    ExtraIcons,
-    [
-        AppWindow, Clipboard, Keyboard, ListTodo, Pin, PinOff, Trash, Type
-    ]
-);
-
-/// gpui-component's default icons plus [`ExtraIcons`].
-pub(crate) struct AppAssets;
-
-impl AssetSource for AppAssets {
-    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        match ExtraIcons.load(path)? {
-            Some(bytes) => Ok(Some(bytes)),
-            None => gpui_kit::assets::Assets.load(path),
-        }
-    }
-
-    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        let mut all = ExtraIcons.list(path)?;
-        all.extend(gpui_kit::assets::Assets.list(path)?);
-        Ok(all)
-    }
-}
-
 /// Opens the window and runs until it is closed or the core exits.
 pub fn run(config_path: PathBuf, core: CoreLink) {
-    gpui_kit::application()
-        .with_assets(AppAssets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            let options = WindowOptions {
+    window::run_window(
+        "settings window",
+        |cx| {
+            Some(WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(920.), px(660.)), cx)),
                 titlebar: Some(TitlebarOptions {
                     title: Some(WINDOW_TITLE.into()),
@@ -83,61 +59,11 @@ pub fn run(config_path: PathBuf, core: CoreLink) {
                 window_min_size: Some(size(px(720.), px(480.))),
                 app_id: Some("Kuality.Settings".into()),
                 ..Default::default()
-            };
-            let opened = gpui_kit::open_window(options, cx, |window, cx| {
-                style::apply(window, cx);
-                cx.new(|cx| SettingsWindow::new(config_path, core, window, cx))
-            });
-            if let Err(e) = opened {
-                log::error!("cannot open the settings window: {e}");
-                cx.quit();
-                return;
-            }
-            cx.on_window_closed(|cx, _| cx.quit()).detach();
-        });
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Tab {
-    General,
-    Widgets,
-    Hyperkey,
-    Shortcuts,
-    Todo,
-    Clipboard,
-}
-
-impl Tab {
-    const ALL: [Tab; 6] = [
-        Tab::General,
-        Tab::Widgets,
-        Tab::Hyperkey,
-        Tab::Shortcuts,
-        Tab::Todo,
-        Tab::Clipboard,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Tab::General => "General",
-            Tab::Widgets => "Widgets",
-            Tab::Hyperkey => "Hyperkey",
-            Tab::Shortcuts => "Shortcuts",
-            Tab::Todo => "To do",
-            Tab::Clipboard => "Clipboard",
-        }
-    }
-
-    fn icon(self) -> Icon {
-        match self {
-            Tab::General => Icon::new(IconName::Settings),
-            Tab::Widgets => Icon::new(IconName::PanelBottom),
-            Tab::Hyperkey => Icon::new(IconName::ArrowUp),
-            Tab::Shortcuts => Icon::new(IconName::SquareTerminal),
-            Tab::Todo => Icon::new(gpui_kit::assets::IconName::ListTodo),
-            Tab::Clipboard => Icon::new(gpui_kit::assets::IconName::Clipboard),
-        }
-    }
+            })
+        },
+        |_| {},
+        move |window, cx| SettingsWindow::new(config_path, core, window, cx),
+    );
 }
 
 /// Last save / reload result, shown in the status bar.
@@ -170,7 +96,6 @@ struct ActiveRecording {
 
 pub struct SettingsWindow {
     pub(crate) doc: Document,
-    tab: Tab,
     status: Status,
     core_running: bool,
     /// Why no core is attached (shown as a banner); `None` when attached.
@@ -194,8 +119,6 @@ pub struct SettingsWindow {
     pub(crate) todo_label: Option<todo::LabelField>,
     /// The core this window is attached to (Clipboard tab buttons talk to its pipe).
     pub(crate) core_pid: Option<u32>,
-    /// "Remove all pins" was clicked once (the next click confirms).
-    pub(crate) clipboard_confirm_pins: bool,
     /// Result of the last Clipboard tab button.
     pub(crate) clipboard_note: Option<clipboard::PipeNote>,
     _poll: Task<()>,
@@ -216,16 +139,7 @@ impl SettingsWindow {
         };
         let core_missing = match core {
             CoreLink::Attached(core) => {
-                match core.watch() {
-                    Ok(exited) => cx
-                        .spawn(async move |this, cx| {
-                            if exited.await.is_ok() {
-                                let _ = this.update(cx, |this, cx| this.core_exited(cx));
-                            }
-                        })
-                        .detach(),
-                    Err(e) => log::error!("cannot watch the Kuality process: {e}"),
-                }
+                window::watch_core(core, cx, Self::core_exited);
                 None
             }
             CoreLink::Missing(why) => Some(why),
@@ -277,9 +191,6 @@ impl SettingsWindow {
                     this.cancel_recording(cx);
                 }
             }),
-            cx.observe_window_appearance(window, |_, window, cx| {
-                style::apply(window, cx);
-            }),
         ];
         let weak = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {
@@ -294,7 +205,6 @@ impl SettingsWindow {
         });
         Self {
             doc,
-            tab: Tab::General,
             status: Status::Idle,
             core_running: platform::core_running(),
             core_missing,
@@ -310,7 +220,6 @@ impl SettingsWindow {
             updates: general::UpdatesView::default(),
             todo_label: None,
             core_pid,
-            clipboard_confirm_pins: false,
             clipboard_note: None,
             _poll: poll,
             _subs: subs,
@@ -410,14 +319,6 @@ impl SettingsWindow {
         self.todo_label = None;
     }
 
-    fn select_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
-        if self.tab != tab {
-            self.cancel_recording(cx);
-            self.tab = tab;
-            cx.notify();
-        }
-    }
-
     // --- Recording -----------------------------------------------------------------------
 
     pub(crate) fn recording_target(&self) -> Option<RecordTarget> {
@@ -506,32 +407,7 @@ impl SettingsWindow {
 
     // --- Rendering -----------------------------------------------------------------------
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let items = Tab::ALL.map(|tab| {
-            SidebarMenuItem::new(tab.label())
-                .icon(tab.icon())
-                .active(self.tab == tab)
-                .on_click(cx.listener(move |this, _, _, cx| this.select_tab(tab, cx)))
-        });
-        Sidebar::new("sidebar")
-            .collapsible(false)
-            .w(px(200.))
-            .header(
-                v_flex()
-                    .px_2()
-                    .py_1()
-                    .child(div().text_lg().font_semibold().child("Kuality"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Settings"),
-                    ),
-            )
-            .child(SidebarMenu::new().children(items))
-    }
-
-    fn render_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_banner(&self) -> Option<AnyElement> {
         use gpui_kit::component::alert::Alert;
         match self.doc.state() {
             DiskState::Invalid(msg) => Some(
@@ -547,11 +423,7 @@ impl SettingsWindow {
                         )
                         .title("Editing paused"),
                     )
-                    .child(h_flex().child(controls::open_config_button(
-                        "banner-open-config",
-                        self,
-                        cx,
-                    )))
+                    .child(h_flex().child(controls::open_config_button("banner-open-config", self)))
                     .into_any_element(),
             ),
             _ if self.core_missing.is_some() => Some(
@@ -577,7 +449,7 @@ impl SettingsWindow {
         }
     }
 
-    fn render_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_status(&self, cx: &mut Context<Self>) -> StatusBar {
         let errors = self.widget_editor.as_ref().map_or(0, |e| e.error_count());
         let theme = cx.theme();
         let (text, color) = if self.read_only() {
@@ -611,76 +483,49 @@ impl SettingsWindow {
                 ),
             }
         };
-        h_flex()
-            .id("status")
-            .justify_between()
-            .gap_4()
-            .px_10()
-            .py_2()
-            .text_xs()
-            .child(div().text_color(color).child(text))
-            .when(!self.core_running, |this| {
-                this.child(
-                    div()
-                        .text_color(theme.warning)
-                        .child("Kuality is not running — changes apply when it starts"),
-                )
-            })
+        let bar = StatusBar::new().left(div().text_color(color).child(text));
+        if self.core_running {
+            bar
+        } else {
+            bar.right(
+                div()
+                    .text_color(theme.warning)
+                    .child("Kuality is not running — changes apply when it starts"),
+            )
+        }
     }
 }
 
 impl Render for SettingsWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let page = match self.tab {
-            Tab::General => self.render_general(window, cx).into_any_element(),
-            Tab::Widgets => self.render_widgets(window, cx).into_any_element(),
-            Tab::Hyperkey => self.render_hyperkey(window, cx).into_any_element(),
-            Tab::Shortcuts => self.render_shortcuts(window, cx).into_any_element(),
-            Tab::Todo => self.render_todo(window, cx).into_any_element(),
-            Tab::Clipboard => self.render_clipboard(cx).into_any_element(),
-        };
-        let banner = self.render_banner(cx);
-        h_flex()
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The pages are rebuilt on every render from the current document; their items reach
+        // the window through this handle when they are drawn or changed.
+        let weak = cx.entity().downgrade();
+        let pages = [
+            self.general_page(&weak, cx),
+            self.widgets_page(&weak, cx),
+            self.hyperkey_page(&weak, cx),
+            self.shortcuts_page(&weak, cx),
+            self.todo_page(&weak, cx),
+            self.clipboard_page(&weak, cx),
+        ];
+        let banner = self.render_banner();
+        v_flex()
             .size_full()
-            .bg(style::window_bg(cx))
+            .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| this.cancel_recording(cx)),
             )
-            .child(self.render_sidebar(cx))
+            .children(banner.map(|b| div().px_4().pt_4().child(b)))
             .child(
-                // The content floats as a rounded panel on the window background.
-                v_flex().flex_1().min_w_0().h_full().py_2().pr_2().child(
-                    v_flex()
-                        .flex_1()
-                        .min_h_0()
-                        .rounded(px(style::RADIUS_LG))
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().background)
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .id("page")
-                                .flex_1()
-                                .min_h_0()
-                                .overflow_y_scroll()
-                                .child(
-                                    v_flex()
-                                        .gap_6()
-                                        .px_10()
-                                        .py_8()
-                                        .max_w(px(780.))
-                                        .child(
-                                            div().text_xl().font_semibold().child(self.tab.label()),
-                                        )
-                                        .children(banner)
-                                        .child(page),
-                                ),
-                        )
-                        .child(self.render_status(cx)),
+                div().flex_1().min_h_0().child(
+                    Settings::new("settings")
+                        .sidebar_width(px(SIDEBAR_WIDTH))
+                        .pages(pages),
                 ),
             )
+            .child(self.render_status(cx))
     }
 }

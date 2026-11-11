@@ -1,15 +1,16 @@
 //! General tab: start at logon, updates, log level and where the config lives.
 
-use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::setting::{SettingGroup, SettingPage};
+use gpui_kit::component::{Disableable as _, IconName, Sizable as _, h_flex};
 use gpui_kit::*;
 use kuality_protocol::LogLevel;
 use kuality_update::Release;
 
 use super::SettingsWindow;
-use super::controls::{self, divider, error_text, hint_text, section, setting_row, warning_text};
+use super::controls::{
+    self, Note, Weak, control_item, dropdown_item, notes_item, raw_switch_item, switch_item,
+};
 use crate::startup::{self, Entry, TaskState};
 
 /// Start-at-logon state shown by the General tab. The system entry (Run value or scheduled
@@ -88,27 +89,16 @@ impl SettingsWindow {
         );
     }
 
-    fn render_startup(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The entry read from the system (`None` until the first read finishes).
+    fn startup_entry(&self) -> Option<Entry> {
+        self.startup.state.as_ref().map(startup::State::entry)
+    }
+
+    fn startup_group(&self, weak: &Weak) -> SettingGroup {
         let view = &self.startup;
-        let entry = view.state.as_ref().map(startup::State::entry);
+        let entry = self.startup_entry();
         let ready = entry.is_some() && !view.busy;
         let on = entry.is_some_and(|e| e != Entry::Off);
-        let elevated = entry == Some(Entry::Elevated);
-
-        let start = Switch::new("startup-enabled")
-            .accessibility_label("Start with Windows")
-            .checked(on)
-            .disabled(!ready)
-            .on_click(cx.listener(|this, on: &bool, _, cx| {
-                this.set_startup(if *on { Entry::Normal } else { Entry::Off }, cx);
-            }));
-        let admin = Switch::new("startup-elevated")
-            .accessibility_label("Run as administrator")
-            .checked(elevated)
-            .disabled(!ready || !on)
-            .on_click(cx.listener(|this, on: &bool, _, cx| {
-                this.set_startup(if *on { Entry::Elevated } else { Entry::Normal }, cx);
-            }));
 
         let exe = std::env::current_exe().ok();
         let other = view
@@ -116,54 +106,53 @@ impl SettingsWindow {
             .as_ref()
             .zip(exe.as_deref())
             .and_then(|(s, exe)| s.other_copy(exe));
-        let unknown = match view.state.as_ref().map(|s| &s.task) {
-            Some(TaskState::Unknown(why)) => Some(why.clone()),
-            _ => None,
-        };
-        let mut notes: Vec<Div> = Vec::new();
+        let mut notes = Vec::new();
         if view.busy {
-            notes.push(hint_text("Applying… Windows may ask for permission.", cx));
+            notes.push(Note::hint("Applying… Windows may ask for permission."));
         }
         if let Some(path) = other {
-            notes.push(warning_text(
-                format!(
-                    "Starts another copy of Kuality: {}. Turn this off and on to start this one.",
-                    path.display()
-                ),
-                cx,
-            ));
+            notes.push(Note::warning(format!(
+                "Starts another copy of Kuality: {}. Turn this off and on to start this one.",
+                path.display()
+            )));
         }
-        if let Some(why) = unknown {
-            notes.push(warning_text(
-                format!("Could not check the administrator task: {why}"),
-                cx,
-            ));
+        if let Some(TaskState::Unknown(why)) = view.state.as_ref().map(|s| &s.task) {
+            notes.push(Note::warning(format!(
+                "Could not check the administrator task: {why}"
+            )));
         }
         if let Some(e) = view.error.clone() {
-            notes.push(error_text(e, cx));
+            notes.push(Note::error(e));
         }
-        let notes = (!notes.is_empty()).then(|| v_flex().gap_1().px_5().pb_4().children(notes));
 
-        section(cx)
-            .child(setting_row(
-                "Start with Windows",
-                Some("Start Kuality when you sign in.".into()),
-                start,
-                cx,
-            ))
-            .child(divider(cx))
-            .child(setting_row(
-                "Run as administrator",
-                Some(
+        // Not part of config.json: these work while the file is read-only too.
+        SettingGroup::new()
+            .title("Startup")
+            .item(
+                raw_switch_item(
+                    "Start with Windows",
+                    weak,
+                    |w| w.startup_entry().is_some_and(|e| e != Entry::Off),
+                    |w, on, cx| w.set_startup(if on { Entry::Normal } else { Entry::Off }, cx),
+                )
+                .description("Start Kuality when you sign in.")
+                .disabled(!ready),
+            )
+            .item(
+                raw_switch_item(
+                    "Run as administrator",
+                    weak,
+                    |w| w.startup_entry() == Some(Entry::Elevated),
+                    |w, on, cx| w.set_startup(if on { Entry::Elevated } else { Entry::Normal }, cx),
+                )
+                .description(
                     "Start it with administrator rights, so Hyperkey and shortcuts also work in \
                      apps running as administrator. Windows asks for permission when you change \
-                     this."
-                        .into(),
-                ),
-                admin,
-                cx,
-            ))
-            .children(notes)
+                     this.",
+                )
+                .disabled(!ready || !on),
+            )
+            .items(notes_item(notes))
     }
 }
 
@@ -234,22 +223,9 @@ impl SettingsWindow {
         );
     }
 
-    fn render_updates(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn updates_group(&self, weak: &Weak) -> SettingGroup {
         let view = &self.updates;
         let ro = self.read_only();
-        let auto = Switch::new("updates-check")
-            .accessibility_label("Check for updates automatically")
-            .checked(self.doc.config.updates.check)
-            .disabled(ro)
-            .on_click(cx.listener(|this, on: &bool, _, cx| {
-                this.doc.config.updates.check = *on;
-                this.changed(cx);
-            }));
-
-        let available = match &view.result {
-            Some(Ok(Some(r))) => Some(r.clone()),
-            _ => None,
-        };
         let status: SharedString = if view.installing {
             "Downloading the update… Kuality restarts when it is installed.".into()
         } else if view.checking {
@@ -261,74 +237,139 @@ impl SettingsWindow {
                 Some(Err(_)) | None => "".into(),
             }
         };
-        let busy = view.checking || view.installing;
-        let buttons = match available {
-            Some(release) => {
-                let page = release.page_url.clone();
-                let label = if view.self_update {
-                    format!("Install {}", release.version)
-                } else {
-                    format!("Download {}", release.version)
-                };
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("update-notes")
-                            .small()
-                            .ghost()
-                            .label("What's new")
-                            .on_click(move |_, _, cx| cx.open_url(&page)),
-                    )
-                    .child(
-                        Button::new("update-install")
-                            .small()
-                            .primary()
-                            .label(label)
-                            .disabled(busy)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.install_update(release.clone(), cx);
-                            })),
-                    )
-            }
-            None => h_flex().child(
-                Button::new("update-check")
-                    .small()
-                    .secondary()
-                    .label("Check now")
-                    .disabled(busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.check_updates(cx))),
-            ),
-        };
-
-        let mut notes: Vec<Div> = Vec::new();
+        let mut notes = Vec::new();
         if let Some(Err(e)) = &view.result
             && !view.checking
         {
-            notes.push(error_text(format!("Could not check for updates: {e}"), cx));
+            notes.push(Note::error(format!("Could not check for updates: {e}")));
         }
         if let Some(e) = view.install_error.clone() {
-            notes.push(error_text(format!("Update failed: {e}"), cx));
+            notes.push(Note::error(format!("Update failed: {e}")));
         }
-        let notes = (!notes.is_empty()).then(|| v_flex().gap_1().px_5().pb_4().children(notes));
 
-        section(cx)
-            .child(setting_row(
-                "Check for updates automatically",
-                Some(
-                    "When Kuality starts and every 6 hours. Nothing is installed without asking."
-                        .into(),
-                ),
-                auto,
-                cx,
-            ))
-            .child(divider(cx))
-            .child(setting_row(
-                format!("Version {}", kuality_update::current_version()),
-                (!status.is_empty()).then_some(status),
-                buttons,
-                cx,
-            ))
-            .children(notes)
+        let version = control_item(
+            format!("Version {}", kuality_update::current_version()),
+            weak,
+            |this, _, cx| this.render_update_buttons(cx),
+        );
+        let version = if status.is_empty() {
+            version
+        } else {
+            version.description(status)
+        };
+        SettingGroup::new()
+            .title("Updates")
+            .item(
+                switch_item(
+                    "Check for updates automatically",
+                    weak,
+                    |w| w.doc.config.updates.check,
+                    |w, on, cx| {
+                        w.doc.config.updates.check = on;
+                        w.changed(cx);
+                    },
+                )
+                .description(
+                    "When Kuality starts and every 6 hours. Nothing is installed without asking.",
+                )
+                .disabled(ro),
+            )
+            .item(version)
+            .items(notes_item(notes))
+    }
+
+    /// "Check now", or "What's new" + "Install / Download" when a release is available.
+    fn render_update_buttons(&self, cx: &mut Context<Self>) -> Div {
+        let view = &self.updates;
+        let busy = view.checking || view.installing;
+        let Some(Ok(Some(release))) = view.result.clone() else {
+            return h_flex().child(
+                Button::new("update-check")
+                    .small()
+                    .label("Check now")
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.check_updates(cx))),
+            );
+        };
+        let page = release.page_url.clone();
+        let label = if view.self_update {
+            format!("Install {}", release.version)
+        } else {
+            format!("Download {}", release.version)
+        };
+        h_flex()
+            .gap_2()
+            .child(
+                Button::new("update-notes")
+                    .small()
+                    .ghost()
+                    .label("What's new")
+                    .on_click(move |_, _, cx| cx.open_url(&page)),
+            )
+            .child(
+                Button::new("update-install")
+                    .small()
+                    .primary()
+                    .label(label)
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.install_update(release.clone(), cx);
+                    })),
+            )
+    }
+
+    pub(super) fn general_page(&self, weak: &Weak, _cx: &mut Context<Self>) -> SettingPage {
+        let ro = self.read_only();
+        let path = self.doc.path().to_path_buf();
+        let logging = SettingGroup::new().title("Logging").item(
+            dropdown_item(
+                "Log level",
+                weak,
+                &LEVELS,
+                |w| Some(w.doc.config.general.log_level),
+                |w, level, cx| {
+                    w.doc.config.general.log_level = level;
+                    w.changed(cx);
+                },
+            )
+            .description(r"How much Kuality writes to logs\kuality.log.")
+            .disabled(ro),
+        );
+        let config_file = SettingGroup::new()
+            .title("Config file")
+            .item(
+                control_item("config.json", weak, |this, _, _| {
+                    let dir = this
+                        .doc
+                        .path()
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_default();
+                    h_flex()
+                        .gap_2()
+                        .child(controls::open_config_button("open-config", this))
+                        .child(
+                            Button::new("open-folder")
+                                .small()
+                                .label("Open data folder")
+                                .on_click(move |_, _, cx| {
+                                    let _ = std::fs::create_dir_all(&dir);
+                                    cx.open_with_system(&dir);
+                                }),
+                        )
+                })
+                .description(path.display().to_string()),
+            )
+            .items(notes_item(vec![Note::hint(
+                "Every change in this window is written to this file and applied by Kuality \
+                 right away. You can also edit it by hand.",
+            )]));
+        SettingPage::new("General")
+            .icon(IconName::Settings)
+            .group(self.startup_group(weak))
+            .group(self.updates_group(weak))
+            .group(logging)
+            .group(config_file)
     }
 }
 
@@ -339,72 +380,3 @@ const LEVELS: [(LogLevel, &str); 5] = [
     (LogLevel::Debug, "Debug"),
     (LogLevel::Trace, "Trace"),
 ];
-
-impl SettingsWindow {
-    pub(super) fn render_general(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let ro = self.read_only();
-        let level = controls::segmented(
-            "log-level",
-            &LEVELS,
-            Some(self.doc.config.general.log_level),
-            ro,
-            cx,
-            |this, level, _, cx| {
-                this.doc.config.general.log_level = level;
-                this.changed(cx);
-            },
-        );
-        let path = self.doc.path().to_path_buf();
-        let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-        v_flex()
-            .gap_4()
-            .child(self.render_startup(cx))
-            .child(self.render_updates(cx))
-            .child(section(cx).child(setting_row(
-                "Log level",
-                Some(r"How much Kuality writes to logs\kuality.log.".into()),
-                level,
-                cx,
-            )))
-            .child(
-                section(cx).child(
-                    v_flex()
-                        .gap_2()
-                        .px_5()
-                        .py_4()
-                        .child(div().text_sm().font_medium().child("Config file"))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(path.display().to_string()),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .pt_1()
-                                .child(controls::open_config_button("open-config", self, cx))
-                                .child(
-                                    Button::new("open-folder")
-                                        .small()
-                                        .secondary()
-                                        .label("Open data folder")
-                                        .on_click(move |_, _, cx| {
-                                            let _ = std::fs::create_dir_all(&dir);
-                                            cx.open_with_system(&dir);
-                                        }),
-                                ),
-                        )
-                        .child(controls::hint_text(
-                            "Every change in this window is written to this file and applied by \
-                             Kuality right away. You can also edit it by hand.",
-                            cx,
-                        )),
-                ),
-            )
-    }
-}
