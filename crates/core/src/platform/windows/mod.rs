@@ -19,7 +19,10 @@ mod tray;
 mod watcher;
 
 pub use actions::{action_thread_init, action_thread_run, action_thread_stop, action_thread_wake};
-pub use clipboard::{ClipboardMonitor, MemoryCipher, Putter, protect, set_paste_target, unprotect};
+pub use clipboard::{
+    ClipboardMonitor, MemoryCipher, Putter, close_shell_flyout, protect, set_paste_target,
+    unprotect,
+};
 pub use crash::install_crash_guard;
 pub use dpi::dpi_awareness;
 pub use focus::{Foreground, foreground_window};

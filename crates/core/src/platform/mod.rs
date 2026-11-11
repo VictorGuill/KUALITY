@@ -21,10 +21,10 @@ mod windows;
 pub use self::windows::{
     ClipboardMonitor, Foreground, Instance, IpcServer, Keyboard, MemoryCipher, Overlay, Putter,
     Reply, Tray, Watcher, action_thread_init, action_thread_run, action_thread_stop,
-    action_thread_wake, dpi_awareness, foreground_window, init_main_thread, install_crash_guard,
-    launch, local_time_now, office_key, open_url, open_with_default_app, protect,
-    roaming_app_data_dir, set_paste_target, set_tray_paused, set_tray_update, show_notification,
-    spawn_detached, unprotect,
+    action_thread_wake, close_shell_flyout, dpi_awareness, foreground_window, init_main_thread,
+    install_crash_guard, launch, local_time_now, office_key, open_url, open_with_default_app,
+    protect, roaming_app_data_dir, set_paste_target, set_tray_paused, set_tray_update,
+    show_notification, spawn_detached, unprotect,
 };
 
 #[cfg(not(windows))]

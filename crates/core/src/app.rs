@@ -225,6 +225,9 @@ impl<W: DirWatcher> App<W> {
             log::debug!("clipboard popup closed");
             return;
         }
+        // The Start menu and other shell flyouts sit above every topmost window: close them
+        // first, so the popup is on top and Enter pastes into the app behind them.
+        platform::close_shell_flyout();
         platform::set_paste_target(platform::foreground_window());
         let args = [
             CLIPBOARD_ARG.into(),

@@ -70,6 +70,8 @@ const TRACE_PANIC: usize = 3;
 const WM_APP_ACTION: u32 = WM_APP + 3;
 /// Clipboard history: send Ctrl+V (the paste target is already in front).
 const WM_APP_PASTE: u32 = WM_APP + 4;
+/// Clipboard history: send Esc (closes the Start menu or another shell flyout in front).
+const WM_APP_ESCAPE: u32 = WM_APP + 5;
 
 /// The keyboard thread's window, for the hook callback (read with one atomic load).
 static KEYBOARD_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -502,6 +504,11 @@ pub(crate) fn request_paste() {
     post(WM_APP_PASTE, 0, 0);
 }
 
+/// Asks the keyboard thread to send Esc. Any thread.
+pub(crate) fn request_escape() {
+    post(WM_APP_ESCAPE, 0, 0);
+}
+
 /// Forces Hyper up and injects the release. Returns `false` if the injection failed.
 fn release_all() -> bool {
     let buf = ENGINE.with_borrow_mut(Engine::force_release);
@@ -598,6 +605,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_APP_ACTION => {
             with_ctx(|c| c.run_shortcut(wparam.0, lparam.0 as u64));
+            LRESULT(0)
+        }
+        WM_APP_ESCAPE => {
+            if !kuality_protocol::parse_chord("escape").is_ok_and(|c| send_chord(&c)) {
+                log::warn!("Esc was not injected");
+            }
             LRESULT(0)
         }
         WM_APP_PASTE => {

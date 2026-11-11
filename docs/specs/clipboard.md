@@ -64,6 +64,8 @@ Pins file `clipboard-pins.bin` (data dir, next to `config.json`):
 
 ## Edge cases
 
+- **Start menu, search or another shell flyout open** when the hotkey is pressed: they sit above every topmost window, so the core closes them first (Esc) and then opens the popup; Enter pastes into the app that was behind them.
+
 - **Elevated window in front**: the hook does not see the keys, so the hotkey does nothing there (and Win+V opens the Windows panel); pasting into an elevated app fails silently unless Kuality runs as administrator. Documented limitation (same as Shortcuts).
 - **Core runs elevated**: the popup is started by the core and runs elevated too; the pipe DACL still allows the same user.
 - **Remembered window gone** when pasting: the entry is put on the clipboard only (like Copy).

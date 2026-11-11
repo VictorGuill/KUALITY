@@ -15,7 +15,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use ::windows::Win32::Foundation::{
-    GlobalFree, HANDLE, HGLOBAL, HLOCAL, HWND, LPARAM, LRESULT, LocalFree, WPARAM,
+    CloseHandle, GlobalFree, HANDLE, HGLOBAL, HLOCAL, HWND, LPARAM, LRESULT, LocalFree, WPARAM,
 };
 use ::windows::Win32::Security::Cryptography::{
     CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CRYPTPROTECTMEMORY_SAME_PROCESS,
@@ -31,13 +31,16 @@ use ::windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
 use ::windows::Win32::System::Ole::{CF_DIB, CF_DIBV5, CF_UNICODETEXT};
+use ::windows::Win32::System::Threading::{
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
 use ::windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-    GetMessageW, HWND_MESSAGE, IsWindow, KillTimer, MSG, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SetForegroundWindow, SetTimer, TranslateMessage, WINDOW_EX_STYLE, WM_APP,
-    WM_CLIPBOARDUPDATE, WM_TIMER, WNDCLASSEXW, WS_POPUP,
+    GetMessageW, GetWindowThreadProcessId, HWND_MESSAGE, IsWindow, KillTimer, MSG, PostMessageW,
+    PostQuitMessage, RegisterClassExW, SetForegroundWindow, SetTimer, TranslateMessage,
+    WINDOW_EX_STYLE, WM_APP, WM_CLIPBOARDUPDATE, WM_TIMER, WNDCLASSEXW, WS_POPUP,
 };
-use ::windows::core::{PCWSTR, w};
+use ::windows::core::{PCWSTR, PWSTR, w};
 use kuality_protocol::clipboard::{EntryKind, THUMB_PX};
 
 use super::input;
@@ -181,6 +184,66 @@ pub fn restore_paste_target() -> bool {
         }
         GetForegroundWindow() == hwnd
     }
+}
+
+/// Processes of the shell's flyouts (Start, search, notification center, quick settings). They
+/// live in a z-order band above every normal topmost window, so the popup would open behind
+/// them; only apps with `uiAccess` can go above.
+const SHELL_FLYOUT_HOSTS: [&str; 5] = [
+    "StartMenuExperienceHost.exe",
+    "SearchHost.exe",
+    "SearchApp.exe",
+    "ShellExperienceHost.exe",
+    "ShellHost.exe",
+];
+
+/// Whether a shell flyout (Start menu, search…) is the foreground window.
+fn shell_flyout_in_front() -> bool {
+    // SAFETY: plain queries; the process handle is closed below.
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        let mut pid = 0u32;
+        if hwnd.is_invalid() || GetWindowThreadProcessId(hwnd, Some(&mut pid)) == 0 {
+            return false;
+        }
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(process);
+        if !ok {
+            return false;
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        let name = path.rsplit(['\\', '/']).next().unwrap_or_default();
+        SHELL_FLYOUT_HOSTS
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(name))
+    }
+}
+
+/// Closes the Start menu (or another shell flyout) if it is in front, so the clipboard popup
+/// is not hidden behind it: sends Esc and waits up to 400 ms for the foreground to change.
+/// Returns whether one was closed.
+pub fn close_shell_flyout() -> bool {
+    if !shell_flyout_in_front() {
+        return false;
+    }
+    super::keyboard::request_escape();
+    let deadline = Instant::now() + Duration::from_millis(400);
+    while Instant::now() < deadline && shell_flyout_in_front() {
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    log::debug!("clipboard: closed a shell flyout before opening the popup");
+    true
 }
 
 // ---------------------------------------------------------------------------------------------
