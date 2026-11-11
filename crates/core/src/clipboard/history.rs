@@ -50,6 +50,9 @@ struct Entry {
     /// Keyed (per-process random key) hash of kind + data, for duplicates.
     hash: u64,
     data: Sealed,
+    /// Text longer than [`LIST_TEXT_CHARS`]: its first characters, so listing the history never
+    /// decrypts a whole large entry.
+    preview: Option<Sealed>,
     thumb: Option<Sealed>,
     width: u32,
     height: u32,
@@ -148,6 +151,10 @@ impl<C: Cipher> History<C> {
         let entry = match &content {
             Content::Text(t) => {
                 let s = t.as_str().unwrap_or_default();
+                let preview = match s.char_indices().nth(LIST_TEXT_CHARS) {
+                    Some((cut, _)) => Some(Sealed::seal(&self.cipher, &t[..cut])?),
+                    None => None,
+                };
                 Entry {
                     id,
                     kind: EntryKind::Text,
@@ -155,6 +162,7 @@ impl<C: Cipher> History<C> {
                     created,
                     hash,
                     data: Sealed::seal(&self.cipher, t)?,
+                    preview,
                     thumb: None,
                     width: 0,
                     height: 0,
@@ -174,6 +182,7 @@ impl<C: Cipher> History<C> {
                 created,
                 hash,
                 data: Sealed::seal(&self.cipher, png)?,
+                preview: None,
                 thumb: Some(Sealed::seal(&self.cipher, thumb)?),
                 width: *width,
                 height: *height,
@@ -255,13 +264,13 @@ impl<C: Cipher> History<C> {
 
     fn info(&self, e: &Entry, full_text: bool) -> EntryInfo {
         let text = (e.kind == EntryKind::Text).then(|| {
-            let plain = e.data.open(&self.cipher).unwrap_or_default();
-            let s = plain.as_str().unwrap_or_default();
-            if full_text {
-                s.to_string()
-            } else {
-                s.chars().take(LIST_TEXT_CHARS).collect()
-            }
+            // The preview is the whole text unless it is longer than `LIST_TEXT_CHARS`.
+            let sealed = match &e.preview {
+                Some(preview) if !full_text => preview,
+                _ => &e.data,
+            };
+            let plain = sealed.open(&self.cipher).unwrap_or_default();
+            plain.as_str().unwrap_or_default().to_string()
         });
         EntryInfo {
             id: e.id,
@@ -313,20 +322,26 @@ impl<C: Cipher> History<C> {
         Some((info, data))
     }
 
-    /// The pinned entries with their data, for `clipboard-pins.bin` (display order).
-    pub fn pin_records(&self) -> Vec<(PinRecord, Plain)> {
+    /// The pinned entries with their data and thumbnail (empty for text), for
+    /// `clipboard-pins.bin` (display order).
+    pub fn pin_records(&self) -> Vec<(PinRecord, Plain, Plain)> {
         self.ordered()
             .filter(|e| e.pinned)
             .filter_map(|e| {
                 let data = e.data.open(&self.cipher)?;
+                let thumb = match &e.thumb {
+                    Some(t) => t.open(&self.cipher)?,
+                    None => Plain::default(),
+                };
                 let record = PinRecord {
                     kind: e.kind,
                     created: e.created,
                     len: data.len() as u64,
                     width: e.width,
                     height: e.height,
+                    thumb_len: thumb.len() as u64,
                 };
-                Some((record, data))
+                Some((record, data, thumb))
             })
             .collect()
     }
@@ -494,19 +509,21 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].0.kind, EntryKind::Image);
         assert_eq!(records[0].0.len, 6);
+        assert_eq!((records[0].0.thumb_len, &*records[0].2), (3, &[4u8; 3][..]));
         assert_eq!(records[1].1.as_str(), Some("keep"));
+        assert!(records[1].2.is_empty());
 
         let mut fresh = History::new(XorCipher, 100);
         fresh.add(text("new"), 10);
         fresh.restore_pins(
             records
                 .into_iter()
-                .map(|(r, data)| {
+                .map(|(r, data, thumb)| {
                     let content = match r.kind {
                         EntryKind::Text => Content::Text(data),
                         EntryKind::Image => Content::Image {
                             png: data,
-                            thumb: Plain::default(),
+                            thumb,
                             width: r.width,
                             height: r.height,
                         },
@@ -515,8 +532,9 @@ mod tests {
                 })
                 .collect(),
         );
-        let (list, _) = fresh.list();
+        let (list, thumbs) = fresh.list();
         assert!(list[0].pinned && list[1].pinned && !list[2].pinned);
+        assert_eq!((list[0].thumb_len, &*thumbs), (3, &[4u8; 3][..]));
         assert_eq!(list[1].text.as_deref(), Some("keep"));
         assert_eq!(list[1].created, 5);
         // A pinned entry copied again is a duplicate of the pin, which stays pinned.

@@ -220,7 +220,9 @@ fn save_pins(history: &SharedHistory, path: &Path) {
     let records = lock(history).pin_records();
     let count = records.len();
     let payload = Plain::new(encode_pins(
-        records.iter().map(|(r, data)| (r.clone(), &data[..])),
+        records
+            .iter()
+            .map(|(r, data, thumb)| (r.clone(), &data[..], &thumb[..])),
     ));
     let written = platform::protect(&payload).and_then(|blob| store::write_atomic(path, &blob));
     match written {
@@ -239,27 +241,39 @@ fn load_pins(path: &Path) -> Result<Vec<(u64, Content)>, String> {
     let plain = platform::unprotect(&blob).map_err(|e| format!("cannot decrypt it ({e})"))?;
     let records = decode_pins(&plain)?;
     let mut out = Vec::with_capacity(records.len());
-    for (record, range) in records {
-        let data = Plain::new(plain[range].to_vec());
-        match pin_content(&record, data) {
-            Ok(content) => out.push((record.created, content)),
+    for pin in records {
+        let data = Plain::new(plain[pin.data].to_vec());
+        let thumb = Plain::new(plain[pin.thumb].to_vec());
+        match pin_content(&pin.record, data, thumb) {
+            Ok(content) => out.push((pin.record.created, content)),
             Err(e) => log::warn!("a pinned clipboard entry could not be read: {e}"),
         }
     }
     Ok(out)
 }
 
-fn pin_content(record: &PinRecord, data: Plain) -> Result<Content, image::ImageError> {
+/// The content of a pinned entry read from the file. An image stored without its thumbnail
+/// (version 1 files) is decoded once to rebuild it.
+fn pin_content(
+    record: &PinRecord,
+    data: Plain,
+    thumb: Plain,
+) -> Result<Content, image::ImageError> {
     Ok(match record.kind {
         EntryKind::Text => Content::Text(data),
+        EntryKind::Image if !thumb.is_empty() => Content::Image {
+            png: data,
+            thumb,
+            width: record.width,
+            height: record.height,
+        },
         EntryKind::Image => {
-            let img = image::decode_png(&data)?;
-            let thumb = image::encode_png(&image::thumbnail(&img, THUMB_PX))?;
+            let (thumb, width, height) = image::png_thumbnail(&data, THUMB_PX)?;
             Content::Image {
                 png: data,
-                thumb,
-                width: img.width,
-                height: img.height,
+                thumb: image::encode_png(&thumb)?,
+                width,
+                height,
             }
         }
     })

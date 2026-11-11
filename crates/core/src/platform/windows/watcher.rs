@@ -18,14 +18,8 @@ use ::windows::Win32::System::Threading::{
 };
 use ::windows::core::PCWSTR;
 
-use super::wide;
+use super::{SendHandle, wide};
 use crate::platform::DirWatcher;
-
-/// A Win32 handle that may be moved to the watcher thread.
-#[derive(Debug, Clone, Copy)]
-struct SendHandle(HANDLE);
-// SAFETY: kernel handles are process-wide and usable from any thread.
-unsafe impl Send for SendHandle {}
 
 /// Running watcher; call [`DirWatcher::stop`] to end it.
 #[derive(Debug)]

@@ -39,10 +39,20 @@ pub fn write_frame<T: Serialize>(w: &mut impl Write, header: &T, payload: &[u8])
 
 /// Reads one frame: the parsed header and the payload.
 pub fn read_frame<T: DeserializeOwned>(r: &mut impl Read) -> io::Result<(T, Vec<u8>)> {
-    let header = read_part(r, MAX_HEADER)?;
+    read_frame_limited(r, MAX_HEADER, MAX_PAYLOAD)
+}
+
+/// [`read_frame`] with its own size limits. A part announced as larger fails before any of it
+/// is read or allocated: the server uses this for requests, which are tiny and have no payload.
+pub fn read_frame_limited<T: DeserializeOwned>(
+    r: &mut impl Read,
+    max_header: usize,
+    max_payload: usize,
+) -> io::Result<(T, Vec<u8>)> {
+    let header = read_part(r, max_header)?;
     let header = serde_json::from_slice(&header)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let payload = read_part(r, MAX_PAYLOAD)?;
+    let payload = read_part(r, max_payload)?;
     Ok((header, payload))
 }
 
@@ -96,6 +106,21 @@ mod tests {
         bad.extend_from_slice(b"{x");
         bad.extend_from_slice(&0u32.to_le_bytes());
         assert!(read_frame::<Value>(&mut bad.as_slice()).is_err());
+    }
+
+    #[test]
+    fn limited_frames_refuse_larger_parts() {
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &json!({ "op": "list" }), b"").unwrap();
+        let (h, p): (Value, _) = read_frame_limited(&mut buf.as_slice(), 64, 0).unwrap();
+        assert_eq!(h, json!({ "op": "list" }));
+        assert!(p.is_empty());
+        let err = read_frame_limited::<Value>(&mut buf.as_slice(), 4, 0).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "header");
+        let mut with_payload = Vec::new();
+        write_frame(&mut with_payload, &json!({ "op": "list" }), &[1]).unwrap();
+        let err = read_frame_limited::<Value>(&mut with_payload.as_slice(), 64, 0).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "payload");
     }
 
     #[test]

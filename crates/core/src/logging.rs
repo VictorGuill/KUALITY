@@ -138,9 +138,10 @@ enum Msg {
     Flush(SyncSender<()>),
 }
 
-/// Writes one line to stderr (debug builds only: release builds have no console).
+/// Writes one line to stderr (debug builds only: release builds have no console; not in unit
+/// tests, whose output it would clutter).
 fn write_stderr(line: &str) {
-    if cfg!(debug_assertions) {
+    if cfg!(debug_assertions) && !cfg!(test) {
         let _ = io::stderr().write_all(line.as_bytes());
     }
 }

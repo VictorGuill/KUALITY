@@ -24,7 +24,7 @@ pub use self::windows::{
     action_thread_wake, close_shell_flyout, dpi_awareness, foreground_window, init_main_thread,
     install_crash_guard, launch, local_time_now, office_key, open_url, open_with_default_app,
     protect, roaming_app_data_dir, set_paste_target, set_tray_paused, set_tray_update,
-    show_notification, spawn_detached, unprotect,
+    shell_flyout_in_front, show_notification, spawn_detached, unprotect,
 };
 
 #[cfg(not(windows))]

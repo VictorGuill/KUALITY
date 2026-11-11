@@ -225,24 +225,23 @@ impl<W: DirWatcher> App<W> {
             log::debug!("clipboard popup closed");
             return;
         }
+        self.clipboard_started = Some(Instant::now());
         // The Start menu and other shell flyouts sit above every topmost window: close them
-        // first, so the popup is on top and Enter pastes into the app behind them.
-        platform::close_shell_flyout();
-        platform::set_paste_target(platform::foreground_window());
-        let args = [
-            CLIPBOARD_ARG.into(),
-            CORE_PID_ARG.into(),
-            std::process::id().to_string(),
-            PASTE_ARG.into(),
-        ];
-        let started = std::env::current_exe().and_then(|exe| platform::spawn_detached(&exe, &args));
-        match started {
-            Ok(()) => {
-                self.clipboard_started = Some(Instant::now());
-                log::debug!("started the clipboard popup");
+        // first, so the popup is on top and Enter pastes into the app behind them. Closing
+        // waits for the shell (up to 400 ms), so it does not run on the main thread.
+        if platform::shell_flyout_in_front() {
+            let spawned = std::thread::Builder::new()
+                .name("kuality-clipboard-open".into())
+                .spawn(|| {
+                    platform::close_shell_flyout();
+                    start_clipboard_popup();
+                });
+            match spawned {
+                Ok(_) => return,
+                Err(e) => log::warn!("cannot close the shell flyout first: {e}"),
             }
-            Err(e) => log::error!("could not start the clipboard popup: {e}"),
         }
+        start_clipboard_popup();
     }
 
     /// Takes the latest to-do count from the watcher and sends it to the overlay if it changed.
@@ -384,6 +383,22 @@ impl<W: DirWatcher> App<W> {
             log::warn!("Hyper shortcuts need Hyperkey (hyperkey.enabled) to work");
         }
         k.apply(&config.hyperkey, Arc::new(compiled));
+    }
+}
+
+/// Remembers the window in front as the paste target and starts the clipboard popup
+/// (`kuality.exe --clipboard --paste`, this same exe). Any thread.
+fn start_clipboard_popup() {
+    platform::set_paste_target(platform::foreground_window());
+    let args = [
+        CLIPBOARD_ARG.into(),
+        CORE_PID_ARG.into(),
+        std::process::id().to_string(),
+        PASTE_ARG.into(),
+    ];
+    match std::env::current_exe().and_then(|exe| platform::spawn_detached(&exe, &args)) {
+        Ok(()) => log::debug!("started the clipboard popup"),
+        Err(e) => log::error!("could not start the clipboard popup: {e}"),
     }
 }
 

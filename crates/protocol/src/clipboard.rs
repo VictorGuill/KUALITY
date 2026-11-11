@@ -111,9 +111,11 @@ impl Response {
 
 /// First bytes of a decrypted pins payload.
 pub const PINS_MAGIC: &[u8; 4] = b"KCLP";
-pub const PINS_VERSION: u32 = 1;
+/// Version written. 1 had no thumbnails (still read: they are rebuilt from the images).
+pub const PINS_VERSION: u32 = 2;
 
-/// One pinned entry in `clipboard-pins.bin`; its data follows the header, in header order.
+/// One pinned entry in `clipboard-pins.bin`; its data, then its thumbnail, follow the header in
+/// header order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinRecord {
     pub kind: EntryKind,
@@ -124,6 +126,10 @@ pub struct PinRecord {
     pub width: u32,
     #[serde(default)]
     pub height: u32,
+    /// Image: bytes of its PNG thumbnail (0: none stored), so loading the pins never decodes
+    /// the images.
+    #[serde(default)]
+    pub thumb_len: u64,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -131,35 +137,47 @@ struct PinsHeader {
     entries: Vec<PinRecord>,
 }
 
-/// Builds the plain pins payload (the caller encrypts it, then wipes the buffer).
-pub fn encode_pins<'a>(pins: impl IntoIterator<Item = (PinRecord, &'a [u8])>) -> Vec<u8> {
-    let (records, data): (Vec<PinRecord>, Vec<&[u8]>) = pins
+/// A record of a pins payload with where its bytes are in that payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedPin {
+    pub record: PinRecord,
+    pub data: std::ops::Range<usize>,
+    /// Empty when no thumbnail is stored.
+    pub thumb: std::ops::Range<usize>,
+}
+
+/// Builds the plain pins payload from `(record, data, thumbnail)` (the caller encrypts it, then
+/// wipes the buffer).
+pub fn encode_pins<'a>(pins: impl IntoIterator<Item = (PinRecord, &'a [u8], &'a [u8])>) -> Vec<u8> {
+    let (records, parts): (Vec<PinRecord>, Vec<[&[u8]; 2]>) = pins
         .into_iter()
-        .map(|(mut r, d)| {
-            r.len = d.len() as u64;
-            (r, d)
+        .map(|(mut r, data, thumb)| {
+            r.len = data.len() as u64;
+            r.thumb_len = thumb.len() as u64;
+            (r, [data, thumb])
         })
         .unzip();
     let header = serde_json::to_vec(&PinsHeader { entries: records }).unwrap_or_default();
-    let total = 12 + header.len() + data.iter().map(|d| d.len()).sum::<usize>();
+    let total = 12 + header.len() + parts.iter().flatten().map(|d| d.len()).sum::<usize>();
     let mut out = Vec::with_capacity(total);
     out.extend_from_slice(PINS_MAGIC);
     out.extend_from_slice(&PINS_VERSION.to_le_bytes());
     out.extend_from_slice(&(header.len() as u32).to_le_bytes());
     out.extend_from_slice(&header);
-    for d in data {
-        out.extend_from_slice(d);
+    for part in parts.iter().flatten() {
+        out.extend_from_slice(part);
     }
     out
 }
 
-/// Parses a plain pins payload: each record with the range of its data in `bytes`.
-pub fn decode_pins(bytes: &[u8]) -> Result<Vec<(PinRecord, std::ops::Range<usize>)>, String> {
+/// Parses a plain pins payload: each record with the ranges of its data and thumbnail in
+/// `bytes`.
+pub fn decode_pins(bytes: &[u8]) -> Result<Vec<DecodedPin>, String> {
     if bytes.len() < 12 || &bytes[..4] != PINS_MAGIC {
         return Err("not a pins file".into());
     }
     let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap_or_default());
-    if version != PINS_VERSION {
+    if !(1..=PINS_VERSION).contains(&version) {
         return Err(format!("unsupported pins version {version}"));
     }
     let header_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap_or_default()) as usize;
@@ -170,15 +188,29 @@ pub fn decode_pins(bytes: &[u8]) -> Result<Vec<(PinRecord, std::ops::Range<usize
     let header: PinsHeader =
         serde_json::from_slice(&bytes[12..header_end]).map_err(|e| e.to_string())?;
     let mut at = header_end;
-    let mut out = Vec::with_capacity(header.entries.len());
-    for r in header.entries {
-        let end = usize::try_from(r.len)
+    let mut take = |len: u64| {
+        let end = usize::try_from(len)
             .ok()
             .and_then(|l| at.checked_add(l))
             .filter(|&e| e <= bytes.len())
             .ok_or("truncated data")?;
-        out.push((r, at..end));
+        let range = at..end;
         at = end;
+        Ok::<_, String>(range)
+    };
+    let mut out = Vec::with_capacity(header.entries.len());
+    for mut record in header.entries {
+        if version < 2 {
+            // No thumbnails in that layout, whatever the header says.
+            record.thumb_len = 0;
+        }
+        let data = take(record.len)?;
+        let thumb = take(record.thumb_len)?;
+        out.push(DecodedPin {
+            record,
+            data,
+            thumb,
+        });
     }
     if at != bytes.len() {
         return Err("trailing data".into());
@@ -198,6 +230,7 @@ mod tests {
             len: 0,
             width: 0,
             height: 0,
+            thumb_len: 0,
         }
     }
 
@@ -235,24 +268,48 @@ mod tests {
             height: 1,
             ..rec(EntryKind::Image)
         };
+        let none = &b""[..];
         let bytes = encode_pins([
-            (rec(EntryKind::Text), "héllo".as_bytes()),
-            (image.clone(), &[1u8, 2, 3][..]),
-            (rec(EntryKind::Text), &b""[..]),
+            (rec(EntryKind::Text), "héllo".as_bytes(), none),
+            (image.clone(), &[1u8, 2, 3][..], &[9u8, 8][..]),
+            (rec(EntryKind::Text), none, none),
         ]);
         let pins = decode_pins(&bytes).unwrap();
         assert_eq!(pins.len(), 3);
-        assert_eq!(&bytes[pins[0].1.clone()], "héllo".as_bytes());
-        assert_eq!(pins[0].0.len, 6);
-        assert_eq!(pins[1].0, PinRecord { len: 3, ..image });
-        assert_eq!(&bytes[pins[1].1.clone()], &[1, 2, 3]);
-        assert!(pins[2].1.is_empty());
+        assert_eq!(&bytes[pins[0].data.clone()], "héllo".as_bytes());
+        assert_eq!(pins[0].record.len, 6);
+        assert!(pins[0].thumb.is_empty());
+        let expected = PinRecord {
+            len: 3,
+            thumb_len: 2,
+            ..image
+        };
+        assert_eq!(pins[1].record, expected);
+        assert_eq!(&bytes[pins[1].data.clone()], &[1, 2, 3]);
+        assert_eq!(&bytes[pins[1].thumb.clone()], &[9, 8]);
+        assert!(pins[2].data.is_empty() && pins[2].thumb.is_empty());
         assert_eq!(decode_pins(&encode_pins([])).unwrap(), vec![]);
     }
 
     #[test]
+    fn version_1_pins_have_no_thumbnails() {
+        // The layout written before thumbnails were stored: header, then only the data.
+        let header = br#"{"entries":[{"kind":"image","created":5,"len":3,"width":2,"height":1}]}"#;
+        let mut v1 = PINS_MAGIC.to_vec();
+        v1.extend_from_slice(&1u32.to_le_bytes());
+        v1.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        v1.extend_from_slice(header);
+        v1.extend_from_slice(&[1, 2, 3]);
+        let pins = decode_pins(&v1).unwrap();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(&v1[pins[0].data.clone()], &[1, 2, 3]);
+        assert!(pins[0].thumb.is_empty());
+        assert_eq!((pins[0].record.width, pins[0].record.thumb_len), (2, 0));
+    }
+
+    #[test]
     fn bad_pins_payloads_fail() {
-        let good = encode_pins([(rec(EntryKind::Text), &b"abc"[..])]);
+        let good = encode_pins([(rec(EntryKind::Text), &b"abc"[..], &b""[..])]);
         assert!(decode_pins(b"").is_err());
         assert!(decode_pins(b"XXXX\x01\0\0\0\0\0\0\0").is_err());
         assert!(
@@ -262,8 +319,11 @@ mod tests {
         let mut extra = good.clone();
         extra.push(0);
         assert!(decode_pins(&extra).is_err(), "trailing data");
-        let mut v2 = good;
-        v2[4] = 2;
-        assert!(decode_pins(&v2).is_err(), "version");
+        let mut newer = good.clone();
+        newer[4] = 3;
+        assert!(decode_pins(&newer).is_err(), "version");
+        let mut zero = good;
+        zero[4] = 0;
+        assert!(decode_pins(&zero).is_err(), "version");
     }
 }

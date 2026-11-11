@@ -31,21 +31,19 @@ use ::windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
 use ::windows::Win32::System::Ole::{CF_DIB, CF_DIBV5, CF_UNICODETEXT};
-use ::windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
-};
+use ::windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 use ::windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
     GetMessageW, GetWindowThreadProcessId, HWND_MESSAGE, IsWindow, KillTimer, MSG, PostMessageW,
     PostQuitMessage, RegisterClassExW, SetForegroundWindow, SetTimer, TranslateMessage,
     WINDOW_EX_STYLE, WM_APP, WM_CLIPBOARDUPDATE, WM_TIMER, WNDCLASSEXW, WS_POPUP,
 };
-use ::windows::core::{PCWSTR, PWSTR, w};
+use ::windows::core::{PCWSTR, w};
 use kuality_protocol::clipboard::{EntryKind, THUMB_PX};
 
 use super::input;
 use crate::clipboard::history::{Content, MAX_TEXT_BYTES};
-use crate::clipboard::image::{self, Rgba};
+use crate::clipboard::image;
 use crate::clipboard::sealed::{Cipher, Plain, wipe};
 use crate::platform::Foreground;
 
@@ -198,7 +196,7 @@ const SHELL_FLYOUT_HOSTS: [&str; 5] = [
 ];
 
 /// Whether a shell flyout (Start menu, search…) is the foreground window.
-fn shell_flyout_in_front() -> bool {
+pub fn shell_flyout_in_front() -> bool {
     // SAFETY: plain queries; the process handle is closed below.
     unsafe {
         let hwnd = GetForegroundWindow();
@@ -209,20 +207,11 @@ fn shell_flyout_in_front() -> bool {
         let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
             return false;
         };
-        let mut buf = [0u16; 1024];
-        let mut len = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(
-            process,
-            PROCESS_NAME_WIN32,
-            PWSTR(buf.as_mut_ptr()),
-            &mut len,
-        )
-        .is_ok();
+        let path = super::process_image_path(process);
         let _ = CloseHandle(process);
-        if !ok {
+        let Some(path) = path else {
             return false;
-        }
-        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        };
         let name = path.rsplit(['\\', '/']).next().unwrap_or_default();
         SHELL_FLYOUT_HOSTS
             .iter()
@@ -231,8 +220,8 @@ fn shell_flyout_in_front() -> bool {
 }
 
 /// Closes the Start menu (or another shell flyout) if it is in front, so the clipboard popup
-/// is not hidden behind it: sends Esc and waits up to 400 ms for the foreground to change.
-/// Returns whether one was closed.
+/// is not hidden behind it: sends Esc and waits up to 400 ms for the foreground to change (so
+/// not for the main thread). Returns whether one was closed.
 pub fn close_shell_flyout() -> bool {
     if !shell_flyout_in_front() {
         return false;
@@ -638,23 +627,23 @@ fn read_text() -> Result<Option<Plain>, &'static str> {
 }
 
 fn convert(raw: Raw) -> Result<Content, image::ImageError> {
-    let (png, img) = match raw {
+    // Row by row: no full RGBA copy of the image is ever made (`clipboard::image`).
+    let (png, thumb, width, height) = match raw {
         Raw::Text(t) => return Ok(Content::Text(t)),
         Raw::Png(png) => {
-            let img = image::decode_png(&png)?;
-            (png, img)
+            let (thumb, width, height) = image::png_thumbnail(&png, THUMB_PX)?;
+            (png, thumb, width, height)
         }
         Raw::Dib(dib) => {
-            let img = image::from_dib(&dib)?;
-            (image::encode_png(&img)?, img)
+            let e = image::dib_to_png(&dib, THUMB_PX)?;
+            (e.png, e.thumb, e.width, e.height)
         }
     };
-    let thumb = image::encode_png(&image::thumbnail(&img, THUMB_PX))?;
     Ok(Content::Image {
         png,
-        thumb,
-        width: img.width,
-        height: img.height,
+        thumb: image::encode_png(&thumb)?,
+        width,
+        height,
     })
 }
 
@@ -676,15 +665,15 @@ fn put(c: &Ctx, job: &PutJob) -> bool {
             vec![(u32::from(CF_UNICODETEXT.0), Plain::new(wide))]
         }
         EntryKind::Image => {
-            let img: Rgba = match image::decode_png(&job.data) {
-                Ok(i) => i,
+            let dib = match image::png_to_dib(&job.data) {
+                Ok(d) => d,
                 Err(e) => {
                     log::warn!("cannot decode a stored image: {e}");
                     return false;
                 }
             };
             vec![
-                (u32::from(CF_DIB.0), image::to_dib(&img)),
+                (u32::from(CF_DIB.0), dib),
                 (c.formats.png, Plain::new(job.data.to_vec())),
             ]
         }
