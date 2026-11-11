@@ -3,7 +3,7 @@
 Work phase by phase. The **current phase** is the first one not marked ✅.
 Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase-N-name`).
 
-**MVP = Phases 0–3.** Phase 5 was done before Phase 4 (user request: a settings window first, no new features). Phase 8 (to-do) was also done before Phase 4 (user request, 2026-11-09).
+**MVP = Phases 0–3.** Phase 5 was done before Phase 4 (user request: a settings window first, no new features). Phase 8 (to-do) was also done before Phase 4 (user request, 2026-11-09), and so was Phase 9 (clipboard history, 2026-11-11).
 
 ---
 
@@ -85,7 +85,7 @@ Done before Phase 4 and scoped to the settings that already exist (Phases 0–3)
 
 ### Later (moved out of Phase 5)
 
-- [ ] Named pipe IPC with the core (live commands, state the file cannot carry)
+- [ ] Named pipe IPC with the core (live commands, state the file cannot carry) *(2026-11-11: the pipe exists for the clipboard history; settings changes still go through `config.json`)*
 - [ ] Drag-to-place mode for widgets
 - [ ] Appearance and Extensions tabs (Extensions with Phase 7)
 - [x] Autostart / Run elevated toggles in the General tab (with Phase 6)
@@ -126,18 +126,18 @@ Done before Phase 4 (user request, 2026-11-09); see `docs/specs/todo.md`. Releas
 
 **Done when:** enabling To do shows `TO DO` at the bottom-left of the taskbar, a click opens the list, items can be added / checked / deleted, the count follows, and the list survives a restart.
 
-## Phase 9 — Clipboard history
+## Phase 9 — Clipboard history ✅
 
 Done before Phase 4 (user request, 2026-11-11); see `docs/specs/clipboard.md`.
 
 - [x] Spec `docs/specs/clipboard.md`
-- [ ] `clipboard` config section, IPC frames and pins payload in `protocol`
-- [ ] Core: clipboard listener (text + images, private markers skipped), in-memory history encrypted with `CryptProtectMemory`
-- [ ] Pinned entries saved in `clipboard-pins.bin` (DPAPI), loaded at start
-- [ ] Named pipe server (current user only, own exe only) for the popup and Settings
-- [ ] Built-in hotkey `clipboard.hotkey` (default Hyper+V; Win+V replaces the Windows panel)
-- [ ] Popup `kuality.exe --clipboard`: search, list, preview, pin, delete; Enter pastes into the previous app, Shift+Enter copies
-- [ ] Settings: Clipboard tab (enable, hotkey, keep last N, images, open / clear / remove pins)
+- [x] `clipboard` config section, IPC frames and pins payload in `protocol`
+- [x] Core: clipboard listener (text + images, private markers skipped), in-memory history encrypted with `CryptProtectMemory`
+- [x] Pinned entries saved in `clipboard-pins.bin` (DPAPI), loaded at start
+- [x] Named pipe server (current user only, own exe only) for the popup and Settings
+- [x] Built-in hotkey `clipboard.hotkey` (default Hyper+V; Win+V replaces the Windows panel)
+- [x] Popup `kuality.exe --clipboard`: search, list, preview, pin, delete; Enter pastes into the previous app, Shift+Enter copies
+- [x] Settings: Clipboard tab (enable, hotkey, keep last N, images, open / clear / remove pins)
 
 **Done when:** with Clipboard on, Hyper+V opens the history, Enter pastes the chosen entry into the app that was in front, pinned entries survive a restart and unpinned ones do not, and `clipboard-pins.bin` holds no readable text.
 

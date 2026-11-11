@@ -2,6 +2,13 @@
 
 All notable changes to Kuality. Versions follow [Semantic Versioning](https://semver.org); each `## [x.y.z]` section becomes the notes of the GitHub Release tagged `vx.y.z` (keep one line per paragraph or bullet: release notes keep line breaks).
 
+## [Unreleased]
+
+### New
+
+- **Clipboard history** — Settings → **Clipboard** → Enable keeps what you copy (text and images). Press **Hyper + V** (or record any hotkey, for example **Win + V** to replace the Windows clipboard history) to open it: type to search, ↑/↓ to choose, **Enter** pastes into the app you were in, **Shift+Enter** only copies. **Ctrl+P** pins an entry so it survives restarts, **Ctrl+Delete** removes it.
+- **Private by design** — the history stays in memory only and encrypted; pinned entries are saved encrypted for your Windows account. Passwords copied from password managers that mark them private are never recorded.
+
 ## [1.0.0-beta.4] - 2026-11-10
 
 ### New

@@ -11,15 +11,23 @@ kuality.exe  (core, always running, few MB)   — one exe, two processes (docs/s
 ├── Action worker thread   → runs `launch` / `open_url` (ShellExecuteExW), spawned on first use
 ├── Overlay thread         → widget windows attached to each taskbar, Direct2D rendering
 ├── Data providers         → media session, (later) extensions' data
+├── Clipboard thread       → (clipboard history on) records clipboard changes into the in-memory,
+│                            encrypted history; writes entries back for paste / copy
+├── IPC thread             → (clipboard history on) named pipe `\\.\pipe\Kuality.Core.<pid>`
+│                            for the clipboard popup and the settings window
 ├── Update thread          → checks GitHub releases (60 s after start, every 6 h), downloads and
 │                            starts the installer on request (docs/specs/updates.md)
 ├── Tray icon              → Settings / Pause / Check for updates or Install update / Quit,
 │                            notifications (balloon / toast)
 ├── Config watcher         → hot-reloads config.json
-└── IPC server             → (later) named pipe for the settings window
+└── IPC server             → named pipe, today only for the clipboard history (see above)
 
 kuality.exe --todo  (GPUI, the to-do popup, only alive while open; started by a click on the bar's
                      to-do module; the only writer of todos.json — docs/specs/todo.md)
+
+kuality.exe --clipboard  (GPUI, the clipboard history popup, only alive while open; started by the
+                          clipboard hotkey (`--paste`) or Settings; reads the history over the pipe,
+                          never writes to disk — docs/specs/clipboard.md)
 
 kuality.exe --settings  (GPUI via gpui-kit, only alive while open; started by tray/widget "Settings")
 ├── UI thread              → window, auto-save (300 ms), 1 s check for outside edits of config.json
@@ -60,11 +68,12 @@ Current `core` modules (Phases 0–3):
 | `overlay/layout.rs` | Pure layout math: anchor, x/y, origin, width/height (`px` = DIPs, `%`), unit-tested |
 | `overlay/widgets/` | `Renderer` trait, `Theme`, `Content`, `LiveData`; `text.rs` (text widget), `bar.rs` (bar widget: modules, spans for clicks, hover) |
 | `todos.rs` | `TodoWatch`: re-reads `todos.json` on data-dir changes and reports the pending count |
+| `clipboard/` | Clipboard history (`docs/specs/clipboard.md`): `ClipboardService` (start / apply / shutdown, pipe request handler, pins file), `history.rs` (ordering, duplicates, limits, pins; unit-tested), `sealed.rs` (`Sealed` / `Plain` encrypted and wiped buffers), `image.rs` (DIB / PNG / thumbnails) |
 | `updates.rs` | `Updates` (main-thread side: tray item, notifications, install / release page) and the `kuality-update` thread (`docs/specs/updates.md`) |
 | `config_store.rs` | Load/create/save of `config.json` (atomic write from `protocol::store`), `Reloader` (change detection), section diff |
 | `logging.rs` | `log` backend: `logs\kuality.log`, rotation, panic hook |
 | `platform/mod.rs` | Traits `SingleInstance`, `DirWatcher`, `TrayIcon`, `Waker`, `KeyboardBackend`, `OverlayBackend` + free functions |
-| `platform/windows/` | Win32 implementations (`instance`, `tray`, `watcher`, `shell` (incl. `launch` / `open_url`), `actions` (action thread message loop, WM_CLOSE watch), `folders`, `time`, `dpi`, `keyboard`, `input`, `hook_watchdog`, `office_key`, `crash`, `overlay/`) |
+| `platform/windows/` | Win32 implementations (`instance`, `tray`, `watcher`, `shell` (incl. `launch` / `open_url`), `actions` (action thread message loop, WM_CLOSE watch), `folders`, `time`, `dpi`, `keyboard`, `input`, `hook_watchdog`, `office_key`, `crash`, `overlay/`, `clipboard` (listener thread, clipboard writes, `CryptProtectMemory`, DPAPI, paste target), `ipc` (pipe server)) |
 | `platform/windows/overlay/` | `thread` (host window, commands, refresh, hooks, menu), `taskbars`, `widget_window`, `render` (Direct2D/DirectWrite), `fullscreen`, `theme` |
 
 `kuality-settings` modules (Phase 5, see `docs/specs/settings.md`):
@@ -77,8 +86,9 @@ Current `core` modules (Phases 0–3):
 | `startup/` | Start at logon (`docs/specs/distribution.md`): portable plan / task XML / arguments (`mod.rs`, unit-tested) and the Win32 side (`windows.rs`: HKCU Run value, Task Scheduler COM, UAC helper). Also behind `kuality.exe --startup` / `--startup-task` |
 | `platform.rs` | Windows: known folder, `Local\Kuality.Settings` mutex + focus existing window, core-running check, `CoreProcess` (open / find / start / watch the core), recorder hook thread |
 | `ui/mod.rs` | `SettingsWindow` view: tabs, debounced save, disk poll, recording, banner and status bar |
-| `ui/{general,widgets,hyperkey,shortcuts,todo}.rs` | One tab each; widgets and shortcuts have list rows with an inline editor |
+| `ui/{general,widgets,hyperkey,shortcuts,todo,clipboard}.rs` | One tab each; widgets and shortcuts have list rows with an inline editor |
 | `todo.rs` | The to-do popup (`kuality.exe --todo`): placement above the clicked module, list editing, writes `todos.json` |
+| `clipboard.rs` | The clipboard history popup (`kuality.exe --clipboard`): search, list, preview, pin / delete, paste / copy through the core's pipe |
 | `ui/controls.rs` | Layout helpers (sections, rows, fields, segmented buttons) |
 
 Keyboard thread (`platform/windows/keyboard.rs`): owns a hidden top-level window (class `KualityKeyboard`) for session/power broadcasts and a `EVENT_SYSTEM_DESKTOPSWITCH` WinEvent hook. The `WH_KEYBOARD_LL` hook is installed only while needed and not paused (Hyperkey enabled, or a shortcut with a normal hotkey such as `ctrl+t`); its callback runs the engine and at most one tagged `SendInput` (no allocation, locks or logging). Commands arrive through `mpsc` + `PostMessageW(WM_APP_COMMAND)`; `Apply` carries the Hyperkey config and an `Arc<CompiledBindings>` compiled on the main thread. `crash.rs` installs a panic hook and an unhandled-exception filter that release injected modifiers. `hook_watchdog.rs` registers keyboard Raw Input while the hook is installed and reinstalls the hook when a physical CapsLock press arrives that the hook never saw (Windows removed it).
@@ -95,6 +105,7 @@ Main loop: a hidden top-level window (class `Kuality.Core`) owns the tray icon. 
 - Location: `%APPDATA%\Kuality\config.json`, or next to the exe if a `portable` file exists there.
 - Every feature section has `"enabled": false` by default.
 - To-do items are data, not settings: `todos.json` next to `config.json` (`protocol::todo`), written only by the to-do popup.
+- Pinned clipboard entries: `clipboard-pins.bin` next to `config.json`, DPAPI-encrypted, written only by the core (`protocol::clipboard` has the decrypted layout). The rest of the clipboard history is never written.
 - Missing fields fall back to defaults (forward-compatible); unknown fields are preserved where possible.
 
 Draft shape (will be refined per phase):
@@ -114,6 +125,7 @@ Draft shape (will be refined per phase):
     ]
   },
   "todo": { "enabled": false, "new_items": "top" },
+  "clipboard": { "enabled": false, "hotkey": "hyper+v", "max_entries": 100, "images": true },
   "widgets": {
     "enabled": false,
     "hide_on_fullscreen": true,
@@ -149,4 +161,5 @@ Draft shape (will be refined per phase):
 | Theme | Widgets: taskbar pixels sampled from the screen (contrast rule), registry `SystemUsesLightTheme` as fallback; re-checked on `WM_SETTINGCHANGE` |
 | Elevated autostart | Task Scheduler task with "run with highest privileges" at logon |
 | Single instance | Named mutex |
-| IPC | Named pipe `\\.\pipe\kuality` (later; Phase 5 uses the config file only) |
+| Clipboard history | `AddClipboardFormatListener` on a message-only window; `CryptProtectMemory` in memory, DPAPI (`CryptProtectData`) for pins |
+| IPC | Named pipe `\\.\pipe\Kuality.Core.<pid>` (clipboard history; settings changes still use the config file) |

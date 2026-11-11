@@ -226,6 +226,19 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **Open on hover** (2026-11-10, user request) — resting the mouse on the module (250 ms) shows the list as a "peek": no focus taken, closed 300 ms after the mouse leaves the module and the list; a click on the module or into the list keeps it like a clicked one. On by default, switch `open_on_hover` in Settings → To do. The peek is marked by a second mutex `Local\Kuality.TodoPeek` so a module click knows to keep it rather than close it.
 - **Hit testing** — every bar module is filled with an invisible color (alpha 1/255): layered windows let the mouse through fully transparent pixels, so before this only the letters reacted.
 
+## Clipboard history (2026-11-11, Phase 9, user decisions)
+
+- **Order** — done before Phase 4 (media), like Phases 5 and 8.
+- **Content** — text and images (images can be turned off); rich text, HTML and copied files are not kept. With text and an image on the clipboard, only the text is kept.
+- **Choosing an entry** — Enter pastes into the window that was in front when the hotkey fired (focus given back, then Ctrl+V); Shift+Enter only copies. Opened from Settings, Enter copies.
+- **Storage** — history in memory only (a restart starts empty); pinned entries survive restarts in `clipboard-pins.bin`. Both encrypted: in memory with `CryptProtectMemory` (same-process key), on disk with DPAPI for the current user (fixed app entropy). Decrypted copies are wiped after use (best effort: the plain text also exists on the system clipboard itself).
+- **Private content** — clipboard changes with `ExcludeClipboardContentFromMonitorProcessing`, `Clipboard Viewer Ignore` or `CanIncludeInClipboardHistory` = 0 (password managers) are never recorded.
+- **Hotkey** — one field, `clipboard.hotkey` (default `hyper+v`), compiled as a built-in first entry of the shortcut table: it wins over a shortcut with the same hotkey (both tabs warn) and works with Shortcuts off. Win+V is not special: recording it makes the hook swallow it, which replaces the Windows clipboard history panel (not with an elevated window in front, as for every shortcut).
+- **Popup** — separate GPUI process `kuality.exe --clipboard`, like the to-do popup (~0.3–0.5 s to appear, nothing when closed); centered on the monitor of the window in front; toggled by the hotkey.
+- **IPC** — the popup and the Clipboard tab talk to the core over a named pipe `\\.\pipe\Kuality.Core.<pid>` (first use of the planned pipe; settings still go through `config.json`). One request per connection, frames = JSON header + binary payload. DACL for the current user and SYSTEM only, remote clients rejected, the client process must be our own exe and the server pid must be the core's. Rejected: `WM_COPYDATA` (any process of the session can send it, no access control).
+- **Limits** — keep the last 50 / 100 / 200 / 500 entries (default 100; config range 10–1000), pins not counted; fixed caps: 1 MB per text, 40 MP per image, 64 MB of unpinned images.
+- **Dependencies** — `png` (already in GPUI's tree) for clipboard images in the core; no `zeroize` (small volatile wipe helper); duplicates detected with a per-process keyed SipHash, then confirmed on the decrypted bytes.
+
 ## Out of scope for now
 
 - Notifications widget (needs package identity / MSIX).
