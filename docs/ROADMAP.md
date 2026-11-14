@@ -102,6 +102,7 @@ Done before Phase 4 and scoped to the settings that already exist (Phases 0–3)
 - [x] *(2026-11-09, follow-up)* Public GitHub repo: CI (fmt/clippy/test), tag `v*` → GitHub Release with installer, portable zip and `SHA256SUMS.txt`; `CHANGELOG.md`, `CONTRIBUTING.md`, issue templates; first release `v1.0.0-beta.1`
 - [x] *(2026-11-09, follow-up)* Updates: spec `docs/specs/updates.md`; check enabled by default, tray notification and menu item, one-click install of the verified installer, General → Updates; faster release builds (cached release dependencies); `v1.0.0-beta.2`
 - [x] *(2026-11-09, follow-up)* Settings look: rounder theme overrides (`ui/style.rs`), floating content panel, title bar in the window color; `v1.0.0-beta.3`
+- [x] *(2026-11-14, follow-up)* Release channels: `updates.channel` (stable / beta) in Settings → General → Updates; beta and stable tags on `main`, feature workflow and release steps for agents (`AGENTS.md`, `CONTRIBUTING.md`, `.claude/skills/`); first stable release `v1.0.0`
 ## Phase 7 — Extensions
 
 - [ ] Spec `docs/specs/extensions.md`

@@ -4,12 +4,12 @@
 
 # Kuality
 
-**A tiny Windows 11 utility for power users: CapsLock Hyperkey, global shortcuts and taskbar widgets.**
+**A tiny Windows 11 utility for power users: CapsLock Hyperkey, global shortcuts, taskbar widgets and a clipboard history.**
 
 Written in Rust. A few MB of RAM, ~0% CPU when idle. Everything is off until you turn it on.
 
 [![CI](https://github.com/VictorGuill/KUALITY/actions/workflows/ci.yml/badge.svg)](https://github.com/VictorGuill/KUALITY/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/VictorGuill/KUALITY?include_prereleases&label=release)](https://github.com/VictorGuill/KUALITY/releases)
+[![Release](https://img.shields.io/github/v/release/VictorGuill/KUALITY?label=release)](https://github.com/VictorGuill/KUALITY/releases)
 [![Downloads](https://img.shields.io/github/downloads/VictorGuill/KUALITY/total)](https://github.com/VictorGuill/KUALITY/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white)
@@ -21,7 +21,7 @@ Written in Rust. A few MB of RAM, ~0% CPU when idle. Everything is off until you
 ---
 
 > [!NOTE]
-> Kuality is in **beta**: expect rough edges — [bug reports](https://github.com/VictorGuill/KUALITY/issues/new/choose) are very welcome.
+> Want new features before everyone else? Switch to the **beta** channel in **Settings → General → Updates**. Betas may have rough edges — [bug reports](https://github.com/VictorGuill/KUALITY/issues/new/choose) are very welcome.
 
 ## Features
 
@@ -30,10 +30,12 @@ Written in Rust. A few MB of RAM, ~0% CPU when idle. Everything is off until you
 | ✅ | **Hyperkey** | Hold **CapsLock** for a whole new layer of shortcuts that never collide with other apps. By default apps never see it; optionally they get Ctrl+Shift+Alt(+Win). Tapping CapsLock alone does nothing. |
 | ✅ | **Shortcuts** | **Hyper+key** or any hotkey (`Ctrl+Alt+K`, `Win+E`…) to launch an app, open a file, folder or website, or send another hotkey. |
 | ✅ | **Taskbar widgets** | Text drawn right on top of the taskbar, on every monitor, placed exactly where you want (px or %). Follows light/dark theme, hides over fullscreen apps. |
+| ✅ | **To-do list** | `TO DO (n)` on the taskbar; click it (or rest the mouse on it) for a quick list to add, check off and delete items. |
+| ✅ | **Clipboard history** | **Hyper+V** (or any hotkey, even Win+V) opens what you copied, text and images: search, paste, pin. Kept in memory and encrypted; pinned entries are saved encrypted. |
 | ✅ | **Settings window** | A clean, Raycast-style window. Every change is saved and applied instantly. |
 | ✅ | **Start with Windows** | Optionally as administrator, so Hyperkey and shortcuts also work over elevated apps. |
 | 🚧 | **Media widget** | Cover art, title and controls for whatever is playing. *Next up.* |
-| ✅ | **Automatic updates** | Get notified when a new version is out and install it in one click (checksum-verified). Can be turned off. |
+| ✅ | **Automatic updates** | Get notified when a new version is out and install it in one click (checksum-verified). Stable or beta channel. Can be turned off. |
 | 🗓️ | **Extensions** | Widgets and actions written in any language (fan speeds, app control…). |
 
 ### Why Kuality?

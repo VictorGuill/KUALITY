@@ -12,10 +12,17 @@ without making the core heavier: no new runtime, no polling, nothing installed w
   2026-11-09). Off: no automatic network access; manual checks still work.
 - **When** — 60 s after the core starts, then every 6 h; 30 min after a failed check. The wall clock
   is re-read at least every 15 min, so a check that fell due while the PC slept runs soon after resume.
+- **Channel** — `updates.channel` in `config.json` (Settings → General → Updates → "Channel"):
+  `"stable"` (default) or `"beta"`. An unknown value reads as `stable`. *(2026-11-14, user decision;
+  before 1.0.0 the channel followed the build: pre-release builds got pre-releases.)*
 - **Which releases** — the newest GitHub release newer than the running version (SemVer precedence)
-  with both `Kuality-<version>-setup.exe` and `SHA256SUMS.txt`. Drafts are ignored. Pre-releases are
-  offered only to pre-release builds: a beta gets the next beta or the final release; a release build
-  only gets releases.
+  with both `Kuality-<version>-setup.exe` and `SHA256SUMS.txt`. Drafts are ignored. A pre-release (a
+  version with a suffix such as `1.1.0-beta.2`, or a GitHub release marked pre-release) is offered
+  only on the beta channel, which gets whichever is newest, a beta or a final release. The stable
+  channel only gets final releases, also on a beta build: `1.1.0-beta.2` on stable waits for `1.1.0`
+  (or later). Switching back to stable never downgrades.
+- **Channel change** — the core checks again 2 s after `updates.channel` changes (automatic checks
+  on), so the tray follows the new channel; the settings window checks again at once.
 - **Notification** — the tray icon's balloon (a toast on Windows 11): "Kuality X is available — You
   have Y. Click to install it." Shown once per version and run (again after a manual check). The tray
   menu shows **Install update X** while an update is known, **Check for updates** otherwise; a manual
@@ -28,16 +35,16 @@ without making the core heavier: no new runtime, no polling, nothing installed w
   notification and is logged.
 - **Portable / development copies** (a `portable` file next to the exe, or an exe that is not the
   installer's `InstallLocation`) — "install" opens the release page instead.
-- **Settings → General → Updates** — the switch, "Version X" with the result of a check run when the
-  window opens, **Check now**, and when an update exists **What's new** (release page) and
+- **Settings → General → Updates** — the switch, the channel, "Version X" with the result of a check
+  run when the window opens, **Check now**, and when an update exists **What's new** (release page) and
   **Install X** (**Download X** for portable copies). Installing from the window works like the tray.
 
 ## Implementation
 
 - Crate `kuality-update` (shared by core and settings): `Version` (SemVer parse/compare),
-  `pick_update` (releases JSON → `Release`), `expected_hash` (`SHA256SUMS.txt`), `Checker` (keeps the
-  `ETag`: repeated checks are conditional requests; a `304` does not count against GitHub's 60
-  requests/hour/IP limit), `download_and_install`, `can_self_update`, `clean_downloads`.
+  `pick_update` (releases JSON + channel → `Release`), `expected_hash` (`SHA256SUMS.txt`), `Checker` (keeps the
+  `ETag`: repeated checks on the same channel are conditional requests; a `304` does not count
+  against GitHub's 60 requests/hour/IP limit), `download_and_install`, `can_self_update`, `clean_downloads`.
 - Windows side: WinHTTP (`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY`, redirects to the asset CDN followed,
   timeouts 15/15/30/60 s), CNG `BCryptHash` for SHA-256, `InstallLocation` from
   `HKCU\…\Uninstall\{6C1C4F0E-2B7A-4C55-9E7B-4B2D7C1A9F31}_is1`. `winhttp.dll` and `bcrypt.dll` are
@@ -45,15 +52,16 @@ without making the core heavier: no new runtime, no polling, nothing installed w
 - API: `GET https://api.github.com/repos/VictorGuill/KUALITY/releases?per_page=20`, headers
   `User-Agent: Kuality/<version>`, `Accept: application/vnd.github+json`,
   `X-GitHub-Api-Version: 2022-11-28`. (`/releases/latest` skips pre-releases, so it is not used.)
-- Core: thread `kuality-update` waits on a channel (`SetEnabled`, `Check`, `Install`, `Shutdown`)
+- Core: thread `kuality-update` waits on a channel (`SetEnabled`, `SetChannel`, `Check`, `Install`,
+  `Shutdown`)
   with a timeout up to the next due check; reports go to the main thread (`Updates::poll` on every
   wake), which updates the tray. The thread is never joined (a download may be running at quit).
 - Installer (`installer/kuality.iss`): `IsUpdate()` = `/update=1`; the `--startup` entries are skipped
   in update mode and an extra `[Run]` entry starts `kuality.exe`. `CloseKuality` also waits up to 3 s
   for the settings window.
 - Debug builds: `KUALITY_UPDATE_AS_VERSION=<version>` pretends another version
-  (`cargo run -p kuality-update --example check -- 1.0.0-alpha --download` checks and downloads
-  without installing).
+  (`cargo run -p kuality-update --example check -- 1.0.0-alpha --beta --download` checks the beta
+  channel and downloads without installing).
 
 ## Limitations
 

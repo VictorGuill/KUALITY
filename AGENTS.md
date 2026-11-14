@@ -25,7 +25,8 @@ Details: [docs/VISION.md](docs/VISION.md).
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Processes, crates, threads, IPC, config format |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phases, tasks (checkboxes) and definition of done |
 | `docs/specs/` | Detailed spec per feature, written when its phase starts |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup and, under "Releases", the steps to publish a version (only when the user asks for a release) |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup and, under "Releases", the branches, channels and steps to publish a version (only when the user asks for a release) |
+| `.claude/skills/` | Claude Code skills: `feature` (idea → beta), `release` (publish a beta or a stable version), `verify-ui` (screenshots of the GPUI windows without taking the focus) |
 
 ## How to work
 
@@ -35,6 +36,19 @@ Details: [docs/VISION.md](docs/VISION.md).
 4. When you finish a task, tick its checkbox in `ROADMAP.md` in the same commit.
 5. If you make a new decision (library choice, behavior, format…), add a line to `DECISIONS.md`.
 6. Never leave the build broken: `cargo build`, `cargo clippy` and `cargo test` must pass before committing.
+
+## Feature workflow
+
+How the user works with agents: the user describes an idea, the agent turns it into a spec, implements it, and the user tests it in a beta before it reaches everyone.
+
+1. **Define** — write or update the spec in `docs/specs/` and the roadmap entry; ask the user to confirm it (unless already approved).
+2. **Build** — on a branch `feat/<name>` (or `fix/<name>`) from `main`: code, tests, `CHANGELOG.md` under `## [Unreleased]`, `DECISIONS.md` for new decisions. Check it in the real app (`run` / `verify-ui`), not only with tests.
+3. **Merge** — push the branch, open a PR (`gh pr create`), wait for green CI, merge into `main`. Report what to test.
+4. **Beta** — *only when the user says so*: publish `v<next>-beta.N` following `CONTRIBUTING.md` "Releases". The user's copy is on the beta channel and gets it through the updater.
+5. **Fix** — feedback goes back to step 2 and a new beta (`-beta.N+1`), again on the user's order.
+6. **Stable** — *only when the user says so*: promote the approved beta to `v<next>` (same commit, final version, merged changelog).
+
+**Publishing needs an explicit order.** Never push a release tag (beta or stable) unless the user asked for that release in this conversation. Committing, pushing work branches and merging approved work into `main` do not publish anything.
 
 ## Hard rules
 
@@ -62,7 +76,7 @@ cargo run -p kuality -- --clipboard         # clipboard history popup (needs a r
 cargo run -p kuality -- --startup off       # start-at-logon entry: off | on | normal | elevated (UAC)
 .\scripts\package.ps1 [-Installer]          # release build + dist\Kuality-<version>-portable.zip (+ Inno Setup installer)
 cargo run -p kuality --example keyviewer    # dev tool: prints key messages + modifier state (Hyperkey tests)
-cargo run -p kuality-update --example check -- 1.0.0-alpha --download   # dev tool: update check + verified download (no install)
+cargo run -p kuality-update --example check -- 1.0.0-alpha --beta --download   # dev tool: update check (beta channel) + verified download (no install)
 ```
 
 Runtime files: `%APPDATA%\Kuality\config.json`, `todos.json` (to-do items), `clipboard-pins.bin` (pinned clipboard entries, DPAPI-encrypted) and `logs\kuality.log`.

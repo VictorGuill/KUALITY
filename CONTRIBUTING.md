@@ -46,6 +46,24 @@ on every push and pull request).
 
 ## Releases (maintainers)
 
+There is one long-lived branch, `main`. Features and fixes are made on short branches
+(`feat/<name>`, `fix/<name>`) and merged into `main` once CI is green. Releases are tags on `main`:
+
+- **Beta** — `v1.1.0-beta.1`, `v1.1.0-beta.2`… published as GitHub **pre-releases**. Only copies
+  set to the **beta** channel (Settings → General → Updates → Channel) are offered them.
+- **Stable** — `v1.1.0`, published as the latest release and offered to everyone. A stable release
+  is normally a beta that was tested and approved: the same commit, with the final version number
+  and the changelog of all its betas in one section.
+
+If `main` already has work that has not been tested in a beta, make the stable release on a short
+branch from the approved beta tag (`git switch -c release/1.1 v1.1.0-beta.3`), tag it there, and
+merge that branch back into `main`. Fixes for a stable release are made the same way
+(`1.1.1` on `release/1.1`).
+
+Version numbers follow [SemVer](https://semver.org): a new feature raises the minor (`1.1.0`), a fix
+alone the patch (`1.0.1`). Betas count up from `.1` for each target version (`1.1.0-beta.1`, then
+`1.1.0-beta.2` after fixes).
+
 Every tag `v<version>` is a release, built and published by GitHub Actions
 ([.github/workflows/release.yml](.github/workflows/release.yml)):
 
@@ -53,7 +71,9 @@ Every tag `v<version>` is a release, built and published by GitHub Actions
    `Cargo.lock` follows.
 2. In [CHANGELOG.md](CHANGELOG.md), rename `## [Unreleased]` to `## [<version>] - <date>` (it becomes
    the release notes; the workflow fails without it) and end the section with the `### Upgrading`
-   and `### Downloads` blocks of the release before, with the new version in the file names.
+   and `### Downloads` blocks of the release before, with the new version in the file names. For a
+   stable release made from betas, merge the sections of its betas into one (what changed since the
+   last stable release) and keep the beta sections below it.
 3. If the release ships a phase, add "Released in `v<version>`" to it in
    [docs/ROADMAP.md](docs/ROADMAP.md).
 4. Commit (`Release <version>`) and push `main`. Wait for its CI run to finish green:
@@ -81,5 +101,5 @@ Tag only a commit of `main` whose CI run is green (so do not push the tag togeth
 release workflow does not run clippy or the tests again. It checks that the tag matches `Cargo.toml`,
 builds the installer and the portable zip, and publishes them with `SHA256SUMS.txt`. These file names
 are what the updater of installed copies looks for. A version with a suffix (`1.1.0-beta.2`) is
-published as a **pre-release**; copies that are themselves pre-releases are offered it, copies of a
-final version are not.
+published as a **pre-release** and offered only on the beta channel; a final version is offered on
+both channels.

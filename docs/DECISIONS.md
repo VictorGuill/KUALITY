@@ -213,14 +213,23 @@ Do not contradict these without asking the user. To change one, edit the line an
 ## Updates implementation (2026-11-09, 1.0.0-beta.2)
 
 - **Crate** — new `crates/update` (`kuality-update`), shared by the core and the settings window; no new dependencies (WinHTTP, CNG `BCryptHash`, registry from the `windows` crate). `winhttp.dll` / `bcrypt.dll` delay-loaded (measured: not mapped by an idle core before the first check).
-- **Config** — top-level section `updates: { "check": true }` (not under `general`, room for a future channel option).
+- **Config** — top-level section `updates: { "check": true }` (not under `general`, room for a future channel option). *(2026-11-14: `"channel": "stable" | "beta"` added, see "Release channels".)*
 - **Timing** — first check 60 s after start, then every 6 h, retry 30 min after an error; the thread waits on its channel with a timeout of at most 15 min and compares the wall clock (handles sleep without power-broadcast plumbing).
-- **Channel** — pre-releases only for pre-release builds (beta → next beta or final; release → releases only); `GET /releases?per_page=20`, not `/releases/latest`.
+- **Channel** — pre-releases only for pre-release builds (beta → next beta or final; release → releases only); `GET /releases?per_page=20`, not `/releases/latest`. *(2026-11-14: superseded by "Release channels": the channel is a setting.)*
 - **Notification** — tray balloon (Windows 11 toast), `NIIF_NONE`; click → install. Once per version and run. Tray menu item "Install update X" / "Check for updates" between Pause and Quit.
 - **Self-update only for the installed copy** — exe dir equal to the installer's `InstallLocation` (HKCU uninstall key) and no `portable` marker; otherwise "install" opens the release page.
 - **Installer update mode** — `/SILENT /SUPPRESSMSGBOXES /NORESTART /update=1`: progress window only, start-at-logon entries untouched (`Check: not IsUpdate`), Kuality started again by `[Run]`; `CloseKuality` also waits for the settings window. Download in `%TEMP%\Kuality-update\`, deleted at the next start. Tested locally: install → start → update mode closed the core cleanly, relaunched it, Run value unchanged.
 - **Settings** — General → Updates: switch, version + result of a check run when the window opens, Check now / What's new / Install (Download for portable copies).
 - **Dev testing** — debug builds only: `KUALITY_UPDATE_AS_VERSION` pretends another version; `cargo run -p kuality-update --example check -- <version> --download`.
+
+## Release channels (2026-11-14, user decisions, 1.0.0)
+
+- **Channels, not branches** — users choose `updates.channel` = `stable` (default) or `beta` (Settings → General → Updates). Beta gets whichever is newest, a pre-release or a final release; stable gets final releases only, also when running a beta build (it waits for the final release, never downgrades). Unknown values read as `stable`.
+- **Git flow** — one long-lived branch, `main`. Work happens on short branches (`feat/<name>`, `fix/<name>`) merged into `main` with green CI. Both kinds of release are tags on a `main` commit: `v1.1.0-beta.1` (GitHub pre-release, beta channel) and `v1.1.0` (latest, everyone). No `beta` branch.
+- **Promotion** — a beta the user approved becomes stable by bumping the version to the final one on the commit that was tested (`Release 1.1.0`: version + consolidated changelog only). If `main` already has untested work, the final release is made on a short `release/<x.y>` branch from the beta tag and merged back into `main`.
+- **Who publishes** — the agent never publishes a beta or a final release on its own: every tag push needs an explicit order from the user ("publish the beta", "release 1.1.0"). Implementing, committing and pushing a work branch need no extra order once a feature is approved.
+- **Existing betas** — 1.0.0-beta.x copies have no `channel` key, so they read as stable and are offered 1.0.0 (their updater offers it as the newest release either way).
+- **Agent docs** — the procedures live in the repo (`CONTRIBUTING.md` "Releases", `AGENTS.md` "Feature workflow") so any agent can follow them; Claude Code skills in `.claude/skills/` (`release`, `feature`, `verify-ui`) are short checklists that point to them.
 
 ## To-do & taskbar bar (2026-11-09, Phase 8, user decisions)
 
