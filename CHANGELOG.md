@@ -2,6 +2,37 @@
 
 All notable changes to Kuality. Versions follow [Semantic Versioning](https://semver.org); each `## [x.y.z]` section becomes the notes of the GitHub Release tagged `vx.y.z` (keep one line per paragraph or bullet: release notes keep line breaks).
 
+## [1.0.0] - 2026-11-14
+
+The first stable version of Kuality. Windows 11, x64. Everything below is off until you turn it on in Settings, except the update check.
+
+### New since 1.0.0-beta.5
+
+- **Stable or beta updates** — Settings → General → Updates → **Channel**. **Stable** (the default) only offers final versions like this one. **Beta** also offers test versions of the next release, before everyone gets them; they may have rough edges, and bug reports are very welcome. Switching back to Stable keeps the version you have until a newer final version is out.
+
+### What Kuality does
+
+- **Hyperkey** — hold CapsLock for a layer of shortcuts. By default apps never see it; optionally they get Ctrl+Shift+Alt or Ctrl+Shift+Alt+Win. Modifiers are never left stuck (quit, lock screen, sleep, crash).
+- **Shortcuts** — Hyper+key or any hotkey (Ctrl+Alt+K, Win+E…) to launch an app, open a file, folder or website, or send another hotkey.
+- **Taskbar widgets** — text and bars drawn on top of the taskbar of every monitor, placed in px or %, following the Windows light/dark theme, hidden over fullscreen apps.
+- **To-do list** — `TO DO (n)` on the taskbar; click it, or rest the mouse on it, to add, check off and delete items.
+- **Clipboard history** — Hyper+V (or any hotkey, even Win+V) opens what you copied, text and images: search, Enter pastes into the app you were in, pin entries to keep them. Kept in memory and encrypted; pinned entries are saved encrypted for your Windows account; passwords that password managers mark private are never recorded.
+- **Settings window** — every change is saved and applied right away; search finds any setting.
+- **Start with Windows** — optionally as administrator, so Hyperkey and shortcuts also work over elevated apps.
+- **Automatic updates** — a notification when a new version is out, installed in one click after its checksum is verified. Can be turned off.
+- **Lightweight** — one `kuality.exe`; the always-running core uses a few MB of RAM and ~0% CPU when idle.
+
+### Upgrading
+
+Kuality 1.0.0-beta.2 or later shows a notification: click it (or tray → **Install update**). From 1.0.0-beta.1, install this version once by hand. After updating from a beta you are on the **Stable** channel; choose **Beta** in Settings → General → Updates to keep getting test versions.
+
+### Downloads
+
+- `Kuality-1.0.0-setup.exe` — installer (per user, no admin rights needed).
+- `Kuality-1.0.0-portable.zip` — unzip anywhere and run `kuality.exe`.
+
+The files are not code-signed yet: Windows SmartScreen may show "Windows protected your PC". Click **More info → Run anyway**. Checksums are in `SHA256SUMS.txt`.
+
 ## [1.0.0-beta.5] - 2026-11-14
 
 ### New

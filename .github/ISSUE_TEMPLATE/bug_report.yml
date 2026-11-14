@@ -22,7 +22,7 @@ body:
     attributes:
       label: Kuality version
       description: Right-click kuality.exe → Properties → Details → Product version.
-      placeholder: 1.0.0-beta.1
+      placeholder: 1.0.0
     validations:
       required: true
   - type: dropdown
