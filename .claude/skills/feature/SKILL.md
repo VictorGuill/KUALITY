@@ -37,6 +37,7 @@ rules: lightweight, opt-in, no injection, hook callbacks return at once). This i
 ## 4. Merge
 
 - Push the branch, `gh pr create` (summary + how it was tested), wait for green CI
-  (`gh pr checks --watch`), merge (`gh pr merge --squash --delete-branch`), update local `main`.
+  (`gh pr checks --watch`), merge (`gh pr merge --rebase --delete-branch`: keeps the focused
+  commits), update local `main`.
 - Report to the user: what changed, what to test in the beta, anything not verified.
 - **Do not publish.** A beta or stable release needs the user's explicit order → `release` skill.
