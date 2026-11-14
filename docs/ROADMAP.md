@@ -128,7 +128,7 @@ Done before Phase 4 (user request, 2026-11-09); see `docs/specs/todo.md`. Releas
 
 ## Phase 9 — Clipboard history ✅
 
-Done before Phase 4 (user request, 2026-11-11); see `docs/specs/clipboard.md`.
+Done before Phase 4 (user request, 2026-11-11); see `docs/specs/clipboard.md`. Released in `v1.0.0-beta.5`.
 
 - [x] Spec `docs/specs/clipboard.md`
 - [x] `clipboard` config section, IPC frames and pins payload in `protocol`

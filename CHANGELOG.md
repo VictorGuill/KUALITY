@@ -2,7 +2,7 @@
 
 All notable changes to Kuality. Versions follow [Semantic Versioning](https://semver.org); each `## [x.y.z]` section becomes the notes of the GitHub Release tagged `vx.y.z` (keep one line per paragraph or bullet: release notes keep line breaks).
 
-## [Unreleased]
+## [1.0.0-beta.5] - 2026-11-14
 
 ### New
 
@@ -21,6 +21,17 @@ All notable changes to Kuality. Versions follow [Semantic Versioning](https://se
 - Editing settings no longer interrupts a held Hyper key: the keyboard hook is only restarted when Hyperkey, shortcuts or the clipboard hotkey change (before, on every saved change).
 - Copying large images uses far less memory for a moment (no full uncompressed copies), and starting with pinned images is faster.
 - A clipboard history window that stopped responding could block the history for the next one; requests now time out.
+
+### Upgrading
+
+Kuality 1.0.0-beta.2 or later shows a notification: click it (or tray → **Install update**). From 1.0.0-beta.1, install this version once by hand. The clipboard history is off until you turn it on in Settings → **Clipboard**.
+
+### Downloads
+
+- `Kuality-1.0.0-beta.5-setup.exe` — installer (per user, no admin rights needed).
+- `Kuality-1.0.0-beta.5-portable.zip` — unzip anywhere and run `kuality.exe`.
+
+The files are not code-signed yet: Windows SmartScreen may show "Windows protected your PC". Click **More info → Run anyway**. Checksums are in `SHA256SUMS.txt`.
 
 ## [1.0.0-beta.4] - 2026-11-10
 
