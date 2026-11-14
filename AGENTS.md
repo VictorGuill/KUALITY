@@ -25,6 +25,7 @@ Details: [docs/VISION.md](docs/VISION.md).
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Processes, crates, threads, IPC, config format |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phases, tasks (checkboxes) and definition of done |
 | `docs/specs/` | Detailed spec per feature, written when its phase starts |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup and, under "Releases", the steps to publish a version (only when the user asks for a release) |
 
 ## How to work
 

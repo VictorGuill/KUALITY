@@ -51,16 +51,35 @@ Every tag `v<version>` is a release, built and published by GitHub Actions
 
 1. Bump `version` in the root `Cargo.toml` (`[workspace.package]`) and run `cargo build` so
    `Cargo.lock` follows.
-2. Add a `## [<version>] - <date>` section to [CHANGELOG.md](CHANGELOG.md): it becomes the release
-   notes.
-3. Commit (`Release <version>`), then tag and push:
+2. In [CHANGELOG.md](CHANGELOG.md), rename `## [Unreleased]` to `## [<version>] - <date>` (it becomes
+   the release notes; the workflow fails without it) and end the section with the `### Upgrading`
+   and `### Downloads` blocks of the release before, with the new version in the file names.
+3. If the release ships a phase, add "Released in `v<version>`" to it in
+   [docs/ROADMAP.md](docs/ROADMAP.md).
+4. Commit (`Release <version>`) and push `main`. Wait for its CI run to finish green:
+
+   ```powershell
+   git push origin main
+   gh run watch (gh run list --branch main --limit 1 --json databaseId --jq '.[0].databaseId') --exit-status
+   ```
+
+5. Tag that commit and push the tag: this starts the release workflow.
 
    ```powershell
    git tag v<version>
-   git push origin main v<version>
+   git push origin v<version>
    ```
 
-Tag only a commit of `main` whose CI run is green: the release workflow does not run clippy or the
-tests again. It checks that the tag matches `Cargo.toml`, builds the installer and the portable zip,
-and publishes them with `SHA256SUMS.txt`. A version with a suffix
-(`1.1.0-beta.2`) is published as a **pre-release**.
+6. The GitHub Release appears only when the workflow ends (about 5–10 minutes: its last step
+   publishes it). Check it has the three files:
+
+   ```powershell
+   gh release view v<version>
+   ```
+
+Tag only a commit of `main` whose CI run is green (so do not push the tag together with `main`): the
+release workflow does not run clippy or the tests again. It checks that the tag matches `Cargo.toml`,
+builds the installer and the portable zip, and publishes them with `SHA256SUMS.txt`. These file names
+are what the updater of installed copies looks for. A version with a suffix (`1.1.0-beta.2`) is
+published as a **pre-release**; copies that are themselves pre-releases are offered it, copies of a
+final version are not.
