@@ -348,10 +348,14 @@ impl<W: DirWatcher> App<W> {
         {
             o.apply(&new.widgets, new.todo.enabled);
         }
-        if new.updates.check != self.config.updates.check
-            && let Some(u) = &self.updates
-        {
-            u.set_enabled(new.updates.check);
+        if let Some(u) = &self.updates {
+            // Enabled first: a channel change then schedules its check on the new state.
+            if new.updates.check != self.config.updates.check {
+                u.set_enabled(new.updates.check);
+            }
+            if new.updates.channel != self.config.updates.channel {
+                u.set_channel(new.updates.channel.includes_prereleases());
+            }
         }
         let old = std::mem::replace(&mut self.config, new);
         self.apply_clipboard(Some(&old.clipboard));

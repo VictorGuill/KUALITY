@@ -1,28 +1,30 @@
 //! Dev tool: checks GitHub for updates as if this build were `[version]` (default: this build),
-//! twice (the second is a conditional request), and with `--download` downloads and verifies the
-//! installer without running it.
+//! twice (the second is a conditional request), on the stable channel (`--beta`: the beta
+//! channel), and with `--download` downloads and verifies the installer without running it.
 //!
-//! `cargo run -p kuality-update --example check -- 1.0.0-alpha --download`
+//! `cargo run -p kuality-update --example check -- 1.0.0-alpha --beta --download`
 
 use kuality_update::{Checker, Version, can_self_update, current_version, download_verified};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let download = args.iter().any(|a| a == "--download");
+    let beta = args.iter().any(|a| a == "--beta");
     let current = args
         .iter()
         .find(|a| !a.starts_with("--"))
         .map(|v| Version::parse(v).expect("invalid version"))
         .unwrap_or_else(current_version);
     println!(
-        "as version {current}; installed copy: {}",
+        "as version {current}, {} channel; installed copy: {}",
+        if beta { "beta" } else { "stable" },
         can_self_update()
     );
 
     let mut checker = Checker::new();
     for round in 1..=2 {
         let start = std::time::Instant::now();
-        let result = checker.check_from(&current);
+        let result = checker.check_from(&current, beta);
         println!("check {round} ({:?}): {result:?}", start.elapsed());
         if round == 2
             && download

@@ -222,7 +222,11 @@ fn run_core(args: &[String]) -> ExitCode {
         }
     };
 
-    let updates = match updates::Updates::start(tray.waker(), loaded.config.updates.check) {
+    let updates = match updates::Updates::start(
+        tray.waker(),
+        loaded.config.updates.check,
+        loaded.config.updates.channel.includes_prereleases(),
+    ) {
         Ok(u) => Some(u),
         Err(e) => {
             log::error!("cannot start the update thread: {e}; updates unavailable");

@@ -57,8 +57,9 @@ pub(crate) struct Response {
 #[derive(Debug, Default)]
 pub struct Checker {
     etag: Option<String>,
-    /// Result of the last successful check.
-    last: Option<Option<Release>>,
+    /// Result of the last successful check, and whether it included pre-releases (a check for
+    /// the other channel is a full request: the kept result does not answer it).
+    last: Option<(bool, Option<Release>)>,
 }
 
 impl Checker {
@@ -66,29 +67,38 @@ impl Checker {
         Self::default()
     }
 
-    /// The newest release newer than this build, or `None` when up to date.
-    pub fn check(&mut self) -> Result<Option<Release>, String> {
-        self.check_from(&current_version())
+    /// The newest release newer than this build, or `None` when up to date. `prereleases`:
+    /// the beta channel (see [`pick_update`]).
+    pub fn check(&mut self, prereleases: bool) -> Result<Option<Release>, String> {
+        self.check_from(&current_version(), prereleases)
     }
 
     /// Like [`check`](Self::check), as if this build were `current` (tests, dev tools). Keep
     /// one `current` per checker: a `304` answer repeats the last result.
-    pub fn check_from(&mut self, current: &Version) -> Result<Option<Release>, String> {
+    pub fn check_from(
+        &mut self,
+        current: &Version,
+        prereleases: bool,
+    ) -> Result<Option<Release>, String> {
         let mut headers = vec![
             ("Accept", "application/vnd.github+json"),
             ("X-GitHub-Api-Version", "2022-11-28"),
         ];
-        if let (Some(etag), Some(_)) = (&self.etag, &self.last) {
+        let reusable = self
+            .last
+            .as_ref()
+            .is_some_and(|(pre, _)| *pre == prereleases);
+        if let (Some(etag), true) = (&self.etag, reusable) {
             headers.push(("If-None-Match", etag));
         }
         let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=20");
         let resp = platform::get(&url, &headers, MAX_API_BYTES)?;
         match resp.status {
-            304 => Ok(self.last.clone().flatten()),
+            304 if reusable => Ok(self.last.clone().and_then(|(_, found)| found)),
             200 => {
-                let found = pick_update(&resp.body, current)?;
+                let found = pick_update(&resp.body, current, prereleases)?;
                 self.etag = resp.etag;
-                self.last = Some(found.clone());
+                self.last = Some((prereleases, found.clone()));
                 Ok(found)
             }
             403 | 429 => Err("GitHub's rate limit was reached, try again later".into()),

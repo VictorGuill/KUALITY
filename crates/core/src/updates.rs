@@ -19,12 +19,16 @@ use crate::platform::{self, Event, Waker};
 pub const FIRST_CHECK_DELAY: Duration = Duration::from_secs(60);
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 pub const RETRY_AFTER_ERROR: Duration = Duration::from_secs(30 * 60);
+/// Delay of the check that follows a change of `updates.channel` (automatic checks on).
+pub const CHANNEL_CHECK_DELAY: Duration = Duration::from_secs(2);
 const MAX_WAIT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug)]
 enum Command {
     /// Automatic checks on or off (`updates.check`).
     SetEnabled(bool),
+    /// `updates.channel` changed: `true` = beta (pre-releases offered).
+    SetChannel(bool),
     /// Check now (tray "Check for updates"), even when automatic checks are off.
     Check,
     Install(Release),
@@ -52,7 +56,13 @@ fn wait_for(next_due: Option<SystemTime>, now: SystemTime) -> Option<Duration> {
     })
 }
 
-fn run(commands: Receiver<Command>, reports: Sender<Report>, waker: impl Waker) {
+/// When the next automatic check is due after a channel change: soon, unless checks are off or
+/// one is already due sooner.
+fn due_after_channel_change(next_due: Option<SystemTime>, now: SystemTime) -> Option<SystemTime> {
+    next_due.map(|due| due.min(now + CHANNEL_CHECK_DELAY))
+}
+
+fn run(commands: Receiver<Command>, reports: Sender<Report>, waker: impl Waker, mut beta: bool) {
     kuality_update::clean_downloads();
     let report = |r: Report| {
         if reports.send(r).is_ok() {
@@ -77,6 +87,11 @@ fn run(commands: Receiver<Command>, reports: Sender<Report>, waker: impl Waker) 
                 next_due = None;
                 continue;
             }
+            Ok(Command::SetChannel(b)) => {
+                beta = b;
+                next_due = due_after_channel_change(next_due, SystemTime::now());
+                continue;
+            }
             Ok(Command::Check) => true,
             Ok(Command::Install(release)) => {
                 log::info!("downloading Kuality {}", release.version);
@@ -94,12 +109,13 @@ fn run(commands: Receiver<Command>, reports: Sender<Report>, waker: impl Waker) 
                 false
             }
         };
-        let result = checker.check();
+        let result = checker.check(beta);
         match &result {
             Ok(Some(r)) => log::info!("update available: Kuality {}", r.version),
             Ok(None) => log::info!(
-                "no update available (running {})",
-                kuality_update::current_version()
+                "no update available (running {}, {} channel)",
+                kuality_update::current_version(),
+                if beta { "beta" } else { "stable" }
             ),
             Err(e) => log::warn!("update check failed: {e}"),
         }
@@ -132,18 +148,19 @@ pub struct Updates {
 }
 
 impl Updates {
-    /// Spawns the thread. `enabled` = `updates.check`.
-    pub fn start(waker: impl Waker, enabled: bool) -> io::Result<Self> {
+    /// Spawns the thread. `enabled` = `updates.check`, `beta` = `updates.channel` is beta.
+    pub fn start(waker: impl Waker, enabled: bool, beta: bool) -> io::Result<Self> {
         let (commands, commands_rx) = mpsc::channel();
         let (reports_tx, reports) = mpsc::channel();
         // Never joined: a download may be running at quit; the process exit ends it.
         std::thread::Builder::new()
             .name("kuality-update".into())
-            .spawn(move || run(commands_rx, reports_tx, waker))?;
+            .spawn(move || run(commands_rx, reports_tx, waker, beta))?;
         let self_update = kuality_update::can_self_update();
         log::info!(
-            "updates: automatic checks {}, {}",
+            "updates: automatic checks {}, {} channel, {}",
             if enabled { "on" } else { "off" },
+            if beta { "beta" } else { "stable" },
             if self_update {
                 "installed copy (self-update)"
             } else {
@@ -164,6 +181,12 @@ impl Updates {
 
     pub fn set_enabled(&self, enabled: bool) {
         let _ = self.commands.send(Command::SetEnabled(enabled));
+    }
+
+    /// `updates.channel` changed (`beta`: pre-releases offered). With automatic checks on, a
+    /// check runs right away, so the tray follows the new channel.
+    pub fn set_channel(&self, beta: bool) {
+        let _ = self.commands.send(Command::SetChannel(beta));
     }
 
     /// Tray "Check for updates".
@@ -261,6 +284,17 @@ mod tests {
     #[test]
     fn waits_for_commands_only_when_disabled() {
         assert_eq!(wait_for(None, SystemTime::now()), None);
+    }
+
+    #[test]
+    fn channel_change_checks_soon_only_when_enabled() {
+        let now = SystemTime::now();
+        assert_eq!(due_after_channel_change(None, now), None);
+        assert_eq!(
+            due_after_channel_change(Some(now + CHECK_INTERVAL), now),
+            Some(now + CHANNEL_CHECK_DELAY)
+        );
+        assert_eq!(due_after_channel_change(Some(now), now), Some(now));
     }
 
     #[test]

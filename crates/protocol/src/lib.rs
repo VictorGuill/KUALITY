@@ -22,8 +22,8 @@ pub use config::{
     DEFAULT_CLIPBOARD_ENTRIES, DEFAULT_CLIPBOARD_HOTKEY, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE,
     DEFAULT_TODO_LABEL, Dimension, FontWeight, General, HyperModifiers, Hyperkey, LaunchAction,
     LaunchArgs, Length, Lenient, LogLevel, MAX_URL_LEN, NewItems, OpenUrlAction, Origin,
-    SendHotkeyAction, Shortcuts, TextAlign, TextWidget, Todo, TodoModule, Updates, WidgetEntry,
-    WidgetItem, Widgets, valid_url,
+    SendHotkeyAction, Shortcuts, TextAlign, TextWidget, Todo, TodoModule, UpdateChannel, Updates,
+    WidgetEntry, WidgetItem, Widgets, valid_url,
 };
 pub use keys::{
     Chord, Key, KeyParseError, Mods, Trigger, TriggerError, parse_chord, parse_key, parse_trigger,

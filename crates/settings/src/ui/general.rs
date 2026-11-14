@@ -4,7 +4,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::setting::{SettingGroup, SettingPage};
 use gpui_kit::component::{Disableable as _, IconName, Sizable as _, h_flex};
 use gpui_kit::*;
-use kuality_protocol::LogLevel;
+use kuality_protocol::{LogLevel, UpdateChannel};
 use kuality_update::Release;
 
 use super::SettingsWindow;
@@ -171,28 +171,34 @@ pub struct UpdatesView {
 }
 
 impl SettingsWindow {
-    /// Checks GitHub for a newer release in the background.
+    /// Checks GitHub for a newer release on the configured channel, in the background.
     pub(super) fn check_updates(&mut self, cx: &mut Context<Self>) {
         if self.updates.checking || self.updates.installing {
             return;
         }
         self.updates.checking = true;
         cx.notify();
+        let channel = self.doc.config.updates.channel;
         off_thread(
             cx,
-            || {
+            move || {
                 let self_update = kuality_update::can_self_update();
-                (self_update, kuality_update::Checker::new().check())
+                let result = kuality_update::Checker::new().check(channel.includes_prereleases());
+                (self_update, result)
             },
-            |this, (self_update, result), _| {
+            move |this, (self_update, result), cx| {
                 match &result {
                     Ok(Some(r)) => log::info!("update available: Kuality {}", r.version),
-                    Ok(None) => log::info!("Kuality is up to date"),
+                    Ok(None) => log::info!("Kuality is up to date ({channel:?} channel)"),
                     Err(e) => log::warn!("update check failed: {e}"),
                 }
                 this.updates.checking = false;
                 this.updates.self_update = self_update;
                 this.updates.result = Some(result);
+                // The channel changed while checking: this result answers the old one.
+                if this.doc.config.updates.channel != channel {
+                    this.check_updates(cx);
+                }
             },
         );
     }
@@ -271,6 +277,28 @@ impl SettingsWindow {
                 )
                 .description(
                     "When Kuality starts and every 6 hours. Nothing is installed without asking.",
+                )
+                .disabled(ro),
+            )
+            .item(
+                dropdown_item(
+                    "Channel",
+                    weak,
+                    &CHANNELS,
+                    |w| Some(w.doc.config.updates.channel),
+                    |w, channel, cx| {
+                        if w.doc.config.updates.channel == channel {
+                            return;
+                        }
+                        w.doc.config.updates.channel = channel;
+                        w.changed(cx);
+                        w.updates.result = None;
+                        w.check_updates(cx);
+                    },
+                )
+                .description(
+                    "Beta also offers test versions of the next release, before everyone gets \
+                     them. They may have bugs; please report them on GitHub.",
                 )
                 .disabled(ro),
             )
@@ -372,6 +400,11 @@ impl SettingsWindow {
             .group(config_file)
     }
 }
+
+const CHANNELS: [(UpdateChannel, &str); 2] = [
+    (UpdateChannel::Stable, "Stable"),
+    (UpdateChannel::Beta, "Beta"),
+];
 
 const LEVELS: [(LogLevel, &str); 5] = [
     (LogLevel::Error, "Error"),

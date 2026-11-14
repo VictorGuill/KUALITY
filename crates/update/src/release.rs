@@ -41,18 +41,22 @@ struct GhAsset {
 /// The newest release in `json` that is newer than `current`, if any.
 ///
 /// Drafts and releases without the installer or the checksum file are skipped. Pre-releases are
-/// only offered to a pre-release build (a beta tester gets the next beta or the final release;
-/// a release build only gets releases).
-pub fn pick_update(json: &[u8], current: &Version) -> Result<Option<Release>, String> {
+/// only offered when `prereleases` is set (the beta channel gets whichever is newest, a beta or a
+/// final release; the stable channel only gets final releases, also on a beta build: that one
+/// waits for the final release of its version or a later one).
+pub fn pick_update(
+    json: &[u8],
+    current: &Version,
+    prereleases: bool,
+) -> Result<Option<Release>, String> {
     let releases: Vec<GhRelease> =
         serde_json::from_slice(json).map_err(|e| format!("unexpected answer from GitHub: {e}"))?;
-    let allow_pre = current.is_prerelease();
     let best = releases
         .into_iter()
         .filter(|r| !r.draft)
         .filter_map(|r| {
             let version = Version::parse(&r.tag_name)?;
-            if (version.is_prerelease() || r.prerelease) && !allow_pre {
+            if (version.is_prerelease() || r.prerelease) && !prereleases {
                 return None;
             }
             let setup_name = format!("Kuality-{version}-setup.exe");
@@ -104,40 +108,79 @@ mod tests {
         })
     }
 
-    fn pick(list: serde_json::Value, current: &str) -> Option<String> {
+    fn pick_in(list: serde_json::Value, current: &str, beta: bool) -> Option<String> {
         let bytes = serde_json::to_vec(&list).unwrap();
-        pick_update(&bytes, &Version::parse(current).unwrap())
+        pick_update(&bytes, &Version::parse(current).unwrap(), beta)
             .unwrap()
             .map(|r| r.version.to_string())
     }
 
+    /// Stable channel.
+    fn pick(list: serde_json::Value, current: &str) -> Option<String> {
+        pick_in(list, current, false)
+    }
+
+    /// Beta channel.
+    fn pick_beta(list: serde_json::Value, current: &str) -> Option<String> {
+        pick_in(list, current, true)
+    }
+
     #[test]
-    fn beta_gets_newest_beta_or_release() {
+    fn beta_channel_gets_newest_beta_or_release() {
         let list = json!([
             release("v1.0.0-beta.3", true, false),
             release("v1.0.0-beta.2", true, false),
             release("v1.0.0-beta.1", true, false)
         ]);
         assert_eq!(
-            pick(list.clone(), "1.0.0-beta.1").as_deref(),
+            pick_beta(list.clone(), "1.0.0-beta.1").as_deref(),
             Some("1.0.0-beta.3")
         );
-        assert_eq!(pick(list, "1.0.0-beta.3"), None);
+        assert_eq!(pick_beta(list, "1.0.0-beta.3"), None);
         let list = json!([
             release("v1.0.0", false, false),
             release("v1.0.0-beta.2", true, false)
         ]);
-        assert_eq!(pick(list, "1.0.0-beta.1").as_deref(), Some("1.0.0"));
+        assert_eq!(pick_beta(list, "1.0.0-beta.1").as_deref(), Some("1.0.0"));
+        // A final release on the beta channel is offered the next beta.
+        let list = json!([
+            release("v1.1.0-beta.1", true, false),
+            release("v1.0.0", false, false)
+        ]);
+        assert_eq!(pick_beta(list, "1.0.0").as_deref(), Some("1.1.0-beta.1"));
     }
 
     #[test]
-    fn release_build_skips_prereleases() {
+    fn stable_channel_skips_prereleases() {
         let list = json!([
             release("v1.1.0-beta.1", true, false),
             release("v1.0.1", false, false)
         ]);
         assert_eq!(pick(list.clone(), "1.0.0").as_deref(), Some("1.0.1"));
         assert_eq!(pick(list, "1.0.1"), None);
+    }
+
+    #[test]
+    fn beta_build_on_stable_channel_waits_for_a_release() {
+        let list = json!([
+            release("v1.0.0-beta.6", true, false),
+            release("v1.0.0-beta.5", true, false)
+        ]);
+        assert_eq!(pick(list, "1.0.0-beta.5"), None);
+        let list = json!([
+            release("v1.1.0-beta.1", true, false),
+            release("v1.0.0", false, false),
+            release("v1.0.0-beta.6", true, false)
+        ]);
+        assert_eq!(pick(list, "1.0.0-beta.5").as_deref(), Some("1.0.0"));
+    }
+
+    #[test]
+    fn prerelease_flag_alone_marks_a_beta() {
+        // A tag without a suffix but published as a GitHub pre-release.
+        let list = json!([release("v2.0.0", true, false)]);
+        assert_eq!(pick(list.clone(), "1.0.0"), None);
+        assert_eq!(pick_beta(list, "1.0.0").as_deref(), Some("2.0.0"));
     }
 
     #[test]
@@ -156,7 +199,7 @@ mod tests {
     #[test]
     fn release_fields() {
         let bytes = serde_json::to_vec(&json!([release("v1.0.0-beta.2", true, false)])).unwrap();
-        let r = pick_update(&bytes, &Version::parse("1.0.0-beta.1").unwrap())
+        let r = pick_update(&bytes, &Version::parse("1.0.0-beta.1").unwrap(), true)
             .unwrap()
             .unwrap();
         assert_eq!(r.setup_name, "Kuality-1.0.0-beta.2-setup.exe");
@@ -170,7 +213,14 @@ mod tests {
 
     #[test]
     fn invalid_json_is_an_error() {
-        assert!(pick_update(b"{\"message\":\"x\"}", &Version::parse("1.0.0").unwrap()).is_err());
+        assert!(
+            pick_update(
+                b"{\"message\":\"x\"}",
+                &Version::parse("1.0.0").unwrap(),
+                false
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -79,6 +79,8 @@ pub struct Updates {
     /// Check GitHub for a newer release (at start, then every few hours). The one feature that
     /// is **on** by default (user decision 2026-11-09): installing still needs a click.
     pub check: bool,
+    /// Which releases are offered (manual checks too).
+    pub channel: UpdateChannel,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -87,8 +89,28 @@ impl Default for Updates {
     fn default() -> Self {
         Self {
             check: true,
+            channel: UpdateChannel::Stable,
             extra: Extra::new(),
         }
+    }
+}
+
+/// `updates.channel`, lowercase in JSON. An unknown value reads as `stable`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    /// Pre-releases too (`1.3.0-beta.1`): whichever is newest.
+    Beta,
+    /// Final releases only (`1.2.0`). Last variant: serde's catch-all for unknown values.
+    #[default]
+    #[serde(other)]
+    Stable,
+}
+
+impl UpdateChannel {
+    /// Whether this channel is offered pre-releases.
+    pub fn includes_prereleases(self) -> bool {
+        self == Self::Beta
     }
 }
 
@@ -932,7 +954,7 @@ mod tests {
         let mut expected = input;
         expected["general"]["log_level"] = json!("info");
         expected["hyperkey"]["modifiers"] = json!("none");
-        expected["updates"] = json!({ "check": true });
+        expected["updates"] = json!({ "check": true, "channel": "stable" });
         expected["todo"] = json!({ "enabled": false, "new_items": "top" });
         expected["clipboard"] = json!({
             "enabled": false, "hotkey": "hyper+v", "max_entries": 100, "images": true
@@ -948,11 +970,33 @@ mod tests {
             "hyperkey": { "enabled": false, "modifiers": "none" },
             "shortcuts": { "enabled": false, "bindings": [] },
             "widgets": { "enabled": false, "hide_on_fullscreen": true, "items": [] },
-            "updates": { "check": true },
+            "updates": { "check": true, "channel": "stable" },
             "todo": { "enabled": false, "new_items": "top" },
             "clipboard": { "enabled": false, "hotkey": "hyper+v", "max_entries": 100, "images": true }
         });
         assert_eq!(serde_json::to_value(Config::default()).unwrap(), expected);
+    }
+
+    #[test]
+    fn update_channel_reads_beta_and_falls_back_to_stable() {
+        let channel = |updates: serde_json::Value| {
+            serde_json::from_value::<Config>(json!({ "updates": updates }))
+                .unwrap()
+                .updates
+                .channel
+        };
+        assert_eq!(channel(json!({ "channel": "beta" })), UpdateChannel::Beta);
+        assert_eq!(
+            channel(json!({ "channel": "stable" })),
+            UpdateChannel::Stable
+        );
+        assert_eq!(channel(json!({ "check": false })), UpdateChannel::Stable);
+        assert_eq!(
+            channel(json!({ "channel": "nightly" })),
+            UpdateChannel::Stable
+        );
+        assert!(UpdateChannel::Beta.includes_prereleases());
+        assert!(!UpdateChannel::Stable.includes_prereleases());
     }
 
     #[test]
