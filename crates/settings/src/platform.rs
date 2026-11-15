@@ -355,7 +355,7 @@ pub fn allow_foreground(pid: u32) {
 /// The description of an exe (`FileDescription` of its version resource, e.g. "Brave Browser"),
 /// or `None`.
 pub fn exe_description(path: &str) -> Option<String> {
-    let wpath = wide(path);
+    let wpath = wide(&path.replace('/', "\\"));
     // SAFETY: the buffer is sized by the first call; VerQueryValueW returns pointers into it,
     // read while it is alive.
     unsafe {
@@ -410,7 +410,8 @@ pub fn exe_description(path: &str) -> Option<String> {
 /// The icon of a file (an exe) at [`ICON_PX`], or `None`. Initializes COM for the call, so it
 /// can run on any thread.
 pub fn file_icon(path: &str) -> Option<RawIcon> {
-    let wpath = wide(path);
+    // The shell does not parse `/` as a separator.
+    let wpath = wide(&path.replace('/', "\\"));
     // SAFETY: balanced CoInitializeEx / CoUninitialize; the item is dropped before.
     unsafe {
         let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);

@@ -263,6 +263,24 @@ Do not contradict these without asking the user. To change one, edit the line an
 - **IPC robustness** *(2026-11-11)* — overlapped pipe I/O with deadlines (request 2 s and ≤ 4 KB, reply 10 s), stop by event, next instance created before the current one closes. A hung popup can no longer block the pipe, and the name never disappears between two requests.
 - **Dependencies** — `png` (already in GPUI's tree) for clipboard images in the core; no `zeroize` (small volatile wipe helper); duplicates detected with a per-process keyed SipHash, then confirmed on the decrypted bytes.
 
+## App lock (2026-11-15, Phase 10, user decisions)
+
+- **Order** — done before Phase 4 (media), like Phases 5, 8 and 9 (beads `kuality-hvz`).
+- **What it is** — a deterrent against someone using the unlocked PC, not real security (anyone on the same Windows account can end Kuality or copy the exe); the tab says so.
+- **Unlocking** — a Kuality password only (no Windows Hello). Forgotten password: quit Kuality, delete `app-lock.bin`, set a new one.
+- **Unlocked until it exits** — the password is asked only when the program starts (a window of a locked program appears); it stays unlocked until the last process Kuality saw for it exits. No relock on Win+L, sleep or a timer (user change during the definition).
+- **While locked** — the program's windows are hidden (`ShowWindowAsync(SW_HIDE)`: gone from the taskbar, Alt+Tab and thumbnails) and shown again on unlock; Cancel keeps them hidden. Rejected: covering them with a panel (content stays visible in thumbnails).
+- **Detection** — an out-of-context `EVENT_OBJECT_SHOW` WinEvent hook on its own thread (no injection, no polling); processes waited on with `MsgWaitForMultipleObjectsEx`. Rejected: IFEO `Debugger` redirection (needs admin, flagged by antivirus, breaks multi-process programs such as Brave).
+- **Matching** — by full exe path, case-insensitive, `/` = `\`; every process of the exe shares one state. Explorer, Windows shell hosts and Kuality itself cannot be added; Store apps are out of scope.
+- **Already running** — at core start running locked programs are locked at once; when App lock is turned on, a password is set or a program is added while it runs, it stays unlocked until it exits.
+- **Password storage** — PBKDF2-HMAC-SHA256, 600 000 iterations, 16-byte random salt, with Windows BCrypt (no new dependency), in `app-lock.bin` encrypted with DPAPI (entropy `Kuality.AppLock.v1`). Checked only by the core; passwords are never logged (redacted `Debug`).
+- **Wrong tries** — after 5 wrong passwords, tries are refused for 30 s, doubling up to 15 min; memory only, shared by the prompt, the tab and the tray confirmations.
+- **Protection** — the App lock tab shows only a password field while App lock is on and a password is set; tray Quit and Pause ask for the password (closing from outside never does). Pause also pauses App lock.
+- **IPC** — the core's pipe now runs while the clipboard history **or** App lock is on and serves both (`protocol::ipc::Request`, untagged; App lock ops are prefixed `app_lock_`). A clipboard request while the history is off gets `clipboard::HISTORY_OFF`.
+- **Prompt** — a GPUI process `kuality.exe --unlock` (mutex `Local\Kuality.Unlock`), a normal window (in the taskbar) that stays open when it loses the focus; one at a time; it allows the core to set the foreground so the unlocked app comes to the front.
+- **Crash safety** — hidden windows are shown again by the panic hook / exception filter (lock-free table) and, after a killed core, from `app-lock-hidden.json` at the next start.
+- **Elevated programs** — a non-elevated core leaves them alone (logged once): it cannot hide their windows (UIPI).
+
 ## Out of scope for now
 
 - Notifications widget (needs package identity / MSIX).

@@ -57,6 +57,8 @@ pub(crate) struct AppLockView {
     running: Option<Vec<Running>>,
     icons: HashMap<String, Option<Arc<RenderImage>>>,
     icons_loading: HashSet<String>,
+    /// Exe descriptions of listed programs without a `name`, by normalized path.
+    descriptions: HashMap<String, Option<String>>,
 }
 
 /// `app-lock.bin` next to `config.json`.
@@ -310,6 +312,20 @@ impl SettingsWindow {
         cx.notify();
     }
 
+    /// The name shown for a listed program: its `name`, else the exe's description (read once),
+    /// else its file name.
+    fn listed_name(&mut self, app: &LockedApp) -> String {
+        if !app.name.trim().is_empty() {
+            return app.display_name();
+        }
+        self.app_lock
+            .descriptions
+            .entry(normalize_path(&app.path))
+            .or_insert_with(|| platform::exe_description(&app.path))
+            .clone()
+            .unwrap_or_else(|| app.display_name())
+    }
+
     /// The icon of `path`, loaded in the background the first time it is asked for.
     fn app_icon(&mut self, path: &str, cx: &mut Context<Self>) -> Option<Arc<RenderImage>> {
         let key = normalize_path(path);
@@ -552,8 +568,9 @@ impl SettingsWindow {
                             .config
                             .app_lock
                             .apps
+                            .clone()
                             .iter()
-                            .map(|a| (a.display_name(), a.path.clone()))
+                            .map(|a| (this.listed_name(a), a.path.clone()))
                             .collect();
                         let mut list = v_flex().gap_1();
                         if apps.is_empty() {

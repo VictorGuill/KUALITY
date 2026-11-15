@@ -63,7 +63,7 @@ fn app_name(path: &str, config: Option<&Config>) -> String {
             .apps
             .iter()
             .find(|a| normalize_path(&a.path) == key)
-            .map(|a| a.display_name())
+            .map(|a| a.name.trim().to_string())
     });
     configured
         .filter(|n| !n.is_empty())

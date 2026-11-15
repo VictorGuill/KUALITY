@@ -73,16 +73,18 @@ cargo run -p kuality                        # run the core (tray icon; Ctrl+C in
 cargo run -p kuality -- --settings          # settings window (second process of the same exe; starts the core if needed)
 cargo run -p kuality -- --todo              # to-do popup (bottom-left of the primary screen without --at <x>,<y>)
 cargo run -p kuality -- --clipboard         # clipboard history popup (needs a running core with the history on)
+cargo run -p kuality -- --unlock --app C:\Windows\System32\notepad.exe   # App lock prompt (needs a running core with App lock on)
 cargo run -p kuality -- --startup off       # start-at-logon entry: off | on | normal | elevated (UAC)
 .\scripts\package.ps1 [-Installer]          # release build + dist\Kuality-<version>-portable.zip (+ Inno Setup installer)
 cargo run -p kuality --example keyviewer    # dev tool: prints key messages + modifier state (Hyperkey tests)
 cargo run -p kuality-update --example check -- 1.0.0-alpha --beta --download   # dev tool: update check (beta channel) + verified download (no install)
 ```
 
-Runtime files: `%APPDATA%\Kuality\config.json`, `todos.json` (to-do items), `clipboard-pins.bin` (pinned clipboard entries, DPAPI-encrypted) and `logs\kuality.log`.
+Runtime files: `%APPDATA%\Kuality\config.json`, `todos.json` (to-do items), `clipboard-pins.bin` (pinned clipboard entries, DPAPI-encrypted), `app-lock.bin` (App lock password hash, DPAPI-encrypted), `app-lock-hidden.json` (windows App lock hides right now) and `logs\kuality.log`.
 For a throwaway setup, create an empty file `target\debug\portable`: config and logs then live in `target\debug\`.
 To quit a running core from a script, close it gracefully (`taskkill /IM kuality.exe`, without `/F`).
 Startup tests: in debug builds set `KUALITY_STARTUP_NAME=Kuality-test` so the Run value / scheduled task use a test name instead of the real `Kuality` entry.
 Clipboard popup: in debug builds set `KUALITY_CLIPBOARD_SAMPLE=1` to open it with made-up entries (no core, nothing copied).
 Update tests: in debug builds set `KUALITY_UPDATE_AS_VERSION=1.0.0-alpha` so the core and settings window see the published releases as newer (a dev copy only opens the release page, never installs).
-There is one executable: `kuality.exe` is the core, `kuality.exe --settings` the settings window (tray / widget "Settings" start it as a second process), `kuality.exe --todo` the to-do popup (a click on the taskbar's `TO DO`), `kuality.exe --clipboard` the clipboard history popup (the clipboard hotkey); only one settings window and one popup of each kind run at a time.
+There is one executable: `kuality.exe` is the core, `kuality.exe --settings` the settings window (tray / widget "Settings" start it as a second process), `kuality.exe --todo` the to-do popup (a click on the taskbar's `TO DO`), `kuality.exe --clipboard` the clipboard history popup (the clipboard hotkey), `kuality.exe --unlock` the App lock prompt; only one settings window and one popup of each kind run at a time.
+App lock tests: lock a harmless program (Notepad) in the dev config; the prompt only talks to a running kuality.exe core, so a test needs the dev core (ask before closing the user's installed copy).

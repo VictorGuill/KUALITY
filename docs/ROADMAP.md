@@ -3,7 +3,7 @@
 Work phase by phase. The **current phase** is the first one not marked ✅.
 Each phase gets a spec in `docs/specs/` before coding and its own branch (`phase-N-name`).
 
-**MVP = Phases 0–3.** Phase 5 was done before Phase 4 (user request: a settings window first, no new features). Phase 8 (to-do) was also done before Phase 4 (user request, 2026-11-09), and so was Phase 9 (clipboard history, 2026-11-11).
+**MVP = Phases 0–3.** Phase 5 was done before Phase 4 (user request: a settings window first, no new features). Phase 8 (to-do) was also done before Phase 4 (user request, 2026-11-09), and so was Phase 9 (clipboard history, 2026-11-11), and Phase 10 (App lock, 2026-11-15).
 
 ---
 
@@ -141,6 +141,20 @@ Done before Phase 4 (user request, 2026-11-11); see `docs/specs/clipboard.md`. R
 - [x] Settings: Clipboard tab (enable, hotkey, keep last N, images, open / clear / remove pins)
 
 **Done when:** with Clipboard on, Hyper+V opens the history, Enter pastes the chosen entry into the app that was in front, pinned entries survive a restart and unpinned ones do not, and `clipboard-pins.bin` holds no readable text.
+
+## Phase 10 — App lock ✅
+
+Done before Phase 4 (user request, 2026-11-15; beads `kuality-hvz`); see `docs/specs/app-lock.md`.
+
+- [x] Spec `docs/specs/app-lock.md`
+- [x] `app_lock` config section, App lock requests on the core's pipe (`protocol::app_lock`, `protocol::ipc::Request`)
+- [x] Password: PBKDF2-HMAC-SHA256 (Windows BCrypt) in `app-lock.bin` (DPAPI), wrong-try throttle
+- [x] Core thread `kuality-applock`: `EVENT_OBJECT_SHOW` hook, hide / show windows, process tracking (unlocked until the app exits), crash recovery (`app-lock-hidden.json`, panic hook)
+- [x] Prompt `kuality.exe --unlock` (`--app <path>` / `--confirm quit|pause`)
+- [x] Settings: App lock tab (password gate, set / change password, locked apps, running apps, Browse…)
+- [x] Tray Quit / Pause ask for the password while App lock is on; Pause also pauses App lock
+
+**Done when:** with App lock on, a password set and Notepad in the list, starting Notepad hides it and asks for the password; the right password brings it to the front; it stays unlocked until every Notepad is closed; turning App lock off or quitting brings back every hidden window.
 
 ## Future (unordered)
 

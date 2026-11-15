@@ -12,8 +12,12 @@ kuality.exe  (core, always running, few MB)   — one exe, two processes (docs/s
 ├── Overlay thread         → widget windows attached to each taskbar, Direct2D rendering
 ├── Clipboard thread       → (clipboard history on) records clipboard changes into the in-memory,
 │                            encrypted history; writes entries back for paste / copy
-├── IPC thread             → (clipboard history on) named pipe `\\.\pipe\Kuality.Core.<pid>`
-│                            for the clipboard popup and the settings window
+├── App lock thread        → (App lock on) WinEvent hook on window shows: hides the windows of
+│                            locked programs, opens the prompt, waits on their processes
+│                            (docs/specs/app-lock.md)
+├── IPC thread             → (clipboard history or App lock on) named pipe
+│                            `\\.\pipe\Kuality.Core.<pid>` for the clipboard popup, the App lock
+│                            prompt and the settings window
 ├── Update thread          → checks GitHub releases (60 s after start, every 6 h), downloads and
 │                            starts the installer on request (docs/specs/updates.md)
 ├── Tray icon              → Settings / Pause / Check for updates or Install update / Quit,
@@ -29,6 +33,10 @@ kuality.exe --todo  (GPUI, the to-do popup, only alive while open; started by a 
 kuality.exe --clipboard  (GPUI, the clipboard history popup, only alive while open; started by the
                           clipboard hotkey (`--paste`) or Settings; reads the history over the pipe,
                           never writes to disk — docs/specs/clipboard.md)
+
+kuality.exe --unlock  (GPUI, the App lock prompt, only alive while open; started by the core when a
+                       locked program shows a window (`--app <path>`) or for tray Quit / Pause
+                       (`--confirm quit|pause`); the core checks the password over the pipe)
 
 kuality.exe --settings  (GPUI via gpui-kit, only alive while open; started by tray/widget "Settings")
 ├── UI thread              → window, auto-save (300 ms), 1 s check for outside edits of config.json
@@ -52,7 +60,8 @@ crates/
 │                 download + SHA-256 check + start; used by core and settings
 └── protocol/   → package `kuality-protocol`, library: config types, key names, data-dir rule (`paths`),
                   atomic config write (`store`), Windows argument quoting (`quote`), `todos.json` types
-                  (`todo`), pipe framing (`ipc`), clipboard requests and pins file (`clipboard`), the
+                  (`todo`), pipe framing and requests (`ipc`), clipboard requests and pins file
+                  (`clipboard`), App lock requests, password file layout and rules (`app_lock`), the
                   command line between the processes (`cli`); later extension types
 ```
 
@@ -73,11 +82,13 @@ Current `core` modules:
 | `overlay/widgets/` | `Renderer` trait, `Theme`, `Content`, `LiveData`; `text.rs` (text widget), `bar.rs` (bar widget: modules, spans for clicks, hover) |
 | `todos.rs` | `TodoWatch`: re-reads `todos.json` on data-dir changes and reports the pending count |
 | `clipboard/` | Clipboard history (`docs/specs/clipboard.md`): `ClipboardService` (start / apply / shutdown, pipe request handler, pins file), `history.rs` (ordering, duplicates, limits, pins; unit-tested), `sealed.rs` (`Sealed` / `Plain` encrypted and wiped buffers), `image.rs` (DIB / PNG / thumbnails, row by row: never a full RGBA copy) |
+| `ipc.rs` | `IpcHub`: runs the pipe server while the clipboard history or App lock is on and hands each request to that feature's handler |
+| `app_lock/` | App lock (`docs/specs/app-lock.md`): `AppLockService` (start / apply / pause / shutdown, pipe handler, prompt start), `book.rs` (lock state per program; portable, unit-tested), `password.rs` (`app-lock.bin`, PBKDF2 check, wrong-try throttle) |
 | `updates.rs` | `Updates` (main-thread side: tray item, notifications, install / release page) and the `kuality-update` thread (`docs/specs/updates.md`) |
 | `config_store.rs` | Load/create/save of `config.json` (atomic write from `protocol::store`), `Reloader` (change detection), section diff |
 | `logging.rs` | `log` backend: lines queued to the `kuality-log` thread, which writes `logs\kuality.log` (rotation); flushed at quit, on panic and on a crash |
 | `platform/mod.rs` | Traits `SingleInstance`, `DirWatcher`, `TrayIcon`, `Waker`, `KeyboardBackend`, `OverlayBackend` + free functions |
-| `platform/windows/` | Win32 implementations (`instance`, `tray`, `watcher`, `shell` (incl. `launch` / `open_url`), `actions` (action thread message loop, WM_CLOSE watch), `folders`, `time`, `dpi`, `keyboard`, `input`, `hook_watchdog`, `office_key`, `crash`, `overlay/`, `clipboard` (listener thread, clipboard writes, `CryptProtectMemory`, DPAPI, paste target), `ipc` (pipe server: overlapped I/O with deadlines, stop event)) |
+| `platform/windows/` | Win32 implementations (`instance`, `tray`, `watcher`, `shell` (incl. `launch` / `open_url`), `actions` (action thread message loop, WM_CLOSE watch), `folders`, `time`, `dpi`, `keyboard`, `input`, `hook_watchdog`, `office_key`, `crash`, `overlay/`, `clipboard` (listener thread, clipboard writes, `CryptProtectMemory`, paste target), `crypto` (DPAPI, PBKDF2 and random bytes via BCrypt), `app_lock` (App lock thread: WinEvent hook, hide / show, process waits, crash restore), `ipc` (pipe server: overlapped I/O with deadlines, stop event)) |
 | `platform/windows/overlay/` | `thread` (host window, commands, refresh, hooks, menu), `taskbars`, `widget_window`, `render` (Direct2D/DirectWrite), `fullscreen`, `theme` |
 
 `kuality-settings` modules (see `docs/specs/settings.md`; everything drawn is a gpui-component element, DECISIONS "Kit first"):
@@ -90,7 +101,8 @@ Current `core` modules:
 | `startup/` | Start at logon (`docs/specs/distribution.md`): portable plan / task XML / arguments (`mod.rs`, unit-tested) and the Win32 side (`windows.rs`: HKCU Run value, Task Scheduler COM, UAC helper). Also behind `kuality.exe --startup` / `--startup-task` |
 | `platform.rs` | Windows: known folder, `Local\Kuality.Settings` mutex + focus existing window, core-running check, `CoreProcess` (open / find / start / watch the core), recorder hook thread |
 | `ui/mod.rs` | `SettingsWindow` view: the kit `Settings` (sidebar with search, one page per tab), debounced save, disk poll, recording, banner and status bar |
-| `ui/{general,widgets,hyperkey,shortcuts,todo,clipboard}.rs` | One `SettingPage` each; Widgets has cards with a collapsible form, Shortcuts a table |
+| `unlock.rs` | The App lock prompt (`kuality.exe --unlock`): app icon and name, masked password field, unlock / confirm through the core's pipe |
+| `ui/{general,widgets,hyperkey,shortcuts,todo,clipboard,app_lock}.rs` | One `SettingPage` each; Widgets has cards with a collapsible form, Shortcuts a table |
 | `ui/picker.rs` | The action picker of a shortcut: kit `List` of actions and installed apps, and the forms of the actions that need a value |
 | `ui/window.rs` | Shared by the three GPUI processes: assets, opening the one window, popup window options, following the core process |
 | `ui/style.rs` | Applies the kit theme (light / dark with Windows) and paints the native title bar to match |
@@ -112,6 +124,7 @@ Main loop: a hidden top-level window (class `Kuality.Core`) owns the tray icon. 
 - Location: `%APPDATA%\Kuality\config.json`, or next to the exe if a `portable` file exists there.
 - Every feature section has `"enabled": false` by default.
 - To-do items are data, not settings: `todos.json` next to `config.json` (`protocol::todo`), written only by the to-do popup.
+- App lock: `app-lock.bin` (password hash, DPAPI-encrypted, written only by the core) and `app-lock-hidden.json` (windows hidden right now, for crash recovery). The list of programs is the `app_lock` section of `config.json`.
 - Pinned clipboard entries: `clipboard-pins.bin` next to `config.json`, DPAPI-encrypted, written only by the core (`protocol::clipboard` has the decrypted layout). The rest of the clipboard history is never written.
 - Missing fields fall back to defaults (forward-compatible); unknown fields are preserved where possible.
 
@@ -169,4 +182,5 @@ Draft shape (will be refined per phase):
 | Elevated autostart | Task Scheduler task with "run with highest privileges" at logon |
 | Single instance | Named mutex |
 | Clipboard history | `AddClipboardFormatListener` on a message-only window; `CryptProtectMemory` in memory, DPAPI (`CryptProtectData`) for pins |
-| IPC | Named pipe `\\.\pipe\Kuality.Core.<pid>` (clipboard history; settings changes still use the config file); overlapped I/O, every read and write with a deadline |
+| IPC | Named pipe `\\.\pipe\Kuality.Core.<pid>` (clipboard history and App lock; settings changes still use the config file); overlapped I/O, every read and write with a deadline |
+| App lock | Out-of-context `EVENT_OBJECT_SHOW` WinEvent hook, `ShowWindowAsync(SW_HIDE / SW_SHOW)`, `MsgWaitForMultipleObjectsEx` on process handles, PBKDF2 via `BCryptDeriveKeyPBKDF2`, DPAPI |

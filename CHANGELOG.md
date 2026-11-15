@@ -2,6 +2,12 @@
 
 All notable changes to Kuality. Versions follow [Semantic Versioning](https://semver.org); each `## [x.y.z]` section becomes the notes of the GitHub Release tagged `vx.y.z` (keep one line per paragraph or bullet: release notes keep line breaks).
 
+## [Unreleased]
+
+### New
+
+- **App lock** — Settings → **App lock**: pick programs (from the apps running now, or Browse…) and set a Kuality password. When a locked program starts, its windows are hidden and Kuality asks for the password; once you type it, the program stays unlocked until you close it. After 5 wrong passwords Kuality makes you wait. While App lock is on, its settings tab and tray Quit / Pause ask for the password too. It keeps out someone using your unlocked PC; it is not meant as real security.
+
 ## [1.0.0] - 2026-11-14
 
 The first stable version of Kuality. Windows 11, x64. Everything below is off until you turn it on in Settings, except the update check.
