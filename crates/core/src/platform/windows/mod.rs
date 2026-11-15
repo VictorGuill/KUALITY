@@ -1,8 +1,10 @@
 //! Windows implementation of the platform layer.
 
 mod actions;
+mod app_lock;
 mod clipboard;
 mod crash;
+pub mod crypto;
 mod dpi;
 mod focus;
 mod folders;
@@ -19,6 +21,7 @@ mod tray;
 mod watcher;
 
 pub use actions::{action_thread_init, action_thread_run, action_thread_stop, action_thread_wake};
+pub use app_lock::{AppLockThread, Command as AppLockCommand, Commander, LockedExe, Prompt};
 pub use clipboard::{
     ClipboardMonitor, MemoryCipher, Putter, close_shell_flyout, protect, set_paste_target,
     shell_flyout_in_front, unprotect,

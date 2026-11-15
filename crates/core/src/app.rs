@@ -3,15 +3,18 @@
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
+use kuality_protocol::app_lock::ConfirmAction;
 use kuality_protocol::{CONFIG_VERSION, Config, cli};
 
 use crate::actions::ActionWorker;
+use crate::app_lock::{self, AppLockEvent, AppLockService, Wake};
 use crate::clipboard::ClipboardService;
 use crate::config_store::changed_sections;
 use crate::hyperkey::KeyboardController;
+use crate::ipc::IpcHub;
 use crate::overlay::OverlayController;
 use crate::overlay::widgets::LiveData;
 use crate::platform::{self, DirWatcher, Event, TodoRequest, TodoTrigger};
@@ -26,13 +29,22 @@ const TODO_START_GUARD: Duration = Duration::from_millis(500);
 /// The hotkey does not start a second clipboard popup this soon after starting one.
 const CLIPBOARD_START_GUARD: Duration = Duration::from_millis(500);
 
+/// Files next to `config.json` the core writes.
+#[derive(Debug, Clone)]
+pub struct DataFiles {
+    pub config: PathBuf,
+    /// `clipboard-pins.bin`.
+    pub pins: PathBuf,
+    /// `app-lock.bin`.
+    pub app_lock: PathBuf,
+    /// `app-lock-hidden.json`.
+    pub app_lock_hidden: PathBuf,
+}
+
 /// State owned by the main thread.
-#[derive(Debug)]
 pub struct App<W: DirWatcher> {
     config: Config,
-    config_path: PathBuf,
-    /// `clipboard-pins.bin`.
-    pins_path: PathBuf,
+    files: DataFiles,
     reloads: Receiver<Box<Config>>,
     /// Pending to-do count whenever `todos.json` changes (watcher thread).
     todo_counts: Receiver<Option<usize>>,
@@ -49,8 +61,25 @@ pub struct App<W: DirWatcher> {
     clipboard: Option<ClipboardService>,
     /// When the clipboard popup was last started.
     clipboard_started: Option<Instant>,
-    /// Tray "Pause" (runtime only, keyboard features only).
+    /// App lock, while `app_lock.enabled`.
+    app_lock: Option<AppLockService>,
+    app_lock_events: (Sender<AppLockEvent>, Receiver<AppLockEvent>),
+    /// Wakes the main loop from another thread.
+    wake: Wake,
+    /// The pipe shared by the clipboard history and App lock.
+    ipc: IpcHub,
+    /// Tray "Pause" (runtime only: keyboard features and App lock).
     paused: bool,
+}
+
+impl<W: DirWatcher> std::fmt::Debug for App<W> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("App")
+            .field("paused", &self.paused)
+            .field("clipboard", &self.clipboard.is_some())
+            .field("app_lock", &self.app_lock.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<W: DirWatcher> App<W> {
@@ -58,8 +87,8 @@ impl<W: DirWatcher> App<W> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Config,
-        config_path: PathBuf,
-        pins_path: PathBuf,
+        files: DataFiles,
+        wake: Wake,
         reloads: Receiver<Box<Config>>,
         todo_counts: Receiver<Option<usize>>,
         watcher: Option<W>,
@@ -70,8 +99,7 @@ impl<W: DirWatcher> App<W> {
     ) -> Self {
         let mut app = Self {
             config,
-            config_path,
-            pins_path,
+            files,
             reloads,
             todo_counts,
             watcher,
@@ -83,9 +111,14 @@ impl<W: DirWatcher> App<W> {
             todo_started: None,
             clipboard: None,
             clipboard_started: None,
+            app_lock: None,
+            app_lock_events: mpsc::channel(),
+            wake,
+            ipc: IpcHub::new(),
             paused: false,
         };
         app.apply_clipboard(None);
+        app.apply_app_lock(None);
         app.apply_keyboard(&app.config);
         app.update_live();
         if let Some(o) = &app.overlay {
@@ -117,9 +150,9 @@ impl<W: DirWatcher> App<W> {
             },
             Err(e) => log::error!("cannot find our own exe: {e}"),
         }
-        log::info!("opening {}", self.config_path.display());
-        if let Err(e) = platform::open_with_default_app(&self.config_path) {
-            log::error!("could not open {}: {e}", self.config_path.display());
+        log::info!("opening {}", self.files.config.display());
+        if let Err(e) = platform::open_with_default_app(&self.files.config) {
+            log::error!("could not open {}: {e}", self.files.config.display());
         }
     }
 
@@ -181,11 +214,15 @@ impl<W: DirWatcher> App<W> {
     fn apply_clipboard(&mut self, old: Option<&kuality_protocol::Clipboard>) {
         let new = &self.config.clipboard;
         match (&mut self.clipboard, new.enabled) {
-            (None, true) => match ClipboardService::start(new, self.pins_path.clone()) {
-                Ok(s) => self.clipboard = Some(s),
+            (None, true) => match ClipboardService::start(new, self.files.pins.clone()) {
+                Ok(s) => {
+                    self.ipc.set_clipboard(s.ipc_handler());
+                    self.clipboard = Some(s);
+                }
                 Err(e) => log::error!("cannot start the clipboard history: {e}"),
             },
             (Some(_), false) => {
+                self.ipc.set_clipboard(None);
                 if let Some(mut s) = self.clipboard.take() {
                     s.shutdown();
                 }
@@ -195,6 +232,92 @@ impl<W: DirWatcher> App<W> {
             (Some(s), true) if old != Some(new) => s.apply(new),
             _ => {}
         }
+    }
+
+    /// Starts, updates or stops App lock to match the config (`old`: the section before a
+    /// reload, `None` at start: running locked programs are then locked at once).
+    fn apply_app_lock(&mut self, old: Option<&kuality_protocol::AppLock>) {
+        let new = &self.config.app_lock;
+        match (&self.app_lock, new.enabled) {
+            (None, true) => match AppLockService::start(
+                new,
+                self.files.app_lock.clone(),
+                self.files.app_lock_hidden.clone(),
+                old.is_none(),
+                self.app_lock_events.0.clone(),
+                Arc::clone(&self.wake),
+            ) {
+                Ok(s) => {
+                    if self.paused {
+                        s.set_paused(true);
+                    }
+                    self.ipc.set_app_lock(Some(s.ipc_handler()));
+                    self.app_lock = Some(s);
+                }
+                Err(e) => log::error!("cannot start App lock: {e}"),
+            },
+            (Some(_), false) => {
+                self.ipc.set_app_lock(None);
+                if let Some(mut s) = self.app_lock.take() {
+                    s.shutdown();
+                }
+                kuality_settings::close_unlock_popup();
+            }
+            (Some(s), true) if old != Some(new) => s.apply(new),
+            _ => {}
+        }
+    }
+
+    /// Tray Quit / Pause need the App lock password while one is set.
+    fn guarded(&self) -> bool {
+        self.app_lock
+            .as_ref()
+            .is_some_and(AppLockService::has_password)
+    }
+
+    fn toggle_pause(&mut self) {
+        self.paused = !self.paused;
+        log::info!(
+            "keyboard features and App lock {}",
+            if self.paused { "paused" } else { "resumed" }
+        );
+        if let Some(k) = &self.keyboard {
+            k.set_paused(self.paused);
+        }
+        if let Some(a) = &self.app_lock {
+            a.set_paused(self.paused);
+        }
+        platform::set_tray_paused(self.paused);
+    }
+
+    /// Stops everything; the main loop ends after this.
+    fn quit(&mut self) -> ControlFlow<()> {
+        log::info!("quitting");
+        if let Some(u) = &self.updates {
+            u.shutdown();
+        }
+        // First: shows the windows it hid.
+        if let Some(mut a) = self.app_lock.take() {
+            a.shutdown();
+        }
+        kuality_settings::close_unlock_popup();
+        self.ipc.shutdown();
+        if let Some(mut o) = self.overlay.take() {
+            o.shutdown();
+        }
+        if let Some(mut k) = self.keyboard.take() {
+            k.shutdown();
+        }
+        if let Some(mut c) = self.clipboard.take() {
+            c.shutdown();
+        }
+        // After the keyboard thread: no new actions can arrive.
+        self.actions.shutdown(ACTIONS_SHUTDOWN_TIMEOUT);
+        reconcile_office_key(false);
+        if let Some(w) = self.watcher.take() {
+            w.stop();
+        }
+        ControlFlow::Break(())
     }
 
     /// The clipboard hotkey: close the popup if it is open, else open it (Enter pastes into the
@@ -251,6 +374,16 @@ impl<W: DirWatcher> App<W> {
                 while let Ok(new) = self.reloads.try_recv() {
                     self.apply_config(*new);
                 }
+                while let Ok(event) = self.app_lock_events.1.try_recv() {
+                    match event {
+                        AppLockEvent::Confirmed(ConfirmAction::Quit) => return self.quit(),
+                        AppLockEvent::Confirmed(ConfirmAction::Pause) => {
+                            if !self.paused {
+                                self.toggle_pause();
+                            }
+                        }
+                    }
+                }
                 self.update_live();
                 if let Some(u) = &mut self.updates {
                     u.poll();
@@ -270,15 +403,11 @@ impl<W: DirWatcher> App<W> {
                 ControlFlow::Continue(())
             }
             Event::TogglePause => {
-                self.paused = !self.paused;
-                log::info!(
-                    "keyboard features {}",
-                    if self.paused { "paused" } else { "resumed" }
-                );
-                if let Some(k) = &self.keyboard {
-                    k.set_paused(self.paused);
+                if !self.paused && self.guarded() {
+                    app_lock::start_confirm_prompt(ConfirmAction::Pause);
+                } else {
+                    self.toggle_pause();
                 }
-                platform::set_tray_paused(self.paused);
                 ControlFlow::Continue(())
             }
             Event::CheckUpdates => {
@@ -293,28 +422,11 @@ impl<W: DirWatcher> App<W> {
                 }
                 ControlFlow::Continue(())
             }
-            Event::Quit => {
-                log::info!("quitting");
-                if let Some(u) = &self.updates {
-                    u.shutdown();
-                }
-                if let Some(mut o) = self.overlay.take() {
-                    o.shutdown();
-                }
-                if let Some(mut k) = self.keyboard.take() {
-                    k.shutdown();
-                }
-                if let Some(mut c) = self.clipboard.take() {
-                    c.shutdown();
-                }
-                // After the keyboard thread: no new actions can arrive.
-                self.actions.shutdown(ACTIONS_SHUTDOWN_TIMEOUT);
-                reconcile_office_key(false);
-                if let Some(w) = self.watcher.take() {
-                    w.stop();
-                }
-                ControlFlow::Break(())
+            Event::QuitFromMenu if self.guarded() => {
+                app_lock::start_confirm_prompt(ConfirmAction::Quit);
+                ControlFlow::Continue(())
             }
+            Event::QuitFromMenu | Event::Quit => self.quit(),
         }
     }
 
@@ -359,6 +471,7 @@ impl<W: DirWatcher> App<W> {
         }
         let old = std::mem::replace(&mut self.config, new);
         self.apply_clipboard(Some(&old.clipboard));
+        self.apply_app_lock(Some(&old.app_lock));
     }
 }
 

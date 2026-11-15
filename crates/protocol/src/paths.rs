@@ -14,6 +14,10 @@ pub const CONFIG_FILE: &str = "config.json";
 pub const TODO_FILE: &str = "todos.json";
 /// Pinned clipboard entries (DPAPI-encrypted) inside the data dir.
 pub const CLIPBOARD_PINS_FILE: &str = "clipboard-pins.bin";
+/// App lock password (DPAPI-encrypted PBKDF2 hash) inside the data dir.
+pub const APP_LOCK_FILE: &str = "app-lock.bin";
+/// Windows App lock has hidden right now (restored after a crash) inside the data dir.
+pub const APP_LOCK_HIDDEN_FILE: &str = "app-lock-hidden.json";
 /// Logs folder name inside the data dir.
 pub const LOGS_DIR: &str = "logs";
 
@@ -70,6 +74,14 @@ impl DataDir {
 
     pub fn clipboard_pins_file(&self) -> PathBuf {
         self.path.join(CLIPBOARD_PINS_FILE)
+    }
+
+    pub fn app_lock_file(&self) -> PathBuf {
+        self.path.join(APP_LOCK_FILE)
+    }
+
+    pub fn app_lock_hidden_file(&self) -> PathBuf {
+        self.path.join(APP_LOCK_HIDDEN_FILE)
     }
 
     pub fn logs_dir(&self) -> PathBuf {

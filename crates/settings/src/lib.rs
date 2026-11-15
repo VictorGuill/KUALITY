@@ -14,6 +14,7 @@ mod recorder;
 pub mod startup;
 mod todo;
 mod ui;
+mod unlock;
 
 use std::process::ExitCode;
 
@@ -134,6 +135,57 @@ pub fn run_clipboard(args: &[String]) -> ExitCode {
     };
     clipboard::run(core, args.iter().any(|a| a == cli::PASTE));
     ExitCode::SUCCESS
+}
+
+/// Runs the App lock prompt until it closes
+/// (`kuality.exe --unlock (--app <path> | --confirm <quit|pause>) --core-pid <n>`,
+/// `docs/specs/app-lock.md`). Never starts the core: only a running core can check the password.
+pub fn run_unlock(args: &[String]) -> ExitCode {
+    init_logging();
+    let _instance = match platform::Instance::acquire_unlock() {
+        Ok(Some(i)) => Some(i),
+        Ok(None) => {
+            // One is open: show it instead.
+            platform::focus_unlock_popup();
+            return ExitCode::SUCCESS;
+        }
+        Err(e) => {
+            log::warn!("single-instance check failed: {e}");
+            None
+        }
+    };
+    let Some(purpose) = unlock::purpose_arg(args) else {
+        log::error!("--unlock needs --app <path> or --confirm <quit|pause>");
+        return ExitCode::FAILURE;
+    };
+    let core = match core_pid_arg(args.iter().cloned()) {
+        Some(pid) => platform::CoreProcess::open(pid),
+        None => platform::find_core(),
+    };
+    let Some(core) = core else {
+        log::info!("Kuality is not running; not opening the App lock prompt");
+        return ExitCode::SUCCESS;
+    };
+    let config = std::fs::read(data_dir().config_file())
+        .ok()
+        .and_then(|b| kuality_protocol::Config::from_json(&b).ok());
+    unlock::run(core, purpose, config);
+    ExitCode::SUCCESS
+}
+
+/// Whether the App lock prompt runs (a mutex lookup: never blocks).
+pub fn unlock_popup_running() -> bool {
+    platform::unlock_popup_running()
+}
+
+/// Brings the App lock prompt to the front. Returns whether it was found.
+pub fn focus_unlock_popup() -> bool {
+    platform::focus_unlock_popup()
+}
+
+/// Closes the App lock prompt if it runs. Returns `false` when none runs.
+pub fn close_unlock_popup() -> bool {
+    platform::close_unlock_popup()
 }
 
 /// Starts the clipboard history popup from the settings window (Enter copies).

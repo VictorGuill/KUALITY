@@ -143,6 +143,7 @@ pub fn changed_sections(old: &Config, new: &Config) -> Vec<&'static str> {
         ("updates", old.updates != new.updates),
         ("todo", old.todo != new.todo),
         ("clipboard", old.clipboard != new.clipboard),
+        ("app_lock", old.app_lock != new.app_lock),
         ("other", old.extra != new.extra),
     ];
     checks

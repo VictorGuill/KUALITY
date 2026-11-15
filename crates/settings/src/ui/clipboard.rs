@@ -5,7 +5,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::setting::{SettingGroup, SettingPage};
 use gpui_kit::component::{Disableable as _, Sizable as _, WindowExt as _, h_flex};
 use gpui_kit::*;
-use kuality_protocol::clipboard::Request;
+use kuality_protocol::clipboard::{Request, Response};
 use kuality_protocol::{DEFAULT_CLIPBOARD_HOTKEY, Lenient};
 
 use super::controls::{
@@ -58,7 +58,7 @@ impl SettingsWindow {
     fn clipboard_request(&mut self, request: Request, done: &'static str, cx: &mut Context<Self>) {
         self.clipboard_note = Some(match self.core_pid {
             None => PipeNote::Failed("Kuality is not running.".into()),
-            Some(pid) => match platform::pipe_request(pid, request) {
+            Some(pid) => match platform::pipe_request::<Response>(pid, request) {
                 Ok((r, _)) if r.ok => PipeNote::Done(done),
                 Ok((r, _)) => PipeNote::Failed(r.error.unwrap_or_default()),
                 Err(e) => PipeNote::Failed(e.to_string()),

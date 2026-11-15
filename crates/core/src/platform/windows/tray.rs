@@ -395,7 +395,7 @@ fn show_menu(hwnd: HWND, x: i32, y: i32) -> Option<Event> {
             MENU_PAUSE => Some(Event::TogglePause),
             MENU_UPDATE if UPDATE.with_borrow(Option::is_some) => Some(Event::InstallUpdate),
             MENU_UPDATE => Some(Event::CheckUpdates),
-            MENU_QUIT => Some(Event::Quit),
+            MENU_QUIT => Some(Event::QuitFromMenu),
             _ => None,
         }
     }

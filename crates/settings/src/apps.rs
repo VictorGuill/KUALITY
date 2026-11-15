@@ -94,7 +94,7 @@ pub fn straight_alpha(bgra: &mut [u8]) {
     }
 }
 
-fn to_image(icon: RawIcon) -> Option<Arc<RenderImage>> {
+pub(crate) fn to_image(icon: RawIcon) -> Option<Arc<RenderImage>> {
     let buffer = image::RgbaImage::from_raw(icon.width, icon.height, icon.bgra)?;
     Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
 }

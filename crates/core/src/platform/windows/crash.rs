@@ -1,4 +1,5 @@
-//! Crash recovery: release injected modifiers on panic or unhandled SEH exception.
+//! Crash recovery: release injected modifiers and show the windows App lock hid, on panic or
+//! unhandled SEH exception.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -18,6 +19,7 @@ pub fn install_crash_guard() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         input::emergency_release();
+        super::app_lock::emergency_restore();
         previous(info);
     }));
 
@@ -31,6 +33,7 @@ pub fn install_crash_guard() {
 
 unsafe extern "system" fn exception_filter(info: *const EXCEPTION_POINTERS) -> i32 {
     input::emergency_release();
+    super::app_lock::emergency_restore();
     // Log lines are written by another thread: give it a moment before the process dies.
     log::logger().flush();
     let prev = PREVIOUS_FILTER.load(Ordering::SeqCst);

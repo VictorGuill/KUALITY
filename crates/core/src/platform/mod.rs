@@ -19,9 +19,10 @@ use crate::overlay::layout::RectPx;
 mod windows;
 #[cfg(windows)]
 pub use self::windows::{
-    ClipboardMonitor, Foreground, Instance, IpcServer, Keyboard, MemoryCipher, Overlay, Putter,
-    Reply, Tray, Watcher, action_thread_init, action_thread_run, action_thread_stop,
-    action_thread_wake, close_shell_flyout, dpi_awareness, foreground_window, init_main_thread,
+    AppLockCommand, AppLockThread, ClipboardMonitor, Commander, Foreground, Instance, IpcServer,
+    Keyboard, LockedExe, MemoryCipher, Overlay, Prompt, Putter, Reply, Tray, Watcher,
+    action_thread_init, action_thread_run, action_thread_stop, action_thread_wake,
+    close_shell_flyout, crypto, dpi_awareness, foreground_window, init_main_thread,
     install_crash_guard, launch, local_time_now, office_key, open_url, open_with_default_app,
     protect, roaming_app_data_dir, set_paste_target, set_tray_paused, set_tray_update,
     shell_flyout_in_front, show_notification, spawn_detached, unprotect,
@@ -59,13 +60,15 @@ pub enum Event {
     Todo(TodoRequest),
     /// The clipboard history hotkey: open the popup, or close it if it is open.
     Clipboard,
-    /// Tray menu: Pause (toggles keyboard features).
+    /// Tray menu: Pause (toggles keyboard features and App lock).
     TogglePause,
     /// Tray menu: Check for updates.
     CheckUpdates,
     /// Tray menu "Install update", or a click on the update notification.
     InstallUpdate,
-    /// Tray menu: Quit, or the OS asked the app to close.
+    /// Tray menu: Quit (asks for the App lock password first when one is set).
+    QuitFromMenu,
+    /// The OS or another process asked the app to close (never asks for a password).
     Quit,
 }
 

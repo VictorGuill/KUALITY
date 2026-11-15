@@ -1,5 +1,5 @@
-//! Named pipe server for the clipboard popup and the settings window
-//! (`\\.\pipe\Kuality.Core.<pid>`, `docs/specs/clipboard.md`).
+//! Named pipe server for the clipboard popup, the App lock prompt and the settings window
+//! (`\\.\pipe\Kuality.Core.<pid>`, `docs/specs/clipboard.md`, `docs/specs/app-lock.md`).
 //!
 //! Thread `kuality-ipc` serves one connection at a time, one request per connection. Only the
 //! current user can open the pipe (explicit DACL), remote clients are rejected, and a client
@@ -40,8 +40,7 @@ use ::windows::Win32::System::Threading::{
     WaitForSingleObject,
 };
 use ::windows::core::{PCWSTR, PWSTR};
-use kuality_protocol::clipboard::{Request, Response};
-use kuality_protocol::ipc;
+use kuality_protocol::ipc::{self, Request, Response};
 
 use super::SendHandle;
 use crate::clipboard::sealed::Plain;
@@ -79,7 +78,8 @@ pub struct Reply {
     pub paste: bool,
 }
 
-/// Handles one request (on the IPC thread).
+/// Handles one request (on the IPC thread). App lock requests carry passwords: the handler
+/// wipes them.
 pub type Handler = Box<dyn FnMut(Request) -> Reply + Send>;
 
 /// Handle to the pipe server thread.
@@ -357,9 +357,7 @@ fn serve(name: &str, sddl: &[u16], stop: HANDLE, mut handler: Handler, timeouts:
             None,
         )
     } {
-        log::error!(
-            "cannot build the pipe security descriptor: {e}; clipboard history popup unavailable"
-        );
+        log::error!("cannot build the pipe security descriptor: {e}; IPC unavailable");
         return;
     }
     let sa = SECURITY_ATTRIBUTES {
@@ -374,7 +372,7 @@ fn serve(name: &str, sddl: &[u16], stop: HANDLE, mut handler: Handler, timeouts:
             // SAFETY: every pipe using the event has been dropped.
             let _ = unsafe { CloseHandle(event) };
         }
-        Err(e) => log::error!("cannot create the IPC event: {e}; clipboard popup unavailable"),
+        Err(e) => log::error!("cannot create the IPC event: {e}; IPC unavailable"),
     }
     // SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW above.
     let _ = unsafe { LocalFree(Some(HLOCAL(sd.0))) };
@@ -475,7 +473,7 @@ fn exchange(pipe: &Pipe, handler: &mut Handler, timeouts: Timeouts) -> bool {
             return false;
         }
     };
-    // Only the operation and entry id: never content.
+    // Only the operation and entry id / app: never content or passwords (redacted `Debug`).
     log::debug!("IPC: {request:?}");
     let reply = handler(request);
     let mut response = reply.response;
@@ -492,6 +490,9 @@ fn exchange(pipe: &Pipe, handler: &mut Handler, timeouts: Timeouts) -> bool {
 
 /// Clears the texts sent in a reply (best effort: they are plain clipboard data).
 fn wipe_response(response: &mut Response) {
+    let Response::Clipboard(response) = response else {
+        return;
+    };
     for e in &mut response.entries {
         if let Some(t) = e.text.take() {
             drop(Plain::from_string(t));
@@ -541,6 +542,7 @@ fn verify_client(pipe: HANDLE, own_exe: Option<&PathBuf>) -> Option<Client> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kuality_protocol::clipboard;
     use std::fs::{File, OpenOptions};
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -557,10 +559,10 @@ mod tests {
     /// Answers `list` with a payload of `payload` bytes and everything else with an error.
     fn server(name: &str, payload: usize, timeouts: Timeouts) -> IpcServer {
         let handler: Handler = Box::new(move |request| Reply {
-            response: match request {
-                Request::List => Response::ok(),
-                _ => Response::error("no"),
-            },
+            response: Response::Clipboard(match request {
+                Request::Clipboard(clipboard::Request::List) => clipboard::Response::ok(),
+                _ => clipboard::Response::error("no"),
+            }),
             payload: Plain::new(vec![7u8; payload]),
             paste: false,
         });
@@ -579,7 +581,7 @@ mod tests {
         }
     }
 
-    fn ask(name: &str, request: Request) -> (Response, Vec<u8>) {
+    fn ask(name: &str, request: clipboard::Request) -> (clipboard::Response, Vec<u8>) {
         let mut pipe = connect(name);
         ipc::write_frame(&mut pipe, &request, &[]).unwrap();
         ipc::read_frame(&mut pipe).unwrap()
@@ -591,11 +593,11 @@ mod tests {
         // Larger than the pipe buffer: the reply is written while the client reads.
         let server = server(&name, 1_000_000, TIMEOUTS);
         for _ in 0..3 {
-            let (response, payload) = ask(&name, Request::List);
+            let (response, payload) = ask(&name, clipboard::Request::List);
             assert!(response.ok);
             assert_eq!(payload.len(), 1_000_000);
             assert!(payload.iter().all(|&b| b == 7));
-            let (response, _) = ask(&name, Request::Clear);
+            let (response, _) = ask(&name, clipboard::Request::Clear);
             assert_eq!(response.error.as_deref(), Some("no"));
         }
         server.stop(Duration::from_secs(2));
@@ -613,9 +615,9 @@ mod tests {
         let silent = connect(&name);
         // Reads nothing of a reply larger than the pipe buffer.
         let mut deaf = connect(&name);
-        ipc::write_frame(&mut deaf, &Request::List, &[]).unwrap();
+        ipc::write_frame(&mut deaf, &clipboard::Request::List, &[]).unwrap();
         let started = Instant::now();
-        let (response, payload) = ask(&name, Request::List);
+        let (response, payload) = ask(&name, clipboard::Request::List);
         assert!(response.ok);
         assert_eq!(payload, vec![7u8; 16]);
         assert!(started.elapsed() < Duration::from_secs(2), "timeouts apply");
@@ -631,9 +633,12 @@ mod tests {
         // Announces a header far above the limit: the server hangs up without reading it.
         pipe.write_all(&(MAX_REQUEST as u32 + 1).to_le_bytes())
             .unwrap();
-        assert!(ipc::read_frame::<Response>(&mut pipe).is_err());
+        assert!(ipc::read_frame::<clipboard::Response>(&mut pipe).is_err());
         drop(pipe);
-        assert!(ask(&name, Request::List).0.ok, "the server goes on");
+        assert!(
+            ask(&name, clipboard::Request::List).0.ok,
+            "the server goes on"
+        );
         server.stop(Duration::from_secs(2));
     }
 

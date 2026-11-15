@@ -26,6 +26,7 @@ pub struct Config {
     pub updates: Updates,
     pub todo: Todo,
     pub clipboard: Clipboard,
+    pub app_lock: AppLock,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -41,6 +42,7 @@ impl Default for Config {
             updates: Updates::default(),
             todo: Todo::default(),
             clipboard: Clipboard::default(),
+            app_lock: AppLock::default(),
             extra: Extra::new(),
         }
     }
@@ -179,6 +181,47 @@ impl Clipboard {
             .valid()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
+    }
+}
+
+/// `app_lock` section (see `docs/specs/app-lock.md`). The password lives in the encrypted
+/// `app-lock.bin`, never here.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppLock {
+    pub enabled: bool,
+    /// The programs that ask for the password when they start.
+    pub apps: Vec<LockedApp>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// One program of `app_lock.apps`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LockedApp {
+    /// Full path of the exe (matched case-insensitively, see `app_lock::normalize_path`).
+    pub path: String,
+    /// Shown in the tab and the prompt; the file name when empty.
+    pub name: String,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+impl LockedApp {
+    /// `name`, or the file name of `path` without `.exe` when the name is empty.
+    pub fn display_name(&self) -> String {
+        let name = self.name.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+        let file = self.path.rsplit(['\\', '/']).next().unwrap_or_default();
+        let stem = file
+            .len()
+            .checked_sub(4)
+            .filter(|&n| file.is_char_boundary(n) && file[n..].eq_ignore_ascii_case(".exe"))
+            .map_or(file, |n| &file[..n]);
+        stem.to_string()
     }
 }
 
@@ -889,6 +932,31 @@ mod tests {
         assert_eq!(c.clipboard.hotkey_text(), Some("hyper+v"));
         assert_eq!(c.clipboard.entries_limit(), 100);
         assert!(c.clipboard.images);
+        assert!(!c.app_lock.enabled);
+        assert!(c.app_lock.apps.is_empty());
+    }
+
+    #[test]
+    fn app_lock_section_values() {
+        let c = Config::from_json(
+            br#"{ "app_lock": { "enabled": true, "apps": [ { "path": "C:\\A\\brave.exe" }, { "path": "x", "name": " Notes ", "y": 2 } ], "z": 1 } }"#,
+        )
+        .unwrap();
+        assert!(c.app_lock.enabled);
+        assert_eq!(c.app_lock.apps.len(), 2);
+        assert_eq!(c.app_lock.apps[0].display_name(), "brave");
+        assert_eq!(c.app_lock.apps[1].display_name(), "Notes");
+        assert_eq!(c.app_lock.apps[1].extra["y"], json!(2));
+        assert_eq!(c.app_lock.extra["z"], json!(1));
+        let back = Config::from_json(&c.to_json_pretty().unwrap()).unwrap();
+        assert_eq!(back, c);
+        let app = |path: &str| LockedApp {
+            path: path.into(),
+            ..LockedApp::default()
+        };
+        assert_eq!(app("C:/x/Tool.EXE").display_name(), "Tool");
+        assert_eq!(app("tool").display_name(), "tool");
+        assert_eq!(app("").display_name(), "");
     }
 
     #[test]
@@ -959,6 +1027,7 @@ mod tests {
         expected["clipboard"] = json!({
             "enabled": false, "hotkey": "hyper+v", "max_entries": 100, "images": true
         });
+        expected["app_lock"] = json!({ "enabled": false, "apps": [] });
         assert_eq!(back, expected);
     }
 
@@ -972,7 +1041,8 @@ mod tests {
             "widgets": { "enabled": false, "hide_on_fullscreen": true, "items": [] },
             "updates": { "check": true, "channel": "stable" },
             "todo": { "enabled": false, "new_items": "top" },
-            "clipboard": { "enabled": false, "hotkey": "hyper+v", "max_entries": 100, "images": true }
+            "clipboard": { "enabled": false, "hotkey": "hyper+v", "max_entries": 100, "images": true },
+            "app_lock": { "enabled": false, "apps": [] }
         });
         assert_eq!(serde_json::to_value(Config::default()).unwrap(), expected);
     }
