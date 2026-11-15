@@ -6,16 +6,18 @@
 //! (`docs/specs/shortcuts.md`). Phase 3: taskbar overlay and text widget (`docs/specs/overlay.md`).
 //! Updates: `docs/specs/updates.md`. To-do and the taskbar bar: `docs/specs/todo.md` (the
 //! popup is a third mode of this exe, `--todo`). Clipboard history: `docs/specs/clipboard.md`
-//! (popup `--clipboard`).
+//! (popup `--clipboard`). App lock: `docs/specs/app-lock.md` (prompt `--unlock`).
 
 // No console window in release builds (every mode); debug builds keep it for log output.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actions;
 mod app;
+mod app_lock;
 mod clipboard;
 mod config_store;
 mod hyperkey;
+mod ipc;
 mod logging;
 mod overlay;
 mod platform;
@@ -52,6 +54,8 @@ fn main() -> ExitCode {
         Some(cli::TODO) => kuality_settings::run_todo(&args[1..]),
         // The clipboard history popup (GPUI too).
         Some(cli::CLIPBOARD) => kuality_settings::run_clipboard(&args[1..]),
+        // The App lock prompt (GPUI too).
+        Some(cli::UNLOCK) => kuality_settings::run_unlock(&args[1..]),
         // Start at logon: `--startup <off|on|normal|elevated>` (installer, scripts) and the
         // elevated helper it starts through UAC.
         Some(cli::STARTUP) => kuality_settings::startup::cli(&args[1..]),
@@ -234,10 +238,20 @@ fn run_core(args: &[String]) -> ExitCode {
         }
     };
 
+    let wake: app_lock::Wake = {
+        let waker = tray.waker();
+        Arc::new(move || waker.wake())
+    };
+    let files = app::DataFiles {
+        config: config_path,
+        pins: data_dir.clipboard_pins_file(),
+        app_lock: data_dir.app_lock_file(),
+        app_lock_hidden: data_dir.app_lock_hidden_file(),
+    };
     let mut app = App::new(
         loaded.config,
-        config_path,
-        data_dir.clipboard_pins_file(),
+        files,
+        wake,
         rx,
         todo_rx,
         watcher,

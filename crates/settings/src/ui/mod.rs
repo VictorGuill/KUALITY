@@ -2,6 +2,7 @@
 //! the key recorder; each tab is a page of gpui-component's `Settings` and lives in its own
 //! module.
 
+mod app_lock;
 mod clipboard;
 mod controls;
 mod general;
@@ -121,6 +122,8 @@ pub struct SettingsWindow {
     pub(crate) core_pid: Option<u32>,
     /// Result of the last Clipboard tab button.
     pub(crate) clipboard_note: Option<clipboard::PipeNote>,
+    /// App lock tab state (password gate, inputs, running apps).
+    pub(crate) app_lock: app_lock::AppLockView,
     _poll: Task<()>,
     _subs: Vec<Subscription>,
 }
@@ -132,6 +135,7 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let config_path_for_lock = config_path.clone();
         let doc = Document::load(config_path);
         let core_pid = match &core {
             CoreLink::Attached(core) => Some(core.pid),
@@ -221,6 +225,7 @@ impl SettingsWindow {
             todo_label: None,
             core_pid,
             clipboard_note: None,
+            app_lock: app_lock::AppLockView::new(&config_path_for_lock),
             _poll: poll,
             _subs: subs,
         }
@@ -281,6 +286,7 @@ impl SettingsWindow {
             self.core_running = running;
             cx.notify();
         }
+        self.check_app_lock_secret(cx);
         match self.doc.poll() {
             PollOutcome::Unchanged => {}
             PollOutcome::Reloaded => {
@@ -508,6 +514,7 @@ impl Render for SettingsWindow {
             self.shortcuts_page(&weak, cx),
             self.todo_page(&weak, cx),
             self.clipboard_page(&weak, cx),
+            self.app_lock_page(&weak, cx),
         ];
         let banner = self.render_banner();
         v_flex()

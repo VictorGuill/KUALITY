@@ -25,6 +25,9 @@ use windows::Win32::Graphics::Gdi::{
     DeleteObject, GetDIBits, GetMonitorInfoW, GetObjectW, HBITMAP, MONITOR_DEFAULTTONEAREST,
     MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
 };
+use windows::Win32::Storage::FileSystem::{
+    GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+};
 use windows::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
@@ -41,16 +44,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, FOLDERID_AppsFolder, FOLDERID_RoamingAppData, IEnumShellItems, IShellItem,
-    IShellItemImageFactory, KF_FLAG_DEFAULT, SHGetKnownFolderItem, SHGetKnownFolderPath, SIGDN,
-    SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, SIIGBF_ICONONLY,
+    IShellItemImageFactory, KF_FLAG_DEFAULT, SHCreateItemFromParsingName, SHGetKnownFolderItem,
+    SHGetKnownFolderPath, SIGDN, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, SIIGBF_ICONONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, EnumWindows, FindWindowW, GetCursorPos, GetForegroundWindow,
-    GetMessageW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HC_ACTION, IsIconic,
-    IsWindowVisible, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, PostMessageW, PostQuitMessage,
-    PostThreadMessageW, SW_RESTORE, SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow,
-    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_CLOSE, WM_KEYDOWN,
-    WM_SYSKEYDOWN, WM_TIMER,
+    AllowSetForegroundWindow, CallNextHookEx, DispatchMessageW, EnumWindows, FindWindowW, GW_OWNER,
+    GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindow, GetWindowLongW,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HC_ACTION, IsIconic, IsWindowVisible,
+    KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, PostMessageW, PostQuitMessage, PostThreadMessageW,
+    SW_RESTORE, SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow, TranslateMessage,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_CLOSE, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, Interface as _, PCWSTR, PWSTR, w};
 
@@ -70,6 +74,10 @@ const TODO_PEEK_MUTEX: &str = r"Local\Kuality.TodoPeek";
 pub const CLIPBOARD_WINDOW_TITLE: &str = "Kuality Clipboard";
 /// Held by the clipboard history popup while it runs.
 const CLIPBOARD_MUTEX: &str = r"Local\Kuality.Clipboard";
+/// Title of the App lock prompt, used by the core to find, focus and close it.
+pub const UNLOCK_WINDOW_TITLE: &str = "Kuality unlock";
+/// Held by the App lock prompt while it runs.
+const UNLOCK_MUTEX: &str = r"Local\Kuality.Unlock";
 const CORE_MUTEX: &str = r"Local\Kuality.Core";
 /// Class of the core's hidden main window (owns the tray icon).
 const CORE_WINDOW_CLASS: PCWSTR = w!("Kuality.Core");
@@ -117,6 +125,11 @@ impl Instance {
     /// `None` if another clipboard popup is already running.
     pub fn acquire_clipboard() -> io::Result<Option<Self>> {
         Self::acquire_named(CLIPBOARD_MUTEX)
+    }
+
+    /// `None` if another App lock prompt is already running.
+    pub fn acquire_unlock() -> io::Result<Option<Self>> {
+        Self::acquire_named(UNLOCK_MUTEX)
     }
 
     /// Marks the to-do popup as "shown on hover" while held.
@@ -297,6 +310,195 @@ pub fn close_clipboard_popup() -> bool {
     true
 }
 
+// ---------------------------------------------------------------------------------------------
+// App lock prompt and tab.
+
+/// Whether an App lock prompt runs in this session (its mutex exists).
+pub fn unlock_popup_running() -> bool {
+    mutex_exists(UNLOCK_MUTEX)
+}
+
+/// Brings the running App lock prompt to the front. Returns whether it was found.
+pub fn focus_unlock_popup() -> bool {
+    match find_own_window(UNLOCK_WINDOW_TITLE) {
+        Some(hwnd) => {
+            // SAFETY: plain calls; a stale handle only makes them fail.
+            unsafe {
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
+            }
+            force_foreground(hwnd)
+        }
+        None => false,
+    }
+}
+
+/// Closes the running App lock prompt (App lock turned off, Kuality quitting).
+pub fn close_unlock_popup() -> bool {
+    if !unlock_popup_running() {
+        return false;
+    }
+    if let Some(hwnd) = find_own_window(UNLOCK_WINDOW_TITLE) {
+        // SAFETY: posting never blocks; a stale handle only makes it fail.
+        let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+    }
+    true
+}
+
+/// Lets the core bring an unlocked app to the front (this prompt is in front now).
+pub fn allow_foreground(pid: u32) {
+    // SAFETY: plain call.
+    let _ = unsafe { AllowSetForegroundWindow(pid) };
+}
+
+/// The description of an exe (`FileDescription` of its version resource, e.g. "Brave Browser"),
+/// or `None`.
+pub fn exe_description(path: &str) -> Option<String> {
+    let wpath = wide(path);
+    // SAFETY: the buffer is sized by the first call; VerQueryValueW returns pointers into it,
+    // read while it is alive.
+    unsafe {
+        let size = GetFileVersionInfoSizeW(PCWSTR(wpath.as_ptr()), None);
+        if size == 0 {
+            return None;
+        }
+        let mut data = vec![0u8; size as usize];
+        GetFileVersionInfoW(PCWSTR(wpath.as_ptr()), None, size, data.as_mut_ptr().cast()).ok()?;
+        let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut len = 0u32;
+        let mut langs: Vec<(u16, u16)> = Vec::new();
+        if VerQueryValueW(
+            data.as_ptr().cast(),
+            w!("\\VarFileInfo\\Translation"),
+            &mut ptr,
+            &mut len,
+        )
+        .as_bool()
+            && !ptr.is_null()
+        {
+            let pairs = std::slice::from_raw_parts(ptr as *const u16, (len / 2) as usize);
+            langs.extend(pairs.as_chunks::<2>().0.iter().map(|p| (p[0], p[1])));
+        }
+        langs.extend([(0x0409, 0x04b0), (0x0409, 0x04e4), (0x0000, 0x04b0)]);
+        for (lang, cp) in langs {
+            let key = wide(&format!(
+                "\\StringFileInfo\\{lang:04x}{cp:04x}\\FileDescription"
+            ));
+            if VerQueryValueW(
+                data.as_ptr().cast(),
+                PCWSTR(key.as_ptr()),
+                &mut ptr,
+                &mut len,
+            )
+            .as_bool()
+                && !ptr.is_null()
+                && len > 1
+            {
+                let text = std::slice::from_raw_parts(ptr as *const u16, len as usize);
+                let text = String::from_utf16_lossy(text);
+                let text = text.trim_end_matches('\0').trim();
+                if !text.is_empty() {
+                    return Some(text.to_string());
+                }
+            }
+        }
+        None
+    }
+}
+
+/// The icon of a file (an exe) at [`ICON_PX`], or `None`. Initializes COM for the call, so it
+/// can run on any thread.
+pub fn file_icon(path: &str) -> Option<RawIcon> {
+    let wpath = wide(path);
+    // SAFETY: balanced CoInitializeEx / CoUninitialize; the item is dropped before.
+    unsafe {
+        let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        let icon = SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(wpath.as_ptr()), None)
+            .ok()
+            .and_then(|item| item_icon(&item));
+        if com.is_ok() {
+            CoUninitialize();
+        }
+        icon
+    }
+}
+
+/// A program with a visible window now: its exe path and the title of one of its windows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningApp {
+    pub path: String,
+    pub title: String,
+}
+
+/// Programs with a visible, titled top-level window (not tool windows), one entry per exe, in
+/// window z-order. This process is left out.
+pub fn running_apps() -> Vec<RunningApp> {
+    unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: `lparam` is the `&mut Vec<HWND>` passed below, alive during EnumWindows.
+        let list = unsafe { &mut *(lparam.0 as *mut Vec<HWND>) };
+        list.push(hwnd);
+        true.into()
+    }
+    let mut windows: Vec<HWND> = Vec::new();
+    // SAFETY: the callback only runs during the call and gets a pointer to `windows`.
+    let _ = unsafe {
+        EnumWindows(
+            Some(collect),
+            LPARAM(&mut windows as *mut Vec<HWND> as isize),
+        )
+    };
+    let own = std::process::id();
+    let mut out: Vec<RunningApp> = Vec::new();
+    for hwnd in windows {
+        // SAFETY: plain queries on handles from EnumWindows; stale handles give zeros.
+        let (visible, ex, owner, pid, title) = unsafe {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            let mut buf = [0u16; 256];
+            let n = GetWindowTextW(hwnd, &mut buf);
+            (
+                IsWindowVisible(hwnd).as_bool(),
+                GetWindowLongW(hwnd, GWL_EXSTYLE) as u32,
+                GetWindow(hwnd, GW_OWNER).is_ok(),
+                pid,
+                String::from_utf16_lossy(&buf[..n.max(0) as usize]),
+            )
+        };
+        let tool = ex & WS_EX_TOOLWINDOW.0 != 0 && ex & WS_EX_APPWINDOW.0 == 0;
+        if !visible || tool || owner || pid == 0 || pid == own || title.trim().is_empty() {
+            continue;
+        }
+        // SAFETY: the handle is checked and closed once.
+        let path = unsafe {
+            let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+                continue;
+            };
+            let mut buf = [0u16; 1024];
+            let mut len = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(
+                h,
+                PROCESS_NAME_WIN32,
+                PWSTR(buf.as_mut_ptr()),
+                &mut len,
+            )
+            .is_ok();
+            let _ = CloseHandle(h);
+            if !ok {
+                continue;
+            }
+            String::from_utf16_lossy(&buf[..len as usize])
+        };
+        if !out.iter().any(|a| a.path.eq_ignore_ascii_case(&path)) {
+            out.push(RunningApp {
+                path,
+                title: title.trim().to_string(),
+            });
+        }
+    }
+    out
+}
+
 /// Center of the foreground window (physical px): the popup opens on its monitor.
 pub fn foreground_center() -> Option<(i32, i32)> {
     let mut r = RECT::default();
@@ -314,7 +516,7 @@ pub fn foreground_center() -> Option<(i32, i32)> {
 /// Why a pipe request failed.
 #[derive(Debug)]
 pub enum PipeError {
-    /// No pipe: the core is not running or its clipboard history is off.
+    /// No pipe: the core is not running, or neither the clipboard history nor App lock is on.
     NotRunning,
     Other(String),
 }
@@ -322,7 +524,7 @@ pub enum PipeError {
 impl std::fmt::Display for PipeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotRunning => f.write_str("Kuality's clipboard history is not running."),
+            Self::NotRunning => f.write_str("Kuality is not running, or this feature is off."),
             Self::Other(e) => f.write_str(e),
         }
     }
@@ -330,10 +532,10 @@ impl std::fmt::Display for PipeError {
 
 /// Sends one request to the core's pipe and reads the reply. Checks that the pipe is served by
 /// process `core_pid`.
-pub fn pipe_request(
+pub fn pipe_request<Resp: serde::de::DeserializeOwned>(
     core_pid: u32,
-    request: kuality_protocol::clipboard::Request,
-) -> Result<(kuality_protocol::clipboard::Response, Vec<u8>), PipeError> {
+    request: impl serde::Serialize,
+) -> Result<(Resp, Vec<u8>), PipeError> {
     use std::os::windows::io::AsRawHandle;
     const ERROR_PIPE_BUSY: i32 = 231;
     let name = kuality_protocol::ipc::pipe_name(core_pid);
@@ -357,7 +559,7 @@ pub fn pipe_request(
     let checked = unsafe { GetNamedPipeServerProcessId(HANDLE(file.as_raw_handle()), &mut server) };
     if checked.is_err() || server != core_pid {
         return Err(PipeError::Other(
-            "The clipboard pipe is not served by Kuality.".into(),
+            "The pipe is not served by Kuality.".into(),
         ));
     }
     let io_error = |e: io::Error| PipeError::Other(e.to_string());

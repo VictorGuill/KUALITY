@@ -3361,6 +3361,7 @@ dependencies = [
  "kuality-update",
  "log",
  "raw-window-handle",
+ "serde",
  "serde_json",
  "windows 0.62.2",
 ]

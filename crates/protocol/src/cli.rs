@@ -8,6 +8,8 @@ pub const SETTINGS: &str = "--settings";
 pub const TODO: &str = "--todo";
 /// The clipboard history popup.
 pub const CLIPBOARD: &str = "--clipboard";
+/// The App lock prompt: `--unlock --app <path>` or `--unlock --confirm <quit|pause>`.
+pub const UNLOCK: &str = "--unlock";
 /// Start at logon: `--startup <off|on|normal|elevated>`.
 pub const STARTUP: &str = "--startup";
 /// The elevated helper `--startup` starts through UAC.
@@ -22,3 +24,7 @@ pub const AT: &str = "--at";
 pub const HOVER: &str = "--hover";
 /// Clipboard popup, `--paste`: opened by the hotkey, so Enter pastes into the window in front.
 pub const PASTE: &str = "--paste";
+/// App lock prompt, `--app <path>`: the locked program to unlock.
+pub const APP: &str = "--app";
+/// App lock prompt, `--confirm <quit|pause>`: a tray command that needs the password.
+pub const CONFIRM: &str = "--confirm";

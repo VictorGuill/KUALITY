@@ -15,7 +15,7 @@ pub(crate) const ACTIVATION_GRACE: Duration = Duration::from_millis(400);
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
-        AppWindow, Clipboard, Keyboard, ListTodo, Pin, PinOff, Trash, Type
+        AppWindow, Clipboard, Keyboard, ListTodo, Lock, Pin, PinOff, Trash, Type
     ]
 );
 

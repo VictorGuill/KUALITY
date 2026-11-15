@@ -1,8 +1,9 @@
 //! Clipboard history (`docs/specs/clipboard.md`).
 //!
-//! While `clipboard.enabled`, [`ClipboardService`] runs two threads: the clipboard listener
-//! (records every change into the [`History`], encrypted in memory) and the IPC pipe server
-//! (the popup and the settings window list, paste, pin and delete entries). Pinned entries are
+//! While `clipboard.enabled`, [`ClipboardService`] runs the clipboard listener (records every
+//! change into the [`History`], encrypted in memory) and gives the core's pipe
+//! ([`crate::ipc::IpcHub`]) a handler, so the popup and the settings window list, paste, pin and
+//! delete entries. Pinned entries are
 //! saved to `clipboard-pins.bin`, encrypted with DPAPI; nothing else touches the disk.
 
 pub mod history;
@@ -18,13 +19,15 @@ use std::time::Duration;
 use kuality_protocol::clipboard::{
     EntryKind, PinRecord, Request, Response, THUMB_PX, decode_pins, encode_pins,
 };
+use kuality_protocol::ipc::Response as IpcResponse;
 use kuality_protocol::{Clipboard, store, unix_now};
 
-use crate::platform::{self, ClipboardMonitor, IpcServer, MemoryCipher, Putter, Reply};
+use crate::ipc::ClipboardHandler;
+use crate::platform::{self, ClipboardMonitor, MemoryCipher, Putter, Reply};
 use history::{Added, Content, History, Skip};
 use sealed::Plain;
 
-/// How long stopping waits for each thread.
+/// How long stopping waits for the listener thread.
 const STOP_TIMEOUT: Duration = Duration::from_secs(1);
 
 type SharedHistory = Arc<Mutex<History<MemoryCipher>>>;
@@ -39,11 +42,11 @@ pub struct ClipboardService {
     history: SharedHistory,
     images: Arc<AtomicBool>,
     monitor: Option<ClipboardMonitor>,
-    server: Option<IpcServer>,
+    pins_path: PathBuf,
 }
 
 impl ClipboardService {
-    /// Loads the pins and starts the listener and the pipe server.
+    /// Loads the pins and starts the listener.
     pub fn start(config: &Clipboard, pins_path: PathBuf) -> io::Result<Self> {
         let history: SharedHistory = Arc::new(Mutex::new(History::new(
             MemoryCipher,
@@ -82,24 +85,22 @@ impl ClipboardService {
             })
         };
         let monitor = ClipboardMonitor::start(on_content, Arc::clone(&images))?;
-        let handler = {
-            let history = Arc::clone(&history);
-            let putter = monitor.putter();
-            Box::new(move |request| handle(&history, &putter, &pins_path, request))
-        };
-        let server = match IpcServer::start(handler) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                log::error!("cannot start the IPC pipe: {e}; the history popup cannot read it");
-                None
-            }
-        };
         Ok(Self {
             history,
             images,
             monitor: Some(monitor),
-            server,
+            pins_path,
         })
+    }
+
+    /// The pipe handler of the history (list, get, paste, pin…).
+    pub fn ipc_handler(&self) -> Option<ClipboardHandler> {
+        let history = Arc::clone(&self.history);
+        let putter = self.monitor.as_ref()?.putter();
+        let pins_path = self.pins_path.clone();
+        Some(Box::new(move |request| {
+            handle(&history, &putter, &pins_path, request)
+        }))
     }
 
     /// Applies a changed `clipboard` section (while it stays enabled).
@@ -108,11 +109,8 @@ impl ClipboardService {
         self.images.store(config.images, Ordering::Relaxed);
     }
 
-    /// Stops both threads and forgets the history (pins stay on disk).
+    /// Stops the listener and forgets the history (pins stay on disk).
     pub fn shutdown(&mut self) {
-        if let Some(s) = self.server.take() {
-            s.stop(STOP_TIMEOUT);
-        }
         if let Some(m) = self.monitor.take() {
             m.stop(STOP_TIMEOUT);
         }
@@ -131,7 +129,7 @@ impl Drop for ClipboardService {
 /// Answers one pipe request.
 fn handle(history: &SharedHistory, putter: &Putter, pins_path: &Path, request: Request) -> Reply {
     let reply = |response: Response| Reply {
-        response,
+        response: IpcResponse::Clipboard(response),
         payload: Plain::default(),
         paste: false,
     };
@@ -140,22 +138,22 @@ fn handle(history: &SharedHistory, putter: &Putter, pins_path: &Path, request: R
         Request::List => {
             let (entries, thumbs) = lock(history).list();
             Reply {
-                response: Response {
+                response: IpcResponse::Clipboard(Response {
                     ok: true,
                     error: None,
                     entries,
-                },
+                }),
                 payload: thumbs,
                 paste: false,
             }
         }
         Request::Get { id } => match lock(history).get(id) {
             Some((info, data)) => Reply {
-                response: Response {
+                response: IpcResponse::Clipboard(Response {
                     ok: true,
                     error: None,
                     entries: vec![info],
-                },
+                }),
                 payload: data,
                 paste: false,
             },
@@ -172,7 +170,7 @@ fn handle(history: &SharedHistory, putter: &Putter, pins_path: &Path, request: R
             lock(history).touch(id, unix_now());
             log::info!("clipboard: entry #{id} put on the clipboard");
             Reply {
-                response: Response::ok(),
+                response: IpcResponse::Clipboard(Response::ok()),
                 payload: Plain::default(),
                 paste: matches!(request, Request::Paste { .. }),
             }

@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 /// Characters of an entry's text sent with `list` (search and list rows); `get` sends all.
 pub const LIST_TEXT_CHARS: usize = 2000;
+/// Error of every clipboard request while the history is off (the pipe may run for App lock):
+/// clients show "history is off" for it.
+pub const HISTORY_OFF: &str = "Kuality's clipboard history is off.";
 /// Longest side of an image thumbnail (pixels).
 pub const THUMB_PX: u32 = 96;
 

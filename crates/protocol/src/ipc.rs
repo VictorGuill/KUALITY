@@ -1,13 +1,33 @@
 //! Local IPC with the core: a named pipe per core process, one request per connection
-//! (`docs/specs/clipboard.md`). OS-independent: framing over any `Read` / `Write`.
+//! (`docs/specs/clipboard.md`, `docs/specs/app-lock.md`). OS-independent: framing over any
+//! `Read` / `Write`, and the requests the core accepts.
 //!
 //! A frame is `u32` LE header length, the JSON header, `u32` LE payload length, then the
 //! payload (binary, may be empty). Requests use an empty payload.
 
 use std::io::{self, Read, Write};
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+
+use crate::{app_lock, clipboard};
+
+/// Any request the core's pipe accepts. Clients send the inner request; the op names of the
+/// two kinds never collide, so the core tells them apart by trying each.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Request {
+    Clipboard(clipboard::Request),
+    AppLock(app_lock::Request),
+}
+
+/// The reply to a [`Request`]: the response type of its kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum Response {
+    Clipboard(clipboard::Response),
+    AppLock(app_lock::Response),
+}
 
 /// Largest JSON header accepted.
 pub const MAX_HEADER: usize = 16 * 1024 * 1024;
@@ -121,6 +141,33 @@ mod tests {
         write_frame(&mut with_payload, &json!({ "op": "list" }), &[1]).unwrap();
         let err = read_frame_limited::<Value>(&mut with_payload.as_slice(), 64, 0).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData, "payload");
+    }
+
+    #[test]
+    fn requests_of_both_kinds_are_recognized() {
+        let decode = |v: Value| serde_json::from_value::<Request>(v).unwrap();
+        assert_eq!(
+            decode(json!({ "op": "get", "id": 3 })),
+            Request::Clipboard(clipboard::Request::Get { id: 3 })
+        );
+        assert_eq!(
+            decode(json!({ "op": "clear" })),
+            Request::Clipboard(clipboard::Request::Clear)
+        );
+        assert_eq!(
+            decode(json!({ "op": "app_lock_verify", "password": "pw" })),
+            Request::AppLock(app_lock::Request::AppLockVerify {
+                password: "pw".into()
+            })
+        );
+        assert!(serde_json::from_value::<Request>(json!({ "op": "nope" })).is_err());
+        // Clients send the inner request: same bytes as the wrapped one.
+        let inner = serde_json::to_value(app_lock::Request::AppLockStatus).unwrap();
+        let outer =
+            serde_json::to_value(Request::AppLock(app_lock::Request::AppLockStatus)).unwrap();
+        assert_eq!(inner, outer);
+        let r = serde_json::to_value(Response::AppLock(app_lock::Response::error("no"))).unwrap();
+        assert_eq!(r["error"], json!("no"));
     }
 
     #[test]

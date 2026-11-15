@@ -15,11 +15,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use ::windows::Win32::Foundation::{
-    CloseHandle, GlobalFree, HANDLE, HGLOBAL, HLOCAL, HWND, LPARAM, LRESULT, LocalFree, WPARAM,
+    CloseHandle, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, WPARAM,
 };
 use ::windows::Win32::Security::Cryptography::{
-    CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CRYPTPROTECTMEMORY_SAME_PROCESS,
-    CryptProtectData, CryptProtectMemory, CryptUnprotectData, CryptUnprotectMemory,
+    CRYPTPROTECTMEMORY_SAME_PROCESS, CryptProtectMemory, CryptUnprotectMemory,
 };
 use ::windows::Win32::System::DataExchange::{
     AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData,
@@ -44,7 +43,7 @@ use kuality_protocol::clipboard::{EntryKind, THUMB_PX};
 use super::input;
 use crate::clipboard::history::{Content, MAX_TEXT_BYTES};
 use crate::clipboard::image;
-use crate::clipboard::sealed::{Cipher, Plain, wipe};
+use crate::clipboard::sealed::{Cipher, Plain};
 use crate::platform::Foreground;
 
 const CLASS_NAME: PCWSTR = w!("KualityClipboard");
@@ -93,59 +92,14 @@ impl Cipher for MemoryCipher {
     }
 }
 
-fn blob(data: &[u8]) -> CRYPT_INTEGER_BLOB {
-    CRYPT_INTEGER_BLOB {
-        cbData: data.len() as u32,
-        pbData: data.as_ptr() as *mut u8,
-    }
-}
-
-/// Encrypts `data` for the current Windows user (DPAPI).
+/// Encrypts `data` for the current Windows user (DPAPI, pins entropy).
 pub fn protect(data: &[u8]) -> io::Result<Vec<u8>> {
-    let input = blob(data);
-    let entropy = blob(PINS_ENTROPY);
-    let mut out = CRYPT_INTEGER_BLOB::default();
-    // SAFETY: the blobs point to live buffers for the call; `out` is freed below with LocalFree.
-    unsafe {
-        CryptProtectData(
-            &input,
-            PCWSTR::null(),
-            Some(&entropy),
-            None,
-            None,
-            CRYPTPROTECT_UI_FORBIDDEN,
-            &mut out,
-        )
-        .map_err(io::Error::other)?;
-        let bytes = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
-        let _ = LocalFree(Some(HLOCAL(out.pbData.cast())));
-        Ok(bytes)
-    }
+    super::crypto::dpapi_protect(data, PINS_ENTROPY)
 }
 
 /// Decrypts a [`protect`] blob (fails for another user or PC).
 pub fn unprotect(data: &[u8]) -> io::Result<Plain> {
-    let input = blob(data);
-    let entropy = blob(PINS_ENTROPY);
-    let mut out = CRYPT_INTEGER_BLOB::default();
-    // SAFETY: as in `protect`; the plain output is copied, then wiped before it is freed.
-    unsafe {
-        CryptUnprotectData(
-            &input,
-            None,
-            Some(&entropy),
-            None,
-            None,
-            CRYPTPROTECT_UI_FORBIDDEN,
-            &mut out,
-        )
-        .map_err(io::Error::other)?;
-        let plain = std::slice::from_raw_parts_mut(out.pbData, out.cbData as usize);
-        let bytes = Plain::new(plain.to_vec());
-        wipe(plain);
-        let _ = LocalFree(Some(HLOCAL(out.pbData.cast())));
-        Ok(bytes)
-    }
+    super::crypto::dpapi_unprotect(data, PINS_ENTROPY)
 }
 
 // ---------------------------------------------------------------------------------------------

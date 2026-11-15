@@ -22,7 +22,7 @@ use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::{ActiveTheme as _, Icon, IndexPath, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use kuality_protocol::clipboard::{EntryInfo, EntryKind, Request};
+use kuality_protocol::clipboard::{EntryInfo, EntryKind, HISTORY_OFF, Request, Response};
 use kuality_protocol::unix_now;
 
 use crate::platform::{self, CLIPBOARD_WINDOW_TITLE, ScreenRect};
@@ -159,7 +159,7 @@ fn load(core_pid: Option<u32>) -> Load {
     let Some(pid) = core_pid else {
         return Load::Off;
     };
-    match platform::pipe_request(pid, Request::List) {
+    match platform::pipe_request::<Response>(pid, Request::List) {
         Ok((response, payload)) if response.ok => {
             let mut at = 0usize;
             let items = response
@@ -187,6 +187,8 @@ fn load(core_pid: Option<u32>) -> Load {
                 .collect();
             Load::Ready(items)
         }
+        // The pipe runs for App lock, the history is off.
+        Ok((response, _)) if response.error.as_deref() == Some(HISTORY_OFF) => Load::Off,
         Ok((response, _)) => Load::Error(response.error.unwrap_or_default()),
         Err(platform::PipeError::NotRunning) => Load::Off,
         Err(platform::PipeError::Other(e)) => Load::Error(e),
@@ -621,7 +623,7 @@ impl ClipboardPopup {
         cx.spawn(async move |this, cx| {
             let fetched = cx
                 .background_executor()
-                .spawn(async move { platform::pipe_request(pid, Request::Get { id }) })
+                .spawn(async move { platform::pipe_request::<Response>(pid, Request::Get { id }) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 // The selection may have moved on while this was read.
@@ -669,7 +671,7 @@ impl ClipboardPopup {
         } else {
             Request::Copy { id }
         };
-        match platform::pipe_request(pid, request) {
+        match platform::pipe_request::<Response>(pid, request) {
             Ok((r, _)) if r.ok => cx.quit(),
             Ok((r, _)) => self.error = r.error,
             Err(e) => self.error = Some(e.to_string()),
@@ -682,7 +684,7 @@ impl ClipboardPopup {
         let Some(pid) = self.core_pid else {
             return;
         };
-        self.error = match platform::pipe_request(pid, request) {
+        self.error = match platform::pipe_request::<Response>(pid, request) {
             Ok((r, _)) if r.ok => None,
             Ok((r, _)) => r.error,
             Err(e) => Some(e.to_string()),
