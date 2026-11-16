@@ -144,7 +144,7 @@ Done before Phase 4 (user request, 2026-11-11); see `docs/specs/clipboard.md`. R
 
 ## Phase 10 — App lock ✅
 
-Done before Phase 4 (user request, 2026-11-15; beads `kuality-hvz`); see `docs/specs/app-lock.md`.
+Done before Phase 4 (user request, 2026-11-15; beads `kuality-hvz`); see `docs/specs/app-lock.md`. Released in `v1.1.0`.
 
 - [x] Spec `docs/specs/app-lock.md`
 - [x] `app_lock` config section, App lock requests on the core's pipe (`protocol::app_lock`, `protocol::ipc::Request`)
