@@ -78,7 +78,7 @@ Pins file `clipboard-pins.bin` (data dir, next to `config.json`):
 ## Out of scope
 
 - Rich text / HTML / RTF (only plain text is kept), copied files (`CF_HDROP`), colors, links with titles.
-- An app ignore list, clear-on-lock, a "keep popup ready" mode (GPUI start ≈ 0.3–0.5 s), pinned groups / ordering, editing entries, sync.
+- An app ignore list, clear-on-lock, a "keep popup ready" mode (GPUI start ≈ 0.15–0.25 s; the history is fetched over the pipe on a thread while GPUI starts, 2026-11-17), pinned groups / ordering, editing entries, sync.
 - Moving settings changes to the named pipe.
 
 ## Security summary
