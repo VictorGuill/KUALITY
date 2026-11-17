@@ -7,6 +7,7 @@ All notable changes to Kuality. Versions follow [Semantic Versioning](https://se
 ### Changed
 
 - **Faster popups** — the to-do list now opens on hover almost at once: Kuality starts it in the background as soon as the mouse reaches `TO DO`, and it appears about 0.1 s later (was 250 ms plus the time to start, about 0.4 s). A click on `TO DO` while the mouse rests there opens it faster too, and the "loading" cursor no longer shows next to the pointer. The clipboard history (Hyper+V) also opens a little faster.
+- **Clipboard history** — the popup now opens with your latest copy selected instead of the first pinned entry, so Enter pastes what you just copied.
 
 ## [1.1.0] - 2026-11-16
 
