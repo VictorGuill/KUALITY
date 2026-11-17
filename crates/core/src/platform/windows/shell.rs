@@ -3,9 +3,12 @@
 use std::io;
 use std::path::Path;
 
-use ::windows::Win32::Foundation::CloseHandle;
+use ::windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
 use ::windows::Win32::System::Environment::ExpandEnvironmentStringsW;
-use ::windows::Win32::System::Threading::GetProcessId;
+use ::windows::Win32::System::Threading::{
+    CreateProcessW, GetProcessId, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
+    STARTF_FORCEOFFFEEDBACK, STARTUPINFOW, WaitForSingleObject,
+};
 use ::windows::Win32::UI::Shell::{
     SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
     ShellExecuteExW, ShellExecuteW,
@@ -13,7 +16,7 @@ use ::windows::Win32::UI::Shell::{
 use ::windows::Win32::UI::WindowsAndMessaging::{
     ASFW_ANY, AllowSetForegroundWindow, SW_SHOWNORMAL,
 };
-use ::windows::core::{PCWSTR, w};
+use ::windows::core::{PCWSTR, PWSTR, w};
 
 use super::focus::{self, Foreground};
 use super::{input, wide};
@@ -71,13 +74,100 @@ pub fn open_with_default_app(path: &Path) -> io::Result<()> {
 pub fn spawn_detached(exe: &Path, args: &[String]) -> io::Result<()> {
     // SAFETY: plain call without pointers. Failure only means the child may open behind.
     let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
-    let mut cmd = std::process::Command::new(exe);
-    cmd.args(args);
-    if let Some(dir) = exe.parent() {
-        cmd.current_dir(dir);
+    // The handle is dropped: the process keeps running on its own.
+    spawn_quiet(exe, args).map(drop)
+}
+
+/// A process started by [`spawn_quiet`]; dropping it closes the handle (the process runs on).
+#[derive(Debug)]
+pub struct Process {
+    handle: HANDLE,
+    pub pid: u32,
+}
+
+impl Process {
+    /// Whether the process still runs.
+    pub fn alive(&self) -> bool {
+        // SAFETY: `handle` is a live process handle owned by this value.
+        unsafe { WaitForSingleObject(self.handle, 0) == WAIT_TIMEOUT }
     }
-    // The child handle is dropped: the process keeps running on its own.
-    cmd.spawn().map(drop)
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        // SAFETY: the handle is owned by this value and closed once.
+        let _ = unsafe { CloseHandle(self.handle) };
+    }
+}
+
+/// Starts `exe` with `args` in its own folder, without the "app starting" cursor Windows shows
+/// next to the pointer until the new process shows a window (`STARTF_FORCEOFFFEEDBACK`): a
+/// popup started hidden (`--armed`) would otherwise show it for its whole start-up.
+pub fn spawn_quiet(exe: &Path, args: &[String]) -> io::Result<Process> {
+    let mut line = quote_arg(&exe.to_string_lossy());
+    for a in args {
+        line.push(' ');
+        line.push_str(&quote_arg(a));
+    }
+    let mut line = wide(&line);
+    let app = wide(exe);
+    let dir = exe.parent().map(wide);
+    let startup = STARTUPINFOW {
+        cb: size_of::<STARTUPINFOW>() as u32,
+        dwFlags: STARTF_FORCEOFFFEEDBACK,
+        ..Default::default()
+    };
+    let mut info = PROCESS_INFORMATION::default();
+    // SAFETY: every string is a NUL-terminated UTF-16 buffer alive for the call (`line` is
+    // mutable, as CreateProcessW requires); `startup` and `info` are valid for the call.
+    unsafe {
+        CreateProcessW(
+            PCWSTR(app.as_ptr()),
+            Some(PWSTR(line.as_mut_ptr())),
+            None,
+            None,
+            false,
+            PROCESS_CREATION_FLAGS(0),
+            None,
+            dir.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())),
+            &startup,
+            &mut info,
+        )
+    }
+    .map_err(io::Error::other)?;
+    // SAFETY: the thread handle from CreateProcessW is ours and not needed.
+    let _ = unsafe { CloseHandle(info.hThread) };
+    Ok(Process {
+        handle: info.hProcess,
+        pid: info.dwProcessId,
+    })
+}
+
+/// One command-line argument as the C runtime / `CommandLineToArgvW` read it back.
+fn quote_arg(arg: &str) -> String {
+    if !arg.is_empty() && !arg.contains([' ', '\t', '"']) {
+        return arg.to_string();
+    }
+    let mut out = String::from('"');
+    let mut backslashes = 0;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.extend(std::iter::repeat_n('\\', backslashes));
+                out.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    out.extend(std::iter::repeat_n('\\', backslashes * 2));
+    out.push('"');
+    out
 }
 
 /// Runs a `launch` action: `%VAR%` expanded in all parts, `cwd` defaults to the parent folder of
@@ -173,4 +263,23 @@ fn shell_execute(
     });
     focus::after_launch(before, windows, pid.filter(|&p| p != 0));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quote_arg;
+
+    #[test]
+    fn arguments_are_quoted_only_when_needed() {
+        assert_eq!(quote_arg("--todo"), "--todo");
+        assert_eq!(quote_arg("10,1032"), "10,1032");
+        assert_eq!(quote_arg(""), r#""""#);
+        assert_eq!(
+            quote_arg(r"C:\Program Files\Kuality\kuality.exe"),
+            r#""C:\Program Files\Kuality\kuality.exe""#
+        );
+        // Backslashes before a quote, and at the end of a quoted argument, are doubled.
+        assert_eq!(quote_arg(r#"a "b""#), r#""a \"b\"""#);
+        assert_eq!(quote_arg(r"C:\a b\"), r#""C:\a b\\""#);
+    }
 }

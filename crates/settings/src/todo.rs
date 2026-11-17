@@ -249,6 +249,10 @@ struct TodoPopup {
     /// The to-do mutex, when an armed popup claimed it on being shown (otherwise the process
     /// holds it from the start).
     _instance: Option<platform::Instance>,
+    /// Armed popup: its first frame is rendered (uncloaking earlier would show an empty window).
+    drawn: bool,
+    /// Armed popup: told to show before its first frame; uncloaked once it is drawn.
+    uncloak_pending: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -309,6 +313,15 @@ impl TodoPopup {
             .detach();
         }
         if let Some(events) = armed {
+            let this = cx.weak_entity();
+            window.on_next_frame(move |window, cx| {
+                let _ = this.update(cx, |this, _| {
+                    this.drawn = true;
+                    if std::mem::take(&mut this.uncloak_pending) {
+                        platform::set_cloaked(window, false);
+                    }
+                });
+            });
             match events.wait() {
                 Ok(signal) => {
                     cx.spawn_in(window, async move |this, cx| {
@@ -335,6 +348,8 @@ impl TodoPopup {
             opened: Instant::now(),
             peek,
             _instance: None,
+            drawn: false,
+            uncloak_pending: false,
             _subs: subs,
         }
     }
@@ -376,7 +391,11 @@ impl TodoPopup {
             self.peek = None;
         }
         self.opened = Instant::now();
-        platform::set_cloaked(window, false);
+        if self.drawn {
+            platform::set_cloaked(window, false);
+        } else {
+            self.uncloak_pending = true;
+        }
         log::debug!("hidden to-do popup shown ({signal:?})");
         if signal == ArmedSignal::Activate {
             cx.spawn_in(window, async move |_, cx| {
