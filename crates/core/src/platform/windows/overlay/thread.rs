@@ -81,8 +81,8 @@ const TIMER_CREATE_RETRY: usize = 5;
 /// The mouse rested on a module with a hover action.
 const TIMER_HOVER: usize = 6;
 /// How long the mouse rests on a module before its hover action runs (passing over the taskbar
-/// does nothing).
-const HOVER_DELAY_MS: u32 = 250;
+/// does nothing). The to-do popup starts hidden when the mouse arrives, so it is ready by then.
+const HOVER_DELAY_MS: u32 = 150;
 const REFRESH_DEBOUNCE_MS: u32 = 300;
 const RETRY_MS: u32 = 1000;
 /// Failed widget window creation (e.g. `CreateWindowExW` denied while Explorer is busy) is
@@ -271,6 +271,8 @@ struct State {
     live: LiveData,
     /// Widget window and module index under the mouse.
     hover: Option<(HWND, usize)>,
+    /// A hidden to-do popup was started for the hovered module and not shown or dropped yet.
+    todo_armed: bool,
     taskbars: Vec<TaskbarHost>,
     /// Created on the first enable, then kept.
     d2d: Option<D2d>,
@@ -328,6 +330,7 @@ fn thread_main(rx: Receiver<OverlayCommand>, ready: mpsc::SyncSender<io::Result<
         session_hidden: HashSet::new(),
         live: LiveData::default(),
         hover: None,
+        todo_armed: false,
         taskbars: Vec::new(),
         d2d: None,
         theme: Theme::default(),
@@ -500,45 +503,79 @@ impl State {
             _ => module,
         };
         if hover != self.hover {
+            self.disarm_todo();
             self.hover = hover;
             self.kill_timer(TIMER_HOVER);
             if let Some((w, i)) = hover
                 && self.span(w, i).is_some_and(|s| s.kind.opens_on_hover())
             {
                 self.set_timer(TIMER_HOVER, HOVER_DELAY_MS);
+                self.arm_todo(w, i);
             }
             self.rerender();
         }
     }
 
-    /// The mouse rested on a module: runs its hover action.
-    fn on_hover_timer(&self) {
-        let Some((widget, i)) = self.hover else {
-            return;
-        };
-        // Only the to-do module has a hover action for now.
-        if self.span(widget, i).is_some_and(|s| {
+    /// Whether module `i` of `widget` is a to-do module that opens on hover.
+    fn todo_opens_on_hover(&self, widget: HWND, i: usize) -> bool {
+        self.span(widget, i).is_some_and(|s| {
             matches!(
                 s.kind,
                 ModuleKind::Todo {
                     open_on_hover: true
                 }
             )
-        }) && let Some(r) = self.todo_request(widget, i, TodoTrigger::Hover)
+        })
+    }
+
+    /// The mouse arrived on module `i` of `widget`: a to-do module that opens on hover gets its
+    /// popup started hidden now, so the hover delay hides the start-up time.
+    fn arm_todo(&mut self, widget: HWND, i: usize) {
+        if self.todo_opens_on_hover(widget, i)
+            && let Some(r) = self.todo_request(widget, i, TodoTrigger::Arm)
         {
+            super::super::tray::request_todo(r);
+            self.todo_armed = true;
+        }
+    }
+
+    /// Drops the hidden to-do popup started by [`Self::arm_todo`], if it was not used.
+    fn disarm_todo(&mut self) {
+        if std::mem::take(&mut self.todo_armed) {
+            super::super::tray::request_todo(TodoRequest {
+                module: RectPx::default(),
+                taskbar_top: 0,
+                trigger: TodoTrigger::Disarm,
+            });
+        }
+    }
+
+    /// The mouse rested on a module: runs its hover action.
+    fn on_hover_timer(&mut self) {
+        let Some((widget, i)) = self.hover else {
+            return;
+        };
+        // Only the to-do module has a hover action for now.
+        if self.todo_opens_on_hover(widget, i)
+            && let Some(r) = self.todo_request(widget, i, TodoTrigger::Hover)
+        {
+            // The core shows the armed popup, if there is one.
+            self.todo_armed = false;
             super::super::tray::request_todo(r);
         }
     }
 
     /// A widget window was clicked at client x `x`: runs the clicked module's action.
     /// `popup_state`: `CLICK_*` flags, the to-do popup's state when the button went down.
-    fn on_click(&self, widget: HWND, x: i32, popup_state: isize) {
+    fn on_click(&mut self, widget: HWND, x: i32, popup_state: isize) {
         self.kill_timer(TIMER_HOVER);
         let Some(i) = self.window(widget).and_then(|w| w.span_at(x)) else {
             return;
         };
         match self.span(widget, i).map(|s| s.kind) {
             Some(ModuleKind::Todo { .. }) => {
+                // The core opens the armed popup with the focus, if there is one.
+                self.todo_armed = false;
                 let trigger = TodoTrigger::Click {
                     was_open: popup_state & CLICK_POPUP_WAS_OPEN != 0,
                     was_peeking: popup_state & CLICK_POPUP_PEEKING != 0,
@@ -595,6 +632,8 @@ impl State {
 
     /// Destroys every widget window, removes the hooks and stops the timers.
     fn teardown(&mut self) {
+        self.disarm_todo();
+        self.hover = None;
         self.taskbars.clear();
         self.unhook_explorer();
         self.unhook_fullscreen();

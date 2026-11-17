@@ -5,6 +5,10 @@
 //! Opened by the mouse resting on the module (`--hover`), it is a "peek": shown without taking
 //! the focus, and closed once the mouse has left the module and the popup, until it is clicked
 //! (then it behaves as if opened by a click).
+//!
+//! Started with `--armed` when the mouse arrives on the module, it builds its window cloaked
+//! (rendered, never seen) and waits for the core: shown as a peek when the hover delay ends,
+//! with the focus when the module is clicked, or it quits when the mouse leaves first.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -22,6 +26,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use kuality_protocol::cli::ArmedSignal;
 use kuality_protocol::{Config, NewItems, TodoList, cli, store, unix_now};
 
 use crate::platform::{self, ScreenRect, TODO_WINDOW_TITLE};
@@ -36,6 +41,9 @@ const MARGIN: f32 = 8.0;
 const PEEK_LEAVE_GRACE: Duration = Duration::from_millis(300);
 /// How often a peek checks the mouse position.
 const PEEK_POLL: Duration = Duration::from_millis(100);
+/// An armed popup opened by a click asks for the foreground this often, this many times.
+const FOREGROUND_RETRY: Duration = Duration::from_millis(100);
+const FOREGROUND_TRIES: u32 = 15;
 
 /// The popup was opened by the mouse resting on the module (`--hover`).
 pub struct Peek {
@@ -100,16 +108,28 @@ pub fn hover_arg(args: &[String]) -> Option<ScreenRect> {
     }
 }
 
+/// `--armed <name>`: started hidden by the core, which signals the events of `name`.
+pub fn armed_arg(args: &[String]) -> Option<String> {
+    string_arg(args, cli::ARMED).filter(|n| !n.is_empty())
+}
+
 /// The comma-separated integers after `name` (`name a,b` or `name=a,b`).
 fn numbers_arg(args: &[String], name: &str) -> Option<Vec<i32>> {
+    string_arg(args, name)?
+        .split(',')
+        .map(|n| n.trim().parse().ok())
+        .collect()
+}
+
+/// The value after `name` (`name v` or `name=v`).
+fn string_arg(args: &[String], name: &str) -> Option<String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        let value = match a.strip_prefix(name) {
-            Some(v) if v.starts_with('=') => &v[1..],
-            Some("") => it.next()?,
+        return match a.strip_prefix(name) {
+            Some(v) if v.starts_with('=') => Some(v[1..].to_string()),
+            Some("") => it.next().cloned(),
             _ => continue,
         };
-        return value.split(',').map(|n| n.trim().parse().ok()).collect();
     }
     None
 }
@@ -134,13 +154,15 @@ fn new_items_at_top(config_path: &Path) -> bool {
 }
 
 /// Opens the popup and runs until it closes (Esc, focus lost, WM_CLOSE from the core, the
-/// core exiting, or the mouse leaving a peek).
+/// core exiting, or the mouse leaving a peek). `armed`: started hidden (`--armed`, always with
+/// a peek), shown when the core signals it.
 pub fn run(
     todo_path: PathBuf,
     config_path: PathBuf,
     anchor: Option<(i32, i32)>,
     peek: Option<Peek>,
     core: Option<platform::CoreProcess>,
+    armed: Option<platform::ArmedEvents>,
 ) {
     let at_top = new_items_at_top(&config_path);
     // Whether the popup takes the focus: a peek does not take it from the window being used.
@@ -148,6 +170,11 @@ pub fn run(
     // Filled by `options` (GPUI is up by then), used to build the view.
     let peek_state = std::rc::Rc::new(std::cell::RefCell::new(None));
     let for_view = peek_state.clone();
+    // An armed popup's window is cloaked from its creation (before GPUI shows it) until the
+    // core's signal; the hook goes once the window exists.
+    let cloak = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let cloak_until_built = cloak.clone();
+    let armed_view = armed.is_some();
     window::run_window(
         "to-do popup",
         move |cx| {
@@ -177,6 +204,16 @@ pub fn run(
                 return None;
             }
             *peek_state.borrow_mut() = peek;
+            if armed_view {
+                match platform::CloakNewWindows::install() {
+                    Ok(hook) => *cloak.borrow_mut() = Some(hook),
+                    Err(e) => {
+                        // It would show at once: let the core start a normal one instead.
+                        log::warn!("cannot hide the to-do popup while armed: {e}; not opening");
+                        return None;
+                    }
+                }
+            }
             let (bounds, display_id) =
                 window::popup_bounds(monitor, placed.map(|r| (r.left, r.top)), size, cx);
             Some(window::popup_options(
@@ -187,10 +224,13 @@ pub fn run(
                 activate,
             ))
         },
-        move |window| platform::popup_window_setup(window, activate),
+        move |window| {
+            cloak_until_built.borrow_mut().take();
+            platform::popup_window_setup(window, activate);
+        },
         move |window, cx| {
             let peek = for_view.borrow_mut().take();
-            TodoPopup::new(todo_path, at_top, peek, core, window, cx)
+            TodoPopup::new(todo_path, at_top, peek, core, armed, window, cx)
         },
     );
 }
@@ -206,6 +246,9 @@ struct TodoPopup {
     opened: Instant,
     /// Shown on hover and not clicked yet.
     peek: Option<PeekState>,
+    /// The to-do mutex, when an armed popup claimed it on being shown (otherwise the process
+    /// holds it from the start).
+    _instance: Option<platform::Instance>,
     _subs: Vec<Subscription>,
 }
 
@@ -215,6 +258,7 @@ impl TodoPopup {
         at_top: bool,
         peek: Option<PeekState>,
         core: Option<platform::CoreProcess>,
+        armed: Option<platform::ArmedEvents>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -264,6 +308,23 @@ impl TodoPopup {
             })
             .detach();
         }
+        if let Some(events) = armed {
+            match events.wait() {
+                Ok(signal) => {
+                    cx.spawn_in(window, async move |this, cx| {
+                        let signal = signal.await.unwrap_or(ArmedSignal::Cancel);
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            this.on_armed_signal(signal, window, cx)
+                        });
+                    })
+                    .detach();
+                }
+                Err(e) => {
+                    log::error!("cannot wait for the core's signal: {e}");
+                    cx.quit();
+                }
+            }
+        }
         Self {
             path,
             list,
@@ -273,8 +334,65 @@ impl TodoPopup {
             input,
             opened: Instant::now(),
             peek,
+            _instance: None,
             _subs: subs,
         }
+    }
+
+    /// The core's answer to an armed popup: show it as a peek, open it with the focus, or quit.
+    fn on_armed_signal(
+        &mut self,
+        signal: ArmedSignal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if signal == ArmedSignal::Cancel {
+            log::debug!("hidden to-do popup not needed; quitting");
+            cx.quit();
+            return;
+        }
+        // Shown now: claim what a popup started the usual way holds from the start.
+        match platform::Instance::acquire_todo() {
+            Ok(Some(i)) => self._instance = Some(i),
+            Ok(None) => {
+                log::debug!("another to-do popup is open; quitting");
+                cx.quit();
+                return;
+            }
+            Err(e) => log::warn!("single-instance check failed: {e}"),
+        }
+        if signal == ArmedSignal::Show {
+            if let Some(p) = &mut self.peek {
+                p._guard = match platform::Instance::acquire_todo_peek() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        log::warn!("cannot mark the popup as shown on hover: {e}");
+                        None
+                    }
+                };
+            }
+        } else {
+            // Clicked: behaves as a popup opened by a click.
+            self.peek = None;
+        }
+        self.opened = Instant::now();
+        platform::set_cloaked(window, false);
+        log::debug!("hidden to-do popup shown ({signal:?})");
+        if signal == ArmedSignal::Activate {
+            cx.spawn_in(window, async move |_, cx| {
+                for _ in 0..FOREGROUND_TRIES {
+                    let active = cx.update(|window, _| {
+                        window.is_window_active() || platform::bring_to_front(window)
+                    });
+                    if active.unwrap_or(true) {
+                        break;
+                    }
+                    cx.background_executor().timer(FOREGROUND_RETRY).await;
+                }
+            })
+            .detach();
+        }
+        cx.notify();
     }
 
     /// A peek closes once the mouse has been away from the module and the popup for
@@ -473,7 +591,9 @@ impl Render for TodoPopup {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: it would bring GPUI's `test` attribute in place of the built-in one.
-    use super::{ScreenRect, TodoList, anchor_arg, hover_arg, load, new_items_at_top, place_popup};
+    use super::{
+        ScreenRect, TodoList, anchor_arg, armed_arg, hover_arg, load, new_items_at_top, place_popup,
+    };
 
     const WORK: ScreenRect = ScreenRect {
         left: 0,
@@ -559,6 +679,24 @@ mod tests {
         assert_eq!(hover_arg(&args(&["--hover=5,5,1,9"])), None, "empty");
         assert_eq!(hover_arg(&args(&["--hover", "1,2"])), None);
         assert_eq!(hover_arg(&args(&["--at", "1,2"])), None);
+    }
+
+    #[test]
+    fn armed_argument() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            armed_arg(&args(&[
+                "--hover",
+                "1,2,3,4",
+                "--armed",
+                "Kuality.TodoArmed.9.1"
+            ])),
+            Some("Kuality.TodoArmed.9.1".into())
+        );
+        assert_eq!(armed_arg(&args(&["--armed=x"])), Some("x".into()));
+        assert_eq!(armed_arg(&args(&["--armed"])), None);
+        assert_eq!(armed_arg(&args(&["--armed="])), None);
+        assert_eq!(armed_arg(&args(&["--at", "1,2"])), None);
     }
 
     #[test]

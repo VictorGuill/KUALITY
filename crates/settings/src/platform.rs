@@ -10,15 +10,18 @@ use std::time::{Duration, Instant};
 
 use futures_channel::oneshot;
 use kuality_protocol::Key;
+use kuality_protocol::cli::{self, ArmedSignal};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{COLORREF, SIZE};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, WPARAM,
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, WAIT_OBJECT_0,
+    WPARAM,
 };
 use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
-    DWM_WINDOW_CORNER_PREFERENCE, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+    DWM_WINDOW_CORNER_PREFERENCE, DWMWA_CAPTION_COLOR, DWMWA_CLOAK, DWMWA_CLOAKED,
+    DWMWA_TEXT_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmGetWindowAttribute,
+    DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
@@ -34,9 +37,10 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
 use windows::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcessId, GetCurrentThreadId, INFINITE, OpenMutexW, OpenProcess,
-    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    QueryFullProcessImageNameW, SYNCHRONIZATION_SYNCHRONIZE, WaitForSingleObject,
+    CreateMutexW, GetCurrentProcessId, GetCurrentThreadId, INFINITE, OpenEventW, OpenMutexW,
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    QueryFullProcessImageNameW, SYNCHRONIZATION_SYNCHRONIZE, WaitForMultipleObjects,
+    WaitForSingleObject,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -48,13 +52,14 @@ use windows::Win32::UI::Shell::{
     SHGetKnownFolderPath, SIGDN, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, SIIGBF_ICONONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, CallNextHookEx, DispatchMessageW, EnumWindows, FindWindowW, GW_OWNER,
-    GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindow, GetWindowLongW,
-    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HC_ACTION, IsIconic, IsWindowVisible,
-    KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, PostMessageW, PostQuitMessage, PostThreadMessageW,
-    SW_RESTORE, SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow, TranslateMessage,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_CLOSE, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
-    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    AllowSetForegroundWindow, CWPSTRUCT, CallNextHookEx, DispatchMessageW, EnumWindows,
+    FindWindowW, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetCursorPos, GetForegroundWindow,
+    GetMessageW, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, HC_ACTION, HHOOK, IsIconic, IsWindowVisible, KBDLLHOOKSTRUCT,
+    LLKHF_INJECTED, MSG, PostMessageW, PostQuitMessage, PostThreadMessageW, SW_RESTORE,
+    SetForegroundWindow, SetTimer, SetWindowsHookExW, ShowWindow, TranslateMessage,
+    UnhookWindowsHookEx, WH_CALLWNDPROC, WH_KEYBOARD_LL, WM_APP, WM_CLOSE, WM_CREATE, WM_KEYDOWN,
+    WM_SHOWWINDOW, WM_SYSKEYDOWN, WM_TIMER, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, Interface as _, PCWSTR, PWSTR, w};
 
@@ -250,7 +255,7 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     // SAFETY: `pid` is a valid out pointer.
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     // SAFETY: plain call.
-    if pid == unsafe { GetCurrentProcessId() } || !process_is_settings(pid) {
+    if pid == unsafe { GetCurrentProcessId() } || !process_is_settings(pid) || is_cloaked(hwnd) {
         return true.into();
     }
     search.found = Some(hwnd);
@@ -292,6 +297,160 @@ pub fn todo_popup_running() -> bool {
 /// Whether the running to-do popup is only shown on hover (not clicked yet).
 pub fn todo_popup_peeking() -> bool {
     mutex_exists(TODO_PEEK_MUTEX)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Armed popup (`--armed`): started hidden, shown when the core says so.
+
+/// How long an armed popup waits for the core before quitting by itself.
+const ARMED_WAIT: Duration = Duration::from_secs(10);
+
+/// The three events of an armed popup ([`ArmedSignal::ALL`] order), created by the core.
+#[derive(Debug)]
+pub struct ArmedEvents(Vec<HANDLE>);
+
+impl ArmedEvents {
+    /// Opens the events of `name` (the `--armed` value). `None` if one is missing: the core
+    /// already dropped this popup.
+    pub fn open(name: &str) -> Option<Self> {
+        let mut opened = Self(Vec::with_capacity(ArmedSignal::ALL.len()));
+        for signal in ArmedSignal::ALL {
+            let event = wide(&cli::armed_event(name, signal));
+            // SAFETY: `event` is a NUL-terminated UTF-16 string alive for the call.
+            let h =
+                unsafe { OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, false, PCWSTR(event.as_ptr())) };
+            // On failure, dropping `opened` closes what was opened.
+            opened.0.push(h.ok()?);
+        }
+        Some(opened)
+    }
+
+    /// Waits on a background thread for the core's signal; the receiver gets it, or `Cancel`
+    /// after [`ARMED_WAIT`] without one.
+    pub fn wait(self) -> io::Result<oneshot::Receiver<ArmedSignal>> {
+        let (tx, rx) = oneshot::channel();
+        // The thread takes over the handles; raw values cross the thread boundary.
+        let raw: Vec<usize> = self.0.iter().map(|h| h.0 as usize).collect();
+        std::mem::forget(self);
+        std::thread::Builder::new()
+            .name("kuality-settings-armed".into())
+            .spawn(move || {
+                let events = Self(
+                    raw.into_iter()
+                        .map(|h| HANDLE(h as *mut std::ffi::c_void))
+                        .collect(),
+                );
+                // SAFETY: the handles are owned by `events`, alive until it drops after the wait.
+                let r = unsafe {
+                    WaitForMultipleObjects(&events.0, false, ARMED_WAIT.as_millis() as u32)
+                };
+                let i = r.0.wrapping_sub(WAIT_OBJECT_0.0) as usize;
+                let signal = ArmedSignal::ALL
+                    .get(i)
+                    .copied()
+                    .unwrap_or(ArmedSignal::Cancel);
+                let _ = tx.send(signal);
+            })?;
+        Ok(rx)
+    }
+}
+
+impl Drop for ArmedEvents {
+    fn drop(&mut self) {
+        for h in &self.0 {
+            // SAFETY: each handle is owned by this value and closed once.
+            let _ = unsafe { CloseHandle(*h) };
+        }
+    }
+}
+
+/// GPUI's window class: only those windows get cloaked.
+const GPUI_WINDOW_CLASS: &str = "Zed::Window";
+
+/// While alive, every GPUI window this thread creates is cloaked (`DWMWA_CLOAK`) before it is
+/// shown: it renders normally but is never seen until [`set_cloaked`]`(…, false)`. A
+/// thread-local `WH_CALLWNDPROC` hook on our own thread (no injection) cloaks it on `WM_CREATE`
+/// and again on `WM_SHOWWINDOW` (DWM refuses it earlier, at `HCBT_CREATEWND`).
+pub struct CloakNewWindows(HHOOK);
+
+impl CloakNewWindows {
+    pub fn install() -> io::Result<Self> {
+        // SAFETY: thread-local hook on the calling thread; the procedure only touches the new
+        // window. Removed on drop, on this same thread (the value is not `Send`).
+        let hook = unsafe {
+            SetWindowsHookExW(WH_CALLWNDPROC, Some(cloak_proc), None, GetCurrentThreadId())
+        }
+        .map_err(io::Error::other)?;
+        Ok(Self(hook))
+    }
+}
+
+impl Drop for CloakNewWindows {
+    fn drop(&mut self) {
+        // SAFETY: the hook was installed by `install` and is removed once.
+        let _ = unsafe { UnhookWindowsHookEx(self.0) };
+    }
+}
+
+unsafe extern "system" fn cloak_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // SAFETY: for HC_ACTION, `lparam` points to the message's CWPSTRUCT, valid for the call.
+    let msg = (code == HC_ACTION as i32).then(|| unsafe { &*(lparam.0 as *const CWPSTRUCT) });
+    if let Some(m) = msg
+        && (m.message == WM_CREATE || (m.message == WM_SHOWWINDOW && m.wParam.0 != 0))
+    {
+        let hwnd = m.hwnd;
+        let mut class = [0u16; 32];
+        // SAFETY: `class` is a valid buffer for the call; `hwnd` is the window being created.
+        let n = unsafe { GetClassNameW(hwnd, &mut class) };
+        if String::from_utf16_lossy(&class[..n.max(0) as usize]) == GPUI_WINDOW_CLASS {
+            cloak(hwnd, true);
+        }
+    }
+    // SAFETY: passes the call on unchanged.
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+/// Cloaks (hides from the screen while it keeps rendering) or uncloaks this process's window.
+pub fn set_cloaked(window: &impl HasWindowHandle, cloaked: bool) {
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(h) = handle.as_raw() else {
+        return;
+    };
+    cloak(HWND(h.hwnd.get() as *mut std::ffi::c_void), cloaked);
+}
+
+fn cloak(hwnd: HWND, cloaked: bool) {
+    let value = BOOL::from(cloaked);
+    // SAFETY: `hwnd` is a window of this process; the pointer and size describe `value`.
+    let r = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAK,
+            &value as *const BOOL as *const std::ffi::c_void,
+            size_of::<BOOL>() as u32,
+        )
+    };
+    if let Err(e) = r {
+        let what = if cloaked { "cloak" } else { "uncloak" };
+        log::warn!("cannot {what} the window: {e}");
+    }
+}
+
+/// Whether `hwnd` is cloaked (an armed popup not shown yet, or a window on another desktop).
+fn is_cloaked(hwnd: HWND) -> bool {
+    let mut value = 0u32;
+    // SAFETY: the pointer and size describe `value`.
+    let r = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut value as *mut u32 as *mut std::ffi::c_void,
+            size_of::<u32>() as u32,
+        )
+    };
+    r.is_ok() && value != 0
 }
 
 // ---------------------------------------------------------------------------------------------
