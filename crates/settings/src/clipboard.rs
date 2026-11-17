@@ -199,7 +199,10 @@ fn load(core_pid: Option<u32>) -> Load {
 /// the core, or the core exiting).
 pub fn run(core: Option<platform::CoreProcess>, paste: bool) {
     let core_pid = core.as_ref().map(|c| c.pid);
-    let loaded = load(core_pid);
+    // The history comes over the pipe while GPUI starts.
+    let loading = std::thread::Builder::new()
+        .name("kuality-settings-load".into())
+        .spawn(move || load(core_pid));
     // Before GPUI takes the focus: the window the user was in.
     let anchor = platform::foreground_center();
     window::run_window(
@@ -218,7 +221,18 @@ pub fn run(core: Option<platform::CoreProcess>, paste: bool) {
             ))
         },
         |window| platform::popup_window_setup(window, true),
-        move |window, cx| ClipboardPopup::new(loaded, core_pid, core, paste, window, cx),
+        move |window, cx| {
+            let loaded = match loading {
+                Ok(thread) => thread
+                    .join()
+                    .unwrap_or_else(|_| Load::Error("the history could not be loaded".into())),
+                Err(e) => {
+                    log::warn!("cannot load the history on a thread: {e}");
+                    load(core_pid)
+                }
+            };
+            ClipboardPopup::new(loaded, core_pid, core, paste, window, cx)
+        },
     );
 }
 
