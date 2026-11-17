@@ -319,6 +319,16 @@ impl Entries {
         self.sections.iter().map(|s| s.rows.len()).sum()
     }
 
+    /// The row selected when the list opens: the latest copy (the first entry that is not
+    /// pinned), else the first pinned one. `None` when the list is empty.
+    fn default_path(&self) -> Option<IndexPath> {
+        if self.len() == 0 {
+            return None;
+        }
+        let recent = self.sections.iter().position(|s| !s.pinned);
+        Some(IndexPath::default().section(recent.unwrap_or(0)))
+    }
+
     /// Position of a row counting every section, and back.
     fn flat(&self, ix: IndexPath) -> usize {
         let before: usize = self.sections[..ix.section.min(self.sections.len())]
@@ -576,7 +586,7 @@ impl ClipboardPopup {
     }
 
     /// Shows a list read from the core, keeping the selection on the same entry if it is still
-    /// there (else on the first one).
+    /// there (else on the latest copy, see [`Entries::default_path`]).
     fn set_loaded(&mut self, loaded: Load, window: &mut Window, cx: &mut Context<Self>) {
         let keep = self.selected_id(cx);
         self.list.update(cx, |list, cx| {
@@ -595,7 +605,7 @@ impl ClipboardPopup {
             let entries = list.delegate();
             let ix = keep
                 .and_then(|id| entries.path_of(id))
-                .or_else(|| (entries.len() > 0).then(|| entries.path(0)));
+                .or_else(|| entries.default_path());
             list.set_selected_index(ix, window, cx);
             cx.notify();
         });
@@ -910,7 +920,55 @@ impl Render for ClipboardPopup {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: it would bring GPUI's `test` attribute in place of the built-in one.
-    use super::{ScreenRect, ago, center_popup, first_line, moved};
+    use super::{
+        Entries, EntryInfo, EntryKind, IndexPath, Item, ScreenRect, ago, center_popup, first_line,
+        moved,
+    };
+
+    fn entries(pins: &[bool]) -> Entries {
+        let mut entries = Entries::new();
+        entries.set_items(
+            pins.iter()
+                .enumerate()
+                .map(|(i, &pinned)| Item {
+                    search: String::new(),
+                    thumb: None,
+                    info: EntryInfo {
+                        id: i as u64,
+                        kind: EntryKind::Text,
+                        pinned,
+                        created: 0,
+                        truncated: false,
+                        chars: 0,
+                        lines: 1,
+                        text: Some(String::new()),
+                        width: 0,
+                        height: 0,
+                        thumb_len: 0,
+                    },
+                })
+                .collect(),
+        );
+        entries
+    }
+
+    #[test]
+    fn opens_on_the_latest_copy() {
+        let first = |e: &Entries| {
+            e.default_path()
+                .and_then(|ix| e.item(ix))
+                .map(|i| i.info.id)
+        };
+        assert_eq!(
+            first(&entries(&[true, true, false, false])),
+            Some(2),
+            "skips pins"
+        );
+        assert_eq!(first(&entries(&[false, true])), Some(0));
+        assert_eq!(first(&entries(&[true, true])), Some(0), "only pins");
+        assert_eq!(entries(&[]).default_path(), None);
+        assert_eq!(entries(&[false]).default_path(), Some(IndexPath::default()));
+    }
 
     #[test]
     fn popup_is_centered() {
