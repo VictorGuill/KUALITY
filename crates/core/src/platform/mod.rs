@@ -19,8 +19,8 @@ use crate::overlay::layout::RectPx;
 mod windows;
 #[cfg(windows)]
 pub use self::windows::{
-    AppLockCommand, AppLockThread, ClipboardMonitor, Commander, Foreground, Instance, IpcServer,
-    Keyboard, LockedExe, MemoryCipher, Overlay, Prompt, Putter, Reply, Tray, Watcher,
+    AppLockCommand, AppLockThread, ArmedPopup, ClipboardMonitor, Commander, Foreground, Instance,
+    IpcServer, Keyboard, LockedExe, MemoryCipher, Overlay, Prompt, Putter, Reply, Tray, Watcher,
     action_thread_init, action_thread_run, action_thread_stop, action_thread_wake,
     close_shell_flyout, crypto, dpi_awareness, foreground_window, init_main_thread,
     install_crash_guard, launch, local_time_now, office_key, open_url, open_with_default_app,
@@ -90,6 +90,11 @@ pub enum TodoTrigger {
     Click { was_open: bool, was_peeking: bool },
     /// The mouse rested on the module: show the list until the mouse leaves it.
     Hover,
+    /// The mouse entered a module that opens on hover: start the popup hidden, so the hover
+    /// (or a click) only has to show it.
+    Arm,
+    /// The mouse left the module before the hover delay ended: drop the hidden popup.
+    Disarm,
 }
 
 /// Wakes the main event loop from any thread.

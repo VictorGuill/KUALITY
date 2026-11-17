@@ -28,3 +28,50 @@ pub const PASTE: &str = "--paste";
 pub const APP: &str = "--app";
 /// App lock prompt, `--confirm <quit|pause>`: a tray command that needs the password.
 pub const CONFIRM: &str = "--confirm";
+/// To-do popup, `--armed <name>`: started while the mouse rests on the module, before the hover
+/// delay ends. The window is created but cloaked (rendered, never seen) until the core sets one
+/// of the events named by [`armed_event`]: show it as a peek, open it with the focus (the
+/// module was clicked), or quit (the mouse left).
+pub const ARMED: &str = "--armed";
+
+/// What the core tells an armed to-do popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmedSignal {
+    /// The mouse rested on the module: show the popup without taking the focus.
+    Show,
+    /// The module was clicked: show the popup with the focus.
+    Activate,
+    /// The mouse left the module: quit without showing anything.
+    Cancel,
+}
+
+impl ArmedSignal {
+    /// Every signal, in the order of the events a popup waits on.
+    pub const ALL: [ArmedSignal; 3] = [Self::Show, Self::Activate, Self::Cancel];
+}
+
+/// Name of the manual-reset event for `signal` of the armed popup `name` (the `--armed` value).
+pub fn armed_event(name: &str, signal: ArmedSignal) -> String {
+    let suffix = match signal {
+        ArmedSignal::Show => "show",
+        ArmedSignal::Activate => "activate",
+        ArmedSignal::Cancel => "cancel",
+    };
+    format!(r"Local\{name}.{suffix}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn armed_event_names_differ_per_signal() {
+        let names: Vec<_> = ArmedSignal::ALL
+            .iter()
+            .map(|s| armed_event("Kuality.TodoArmed.1.2", *s))
+            .collect();
+        assert_eq!(names[0], r"Local\Kuality.TodoArmed.1.2.show");
+        assert_eq!(names[1], r"Local\Kuality.TodoArmed.1.2.activate");
+        assert_eq!(names[2], r"Local\Kuality.TodoArmed.1.2.cancel");
+    }
+}

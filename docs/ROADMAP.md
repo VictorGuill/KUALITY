@@ -124,6 +124,7 @@ Done before Phase 4 (user request, 2026-11-09); see `docs/specs/todo.md`. Releas
 - [x] To-do popup `kuality.exe --todo` (GPUI): add, check off, delete; above the clicked module; closes on Esc / focus loss / second click
 - [x] Settings: To do tab; bars in the Widgets tab (position, font, modules)
 - [x] Open on hover: resting the mouse on `TO DO` shows the list without a click; it closes when the mouse leaves unless clicked
+- [x] *(2026-11-17, follow-up)* Faster popups: the hover popup starts hidden when the mouse arrives and only has to be shown (hover delay 150 ms); the clipboard popup fetches its history while GPUI starts
 
 **Done when:** enabling To do shows `TO DO` at the bottom-left of the taskbar, a click opens the list, items can be added / checked / deleted, the count follows, and the list survives a restart.
 

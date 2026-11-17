@@ -68,14 +68,29 @@ fn data_dir() -> DataDir {
 /// `docs/specs/todo.md`). Never starts the core: the popup only edits `todos.json`.
 pub fn run_todo(args: &[String]) -> ExitCode {
     init_logging();
-    let _instance = match platform::Instance::acquire_todo() {
-        Ok(Some(i)) => Some(i),
-        // One is open (or opening): the core toggles it, nothing to do here.
-        Ok(None) => return ExitCode::SUCCESS,
-        Err(e) => {
-            log::warn!("single-instance check failed: {e}");
-            None
-        }
+    // `--armed`: started hidden when the mouse arrived on the module; the mutexes are claimed
+    // when the core says to show it.
+    let armed = match todo::armed_arg(args) {
+        Some(name) => match platform::ArmedEvents::open(&name) {
+            Some(events) => Some(events),
+            None => {
+                log::debug!("hidden to-do popup dropped before it started; not opening");
+                return ExitCode::SUCCESS;
+            }
+        },
+        None => None,
+    };
+    let _instance = match armed {
+        Some(_) => None,
+        None => match platform::Instance::acquire_todo() {
+            Ok(Some(i)) => Some(i),
+            // One is open (or opening): the core toggles it, nothing to do here.
+            Ok(None) => return ExitCode::SUCCESS,
+            Err(e) => {
+                log::warn!("single-instance check failed: {e}");
+                None
+            }
+        },
     };
     let data_dir = data_dir();
     let core = match core_pid_arg(args.iter().cloned()) {
@@ -91,20 +106,29 @@ pub fn run_todo(args: &[String]) -> ExitCode {
     // Shown on hover: it closes when the mouse leaves, until it is clicked.
     let peek = todo::hover_arg(args).map(|module| todo::Peek {
         module,
-        guard: match platform::Instance::acquire_todo_peek() {
-            Ok(g) => g,
-            Err(e) => {
-                log::warn!("cannot mark the popup as shown on hover: {e}");
-                None
-            }
+        // An armed popup marks itself when it is shown.
+        guard: match armed {
+            Some(_) => None,
+            None => match platform::Instance::acquire_todo_peek() {
+                Ok(g) => g,
+                Err(e) => {
+                    log::warn!("cannot mark the popup as shown on hover: {e}");
+                    None
+                }
+            },
         },
     });
+    if armed.is_some() && peek.is_none() {
+        log::error!("--armed needs --hover");
+        return ExitCode::FAILURE;
+    }
     todo::run(
         data_dir.todo_file(),
         data_dir.config_file(),
         todo::anchor_arg(args),
         peek,
         core,
+        armed,
     );
     ExitCode::SUCCESS
 }

@@ -7,6 +7,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use kuality_protocol::app_lock::ConfirmAction;
+use kuality_protocol::cli::ArmedSignal;
 use kuality_protocol::{CONFIG_VERSION, Config, cli};
 
 use crate::actions::ActionWorker;
@@ -16,8 +17,9 @@ use crate::config_store::changed_sections;
 use crate::hyperkey::KeyboardController;
 use crate::ipc::IpcHub;
 use crate::overlay::OverlayController;
+use crate::overlay::layout::RectPx;
 use crate::overlay::widgets::LiveData;
-use crate::platform::{self, DirWatcher, Event, TodoRequest, TodoTrigger};
+use crate::platform::{self, ArmedPopup, DirWatcher, Event, TodoRequest, TodoTrigger};
 use crate::updates::Updates;
 use crate::{logging, shortcuts};
 
@@ -57,6 +59,11 @@ pub struct App<W: DirWatcher> {
     live: LiveData,
     /// When the to-do popup was last started (it takes a moment to claim its mutex).
     todo_started: Option<Instant>,
+    /// The to-do popup started hidden when the mouse entered this module (`TodoTrigger::Arm`).
+    todo_armed: Option<(ArmedPopup, RectPx)>,
+    /// The last armed popup told to show: kept until the next one, so its events live until
+    /// the process has opened them.
+    todo_signaled: Option<ArmedPopup>,
     /// Clipboard history, while `clipboard.enabled`.
     clipboard: Option<ClipboardService>,
     /// When the clipboard popup was last started.
@@ -109,6 +116,8 @@ impl<W: DirWatcher> App<W> {
             updates,
             live: LiveData::default(),
             todo_started: None,
+            todo_armed: None,
+            todo_signaled: None,
             clipboard: None,
             clipboard_started: None,
             app_lock: None,
@@ -161,8 +170,35 @@ impl<W: DirWatcher> App<W> {
     /// - click while the list is only shown on hover: keep it open (bring it to the front);
     /// - click while it is (or was, at the mouse press) open: close it;
     /// - click otherwise: open it above the module;
-    /// - hover: show it until the mouse leaves the module and the list, unless one is open.
+    /// - hover: show it until the mouse leaves the module and the list, unless one is open;
+    /// - arm / disarm: the mouse entered / left a module that opens on hover: start the popup
+    ///   hidden, so the hover or click that follows only has to show it, or drop it.
     fn on_todo(&mut self, r: TodoRequest) {
+        match r.trigger {
+            TodoTrigger::Arm => return self.arm_todo(r),
+            TodoTrigger::Disarm => {
+                if self.todo_armed.take().is_some() {
+                    log::debug!("hidden to-do popup dropped");
+                }
+                return;
+            }
+            TodoTrigger::Hover | TodoTrigger::Click { .. } => {}
+        }
+        // The popup started hidden when the mouse arrived: show it (hover) or open it with the
+        // focus (click). Without one (still starting, or gone), the usual paths below.
+        if let Some((mut armed, _)) = self.todo_armed.take()
+            && armed.alive()
+        {
+            let signal = match r.trigger {
+                TodoTrigger::Hover => ArmedSignal::Show,
+                _ => ArmedSignal::Activate,
+            };
+            armed.signal(signal);
+            self.todo_signaled = Some(armed);
+            self.todo_started = Some(Instant::now());
+            log::debug!("hidden to-do popup told to {signal:?}");
+            return;
+        }
         match r.trigger {
             TodoTrigger::Click {
                 was_peeking: true, ..
@@ -177,16 +213,58 @@ impl<W: DirWatcher> App<W> {
                 log::debug!("to-do popup closed");
                 return;
             }
-            TodoTrigger::Hover
-                if kuality_settings::todo_popup_running()
-                    || self
-                        .todo_started
-                        .is_some_and(|t| t.elapsed() < TODO_START_GUARD) =>
-            {
-                return;
-            }
+            TodoTrigger::Hover if self.todo_popup_busy() => return,
             _ => {}
         }
+        let args = Self::todo_args(&r);
+        let started = std::env::current_exe().and_then(|exe| platform::spawn_detached(&exe, &args));
+        match started {
+            Ok(()) => {
+                self.todo_started = Some(Instant::now());
+                log::debug!("started the to-do popup");
+            }
+            Err(e) => log::error!("could not start the to-do popup: {e}"),
+        }
+    }
+
+    /// Whether a to-do popup runs, or was started too recently to have claimed its mutex.
+    fn todo_popup_busy(&self) -> bool {
+        kuality_settings::todo_popup_running()
+            || self
+                .todo_started
+                .is_some_and(|t| t.elapsed() < TODO_START_GUARD)
+    }
+
+    /// The mouse entered a to-do module that opens on hover: starts its popup hidden (unless one
+    /// runs, or a hidden one for this module is still alive).
+    fn arm_todo(&mut self, r: TodoRequest) {
+        if let Some((armed, module)) = &mut self.todo_armed
+            && *module == r.module
+            && armed.alive()
+        {
+            return;
+        }
+        self.todo_armed = None;
+        if self.todo_popup_busy() {
+            return;
+        }
+        // Its events can go now: that popup has long opened them.
+        self.todo_signaled = None;
+        let args = Self::todo_args(&TodoRequest {
+            trigger: TodoTrigger::Hover,
+            ..r
+        });
+        match std::env::current_exe().and_then(|exe| ArmedPopup::spawn(&exe, &args, "Todo")) {
+            Ok(armed) => {
+                self.todo_armed = Some((armed, r.module));
+                log::debug!("started the to-do popup hidden");
+            }
+            Err(e) => log::error!("could not start the hidden to-do popup: {e}"),
+        }
+    }
+
+    /// The to-do popup's command line for request `r`.
+    fn todo_args(r: &TodoRequest) -> Vec<String> {
         let m = r.module;
         let mut args = vec![
             cli::TODO.into(),
@@ -199,14 +277,7 @@ impl<W: DirWatcher> App<W> {
             args.push(cli::HOVER.into());
             args.push(format!("{},{},{},{}", m.x, m.y, m.x + m.w, m.y + m.h));
         }
-        let started = std::env::current_exe().and_then(|exe| platform::spawn_detached(&exe, &args));
-        match started {
-            Ok(()) => {
-                self.todo_started = Some(Instant::now());
-                log::debug!("started the to-do popup");
-            }
-            Err(e) => log::error!("could not start the to-do popup: {e}"),
-        }
+        args
     }
 
     /// Starts, updates or stops the clipboard history to match the config (`old`: the section

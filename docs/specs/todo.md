@@ -18,7 +18,7 @@ The taskbar part is the first module of a new **bar** widget: one widget with on
   - The module shows `TO DO (3)`: the label plus the number of items not done yet. The count is left out at 0, when it is turned off, and when `todos.json` is invalid.
   - Hovering shows a rounded highlight (like taskbar buttons). The whole pill takes the mouse, not only the letters.
   - A click opens the popup above it; clicking it again while the popup is open closes it.
-  - **Hover** (user request, 2026-11-10; `open_on_hover`): resting the mouse on the module for 250 ms shows the popup without a click, as a "peek":
+  - **Hover** (user request, 2026-11-10; `open_on_hover`): resting the mouse on the module for 150 ms (250 ms until 2026-11-17) shows the popup without a click, as a "peek":
     - It does not take the focus from the window in use.
     - It closes when the mouse has been away from both the module and the popup for 300 ms. Moving up into the list keeps it open.
     - A click on the module or inside the popup keeps it: it takes the focus and then behaves as if opened by a click.
@@ -79,11 +79,21 @@ The taskbar part is the first module of a new **bar** widget: one widget with on
   - Widget windows now handle `WM_LBUTTONDOWN/UP`, `WM_MOUSEMOVE` and `WM_MOUSELEAVE` (`TrackMouseEvent`). They only post to the host (`WM_APP_CLICK`, `WM_APP_HOVER`).
   - The host maps the click to a module. For to-do it hands a `TodoRequest` (module rectangle and taskbar top, physical px; trigger `Click`) to the main window (`WM_APP_TODO`), which becomes `Event::Todo`.
 - **Hover**:
-  - When the hovered module changes, the overlay thread (re)arms `TIMER_HOVER` (250 ms) if the module has a hover action. A press (`WM_APP_PRESS`), a click, or leaving cancels it.
+  - When the hovered module changes, the overlay thread (re)arms `TIMER_HOVER` (150 ms) if the module has a hover action. A press (`WM_APP_PRESS`), a click, or leaving cancels it.
   - When it fires, the core gets `Event::Todo(TodoRequest { module, taskbar_top, trigger: Hover })` and starts `--todo … --at x,y --hover l,t,r,b` (module rectangle, physical px), unless a popup runs or one was started less than 500 ms ago.
   - The popup opens with `focus: false` (`SW_SHOWNOACTIVATE`), holds the mutex `Local\Kuality.TodoPeek`, and polls the cursor every 100 ms. When the mouse is outside the module and popup rectangles for 300 ms, it quits. If the mouse already left while the process started, it never opens.
   - On activation (any click into it) it releases the peek mutex and from then on closes on focus loss like a clicked popup.
   - A click on the module while the peek mutex exists brings the popup to the front (`SetForegroundWindow` from the core, which received the click) instead of closing it.
+- **Armed popup** (2026-11-17, user request: the hover popup should appear at once):
+  - Starting the GPUI process takes ~120 ms until the window exists, plus its first frame. To hide it, the popup starts when the mouse *arrives* on a module that opens on hover, and the hover delay only has to show it.
+  - Overlay thread: when the hovered module becomes a to-do module with `open_on_hover`, it sends `TodoTrigger::Arm` (with the module rectangle) besides starting `TIMER_HOVER`. Leaving the module before the timer fires (or the overlay going away) sends `Disarm`. The timer (`Hover`) and a click (`Click`) take the armed popup over. Requests to the main thread are queued in order (`PENDING_TODO` is a queue, not one slot), so an `Arm` is never overwritten by the `Hover` that follows it.
+  - Core (`App::on_todo`): `Arm` starts `--todo --core-pid … --at x,y --hover l,t,r,b --armed <name>` unless a popup runs, one was started less than 500 ms ago, or a live armed popup for the same module exists. `<name>` is `Kuality.TodoArmed.<core pid>.<n>`; before spawning, the core creates three manual-reset events `Local\<name>.show`, `.activate`, `.cancel` (`ArmedPopup`, `platform/windows/popup.rs`). `Hover` sets `show`, `Click` sets `activate` (after `AllowSetForegroundWindow` for the child), `Disarm` sets `cancel` (dropping the `ArmedPopup` does it too). A signaled `ArmedPopup` is kept until the next arm so its events outlive the child's `OpenEventW`. If the armed process is gone when `Hover` / `Click` arrives, the usual paths run (a cold start).
+  - Popup: opens the three events (a missing one means the core already dropped it: quit). It holds no mutex while armed (so a cancelled one exiting never blocks the next). Its GPUI window is created normally (`show: true`, no focus) but cloaked from its creation by a thread-local `WH_CBT` hook (`HCBT_CREATEWND`, GPUI window class only; removed once the window exists): it renders, DWM never shows it. A thread waits on the events (10 s at most, then it quits):
+    - `show`: claims `Local\Kuality.Todo` (quits if taken) and `Local\Kuality.TodoPeek`, uncloaks: from here on a normal peek.
+    - `activate`: claims `Local\Kuality.Todo`, drops the peek, uncloaks and takes the foreground (retried every 100 ms, up to 1.5 s): a clicked popup.
+    - `cancel` / timeout: quits.
+  - `find_own_window` skips cloaked windows, so the core's focus / close lookups never act on an armed popup.
+  - Cost: a process start (~100 ms of CPU, gone in under a second) each time the mouse crosses the module without stopping. Nothing while idle.
 - **Toggle**:
   - Pressing on the taskbar takes the focus from the popup, which closes itself before the click arrives. So the widget window records at `WM_LBUTTONDOWN` whether the popup's mutex (`Local\Kuality.Todo`) exists, a lookup that never blocks.
   - If it existed, the click only closes the popup (posts `WM_CLOSE` to its window) and never opens another one.

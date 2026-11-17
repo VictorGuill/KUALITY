@@ -51,10 +51,12 @@ const WM_APP_TRAY: u32 = WM_APP + 1;
 const WM_APP_WAKE: u32 = WM_APP + 2;
 /// Another thread asks for the Settings action (widget context menu).
 const WM_APP_OPEN_SETTINGS: u32 = WM_APP + 3;
-/// A bar to-do module was clicked or hovered; the request is in `PENDING_TODO` (the latest one
-/// wins).
+/// A bar to-do module was clicked, hovered or entered; the requests wait in `PENDING_TODO`, in
+/// order (arming, showing and cancelling a popup must not overwrite one another).
 const WM_APP_TODO: u32 = WM_APP + 4;
-static PENDING_TODO: Mutex<Option<TodoRequest>> = Mutex::new(None);
+static PENDING_TODO: Mutex<VecDeque<TodoRequest>> = Mutex::new(VecDeque::new());
+/// More pending to-do requests than this means the main thread is stuck: the oldest are dropped.
+const MAX_PENDING_TODO: usize = 16;
 /// The clipboard history hotkey fired (keyboard thread).
 const WM_APP_CLIPBOARD: u32 = WM_APP + 5;
 const TRAY_ICON_ID: u32 = 1;
@@ -468,11 +470,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_APP_TODO => {
-            let request = PENDING_TODO
+            let requests: Vec<_> = PENDING_TODO
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .take();
-            if let Some(r) = request {
+                .drain(..)
+                .collect();
+            for r in requests {
                 push(Event::Todo(r));
             }
             LRESULT(0)
@@ -533,7 +536,13 @@ pub(crate) fn request_open_settings() {
 /// Hands a to-do module click / hover to the main loop (it opens, keeps or closes the popup).
 /// Any thread.
 pub(crate) fn request_todo(request: TodoRequest) {
-    *PENDING_TODO.lock().unwrap_or_else(|e| e.into_inner()) = Some(request);
+    {
+        let mut pending = PENDING_TODO.lock().unwrap_or_else(|e| e.into_inner());
+        if pending.len() >= MAX_PENDING_TODO {
+            pending.pop_front();
+        }
+        pending.push_back(request);
+    }
     let hwnd = MAIN_HWND.load(Ordering::Relaxed);
     if hwnd != 0 {
         // SAFETY: PostMessageW is thread-safe.
