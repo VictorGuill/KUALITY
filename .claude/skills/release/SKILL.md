@@ -24,6 +24,8 @@ The full procedure is in `CONTRIBUTING.md` → "Releases (maintainers)"; the rul
   fixes alone → `1.x.(patch+1)-beta.1`.
 - **Stable**: the version of the approved beta without its suffix (`1.2.0-beta.3` → `1.2.0`), made on
   the commit the user tested (`git log v1.2.0-beta.3..main` must be empty, or use `release/1.2`).
+- **Patch straight to stable**: fixes and small improvements alone (no new feature) may go out as
+  `1.x.(patch+1)` from `main` without a beta, when the user asks for it.
 - Say the version to the user if there was any doubt about it.
 
 ## 2. Prepare the commit

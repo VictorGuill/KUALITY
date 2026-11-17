@@ -53,7 +53,8 @@ There is one long-lived branch, `main`. Features and fixes are made on short bra
   set to the **beta** channel (Settings → General → Updates → Channel) are offered them.
 - **Stable** — `v1.1.0`, published as the latest release and offered to everyone. A stable release
   is normally a beta that was tested and approved: the same commit, with the final version number
-  and the changelog of all its betas in one section.
+  and the changelog of all its betas in one section. A **patch** (fixes and small improvements, no
+  new feature) may skip the beta and be tagged `v1.1.1` on `main` directly.
 
 If `main` already has work that has not been tested in a beta, make the stable release on a short
 branch from the approved beta tag (`git switch -c release/1.1 v1.1.0-beta.3`), tag it there, and
