@@ -82,7 +82,7 @@ const TIMER_CREATE_RETRY: usize = 5;
 const TIMER_HOVER: usize = 6;
 /// How long the mouse rests on a module before its hover action runs (passing over the taskbar
 /// does nothing). The to-do popup starts hidden when the mouse arrives, so it is ready by then.
-const HOVER_DELAY_MS: u32 = 150;
+const HOVER_DELAY_MS: u32 = 100;
 const REFRESH_DEBOUNCE_MS: u32 = 300;
 const RETRY_MS: u32 = 1000;
 /// Failed widget window creation (e.g. `CreateWindowExW` denied while Explorer is busy) is

@@ -3,7 +3,6 @@
 
 use std::io;
 use std::path::Path;
-use std::process::Child;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use ::windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
@@ -12,6 +11,7 @@ use ::windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 use ::windows::core::PCWSTR;
 use kuality_protocol::cli::{self, ArmedSignal};
 
+use super::shell::{Process, spawn_quiet};
 use super::wide;
 
 /// Makes every armed popup's event names unique within this core.
@@ -21,7 +21,7 @@ static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 /// (the process quits without showing anything); a missing event means the same to it.
 #[derive(Debug)]
 pub struct ArmedPopup {
-    child: Child,
+    child: Process,
     /// Manual-reset events, in [`ArmedSignal::ALL`] order.
     events: Vec<HANDLE>,
     signaled: bool,
@@ -46,12 +46,9 @@ impl ArmedPopup {
                 }
             }
         }
-        let mut cmd = std::process::Command::new(exe);
-        cmd.args(args).arg(cli::ARMED).arg(&name);
-        if let Some(dir) = exe.parent() {
-            cmd.current_dir(dir);
-        }
-        match cmd.spawn() {
+        let mut args = args.to_vec();
+        args.extend([cli::ARMED.to_string(), name]);
+        match spawn_quiet(exe, &args) {
             Ok(child) => Ok(Self {
                 child,
                 events,
@@ -66,8 +63,8 @@ impl ArmedPopup {
 
     /// Whether the process still runs (it quits by itself only when the core is gone or after a
     /// long wait without any signal).
-    pub fn alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+    pub fn alive(&self) -> bool {
+        self.child.alive()
     }
 
     /// Tells the process what to do. `Activate` also lets it take the foreground. Keep the value
@@ -82,7 +79,7 @@ impl ArmedPopup {
     fn set(&mut self, signal: ArmedSignal) {
         if signal == ArmedSignal::Activate {
             // SAFETY: plain call. Failure only means the popup may open behind.
-            let _ = unsafe { AllowSetForegroundWindow(self.child.id()) };
+            let _ = unsafe { AllowSetForegroundWindow(self.child.pid) };
         }
         let i = ArmedSignal::ALL
             .iter()
