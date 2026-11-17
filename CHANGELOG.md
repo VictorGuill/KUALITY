@@ -2,12 +2,23 @@
 
 All notable changes to Kuality. Versions follow [Semantic Versioning](https://semver.org); each `## [x.y.z]` section becomes the notes of the GitHub Release tagged `vx.y.z` (keep one line per paragraph or bullet: release notes keep line breaks).
 
-## [Unreleased]
+## [1.1.1] - 2026-11-17
 
 ### Changed
 
 - **Faster popups** — the to-do list now opens on hover almost at once: Kuality starts it in the background as soon as the mouse reaches `TO DO`, and it appears about 0.1 s later (was 250 ms plus the time to start, about 0.4 s). A click on `TO DO` while the mouse rests there opens it faster too, and the "loading" cursor no longer shows next to the pointer. The clipboard history (Hyper+V) also opens a little faster.
 - **Clipboard history** — the popup now opens with your latest copy selected instead of the first pinned entry, so Enter pastes what you just copied.
+
+### Upgrading
+
+Kuality 1.1.0 shows a notification: click it (or tray → **Check for updates**, then **Install update**). Your settings are kept.
+
+### Downloads
+
+- `Kuality-1.1.1-setup.exe` — installer (per user, no admin rights needed).
+- `Kuality-1.1.1-portable.zip` — unzip anywhere and run `kuality.exe`.
+
+The files are not code-signed yet: Windows SmartScreen may show "Windows protected your PC". Click **More info → Run anyway**. Checksums are in `SHA256SUMS.txt`.
 
 ## [1.1.0] - 2026-11-16
 
